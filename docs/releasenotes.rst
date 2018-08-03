@@ -1,8 +1,59 @@
 Release notes
 =============
 
+Version 2.7.1 GA, 4 July 2018
+-----------------------------
+
+Improvements
+~~~~~~~~~~~~
+* improved wildcards performance on matching multiple documents at PQ
+* support for fullscan queries at PQ
+* support for MVA attributes at PQ
+* regexp and RLP support for percolate indexes
+
+Bugfixes
+~~~~~~~~
+* `688562 <https://github.com/manticoresoftware/manticoresearch/commit/68856261b41f6950666f9e5122726839fb3c71d0>`__ fixed loose of query string
+* `0f1770 <https://github.com/manticoresoftware/manticoresearch/commit/0f1770943cba53bfd2e0edfdf0b1495ff0dd0e89>`__ fixed empty info at SHOW THREADS statement
+* `53faa3 <https://github.com/manticoresoftware/manticoresearch/commit/53faa36a916bb87868e83aa79c1a1f972fb20ca0>`__ fixed crash on matching with NOTNEAR operator
+* `26029a <https://github.com/manticoresoftware/manticoresearch/commit/26029a7cd77b518fb3a27588d7db6c8bffc73b0f>`__ fixed error message on bad filter to PQ delete
+
+Version 2.7.0 GA, 11 June 2018
+------------------------------
+
+Improvements
+~~~~~~~~~~~~
+* reduced number of syscalls to avoid Meltdown and Spectre patches impact
+* internal rewrite of local index management
+* remote snippets refactor
+* full configuration reload
+* all node connections are now independent
+* proto improvements
+* Windows communication switched from wsapoll to IO completion ports
+* TFO can be used for communication between master and nodes
+* :ref:`SHOW STATUS <show_status_syntax>` now outputs to daemon version and mysql_version_string
+* added `docs_id` option for documents called in CALL PQ. 
+* percolate queries filter can now contain expressions
+* distributed indexes can work with FEDERATED
+* dummy SHOW NAMES COLLATE and :ref:`SET <set>` wait_timeout (for better ProxySQL compatibility)
+
+Bugfixes
+~~~~~~~~
+* `5bcff0 <https://github.com/manticoresoftware/manticoresearch/commit/5bcff05d19e495f1a44f190885b25cbb6f217c4a>`__ fixed  added not equal to tags of PQ
+* `9ebc58 <https://github.com/manticoresoftware/manticoresearch/commit/9ebc58916cd515eaa88da66d0895aebf0d1f2b5f>`__ fixed added document id field to JSON document CALL PQ statement
+* `8ae0e5 <https://github.com/manticoresoftware/manticoresearch/commit/8ae0e593a286110d8505d88baa3ac9e433cb38c9>`__ fixed flush statement handlers to PQ index
+* `c24b15 <https://github.com/manticoresoftware/manticoresearch/commit/c24b152344ecd77661566cddb803487f51d3c1aa>`__ fixed PQ filtering on JSON and string attributes
+* `1b8bdd <https://github.com/manticoresoftware/manticoresearch/commit/1b8bdde19aaa362785ea4c33bdc019154f8fbac4>`__ fixed parsing of empty JSON string
+* `1ad8a0 <https://github.com/manticoresoftware/manticoresearch/commit/1ad8a07dbfc1131913a8d92c261fbb48f934e8b7>`__ fixed crash at multi-query with OR filters
+* `69b898 <https://github.com/manticoresoftware/manticoresearch/commit/69b89806380a229e36287ad9daf6f0ea2b5453eb>`__ fixed indextool to use config common section (lemmatizer_base option) for commands (dumpheader)
+* `6dbeaf <https://github.com/manticoresoftware/manticoresearch/commit/6dbeaf2389d2af6a9dfccb56bfc986685b9f203e>`__ fixed empty string at result set and filter
+* `39c4eb <https://github.com/manticoresoftware/manticoresearch/commit/39c4eb55ecc85f6dd54f6c8c6d6dfcf87fd8748e>`__ fixed negative document id values
+* `266b70 <https://github.com/manticoresoftware/manticoresearch/commit/266b7054f98e7d30fc2829b5c2467dc9f90def92>`__ fixed word clip length for very long words indexed
+* `47823b <https://github.com/manticoresoftware/manticoresearch/commit/47823b0bd06cbd016a24345c99bb8693790b43dd>`__ fixed matching multiple documents of wildcard queries at PQ
+
+
 Version 2.6.4 GA, 3 May 2018
---------------------------------
+----------------------------
 
 Features and improvements
 ~~~~~~~~~~~~~~~~~~~~~~~~~

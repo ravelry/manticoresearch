@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -206,11 +203,7 @@ public:
 
 CSphString sphXQNodeToStr ( const XQNode_t * pNode );
 CSphString sphXQNodeGetExtraStr ( const XQNode_t * pNode );
-CSphString sphExplainQuery ( const XQNode_t * pNode, const CSphSchema & tSchema, const CSphVector<CSphString> & dZones );
+CSphString sphExplainQuery ( const XQNode_t * pNode, const CSphSchema & tSchema, const StrVec_t & dZones );
 CSphString sphExplainQueryBrief ( const XQNode_t * pNode, const CSphSchema & tSchema );
 
 #endif // _sphinxsearch_
-
-//
-// $Id$
-//

@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -43,9 +40,7 @@ void StripStdin ( const char * sIndexAttrs, const char * sRemoveElements )
 		if ( !iLen )
 			break;
 
-		int iPos = dBuffer.GetLength();
-		dBuffer.Resize ( iPos+iLen );
-		memcpy ( &dBuffer[iPos], sBuffer, iLen );
+		dBuffer.Append ((BYTE*)sBuffer, iLen);
 	}
 	dBuffer.Add ( 0 );
 
@@ -65,10 +60,7 @@ void ApplyMorphology ( CSphIndex * pIndex )
 		int iLen = fread ( sBuffer, 1, sizeof(sBuffer), stdin );
 		if ( !iLen )
 			break;
-
-		int iPos = dInBuffer.GetLength();
-		dInBuffer.Resize ( iPos+iLen );
-		memcpy ( &dInBuffer[iPos], sBuffer, iLen );
+		dInBuffer.Append ( sBuffer, iLen );
 	}
 	dInBuffer.Add(0);
 	dOutBuffer.Reserve ( dInBuffer.GetLength() );
@@ -84,11 +76,9 @@ void ApplyMorphology ( CSphIndex * pIndex )
 			if ( pDict )
 				pDict->ApplyStemmers ( sToken );
 
-			int iPos = dOutBuffer.GetLength();
 			int iLen = strlen ( (char *)sToken );
 			sToken[iLen] = ' ';
-			dOutBuffer.Resize ( iPos+iLen+1 );
-			memcpy ( &dOutBuffer[iPos], sToken, iLen+1 );
+			dOutBuffer.Append ( sToken, iLen+1 );
 		}
 
 		if ( dOutBuffer.GetLength() )
@@ -119,7 +109,7 @@ void CharsetFold ( CSphIndex * pIndex, FILE * fp )
 	{
 		int iGot = fread ( sBuf1.Begin()+iBuf1, 1, sBuf1.GetLength()-iBuf1, fp );
 		if ( iGot<0 )
-			sphDie ( "read error: %s", strerror(errno) );
+			sphDie ( "read error: %s", strerrorm(errno) );
 
 		if ( iGot==0 )
 			if ( feof(fp) )
@@ -177,7 +167,7 @@ void CharsetFold ( CSphIndex * pIndex, FILE * fp )
 
 //////////////////////////////////////////////////////////////////////////
 
-bool FixupFiles ( const CSphVector<CSphString> & dFiles, CSphString & sError )
+bool FixupFiles ( const StrVec_t & dFiles, CSphString & sError )
 {
 	ARRAY_FOREACH ( i, dFiles )
 	{
@@ -199,33 +189,33 @@ bool FixupFiles ( const CSphVector<CSphString> & dFiles, CSphString & sError )
 
 		if ( ::unlink ( sKlistOld.cstr() )!=0 )
 		{
-			sError.SetSprintf ( "file: '%s', error: '%s'", sKlistOld.cstr(), strerror(errno) );
+			sError.SetSprintf ( "file: '%s', error: '%s'", sKlistOld.cstr(), strerrorm(errno) );
 			return false;
 		}
 
 		if ( ::rename ( sKlistNew.cstr(), sKlistOld.cstr() )!=0 )
 		{
-			sError.SetSprintf ( "files: '%s'->'%s', error: '%s'", sKlistNew.cstr(), sKlistOld.cstr(), strerror(errno) );
+			sError.SetSprintf ( "files: '%s'->'%s', error: '%s'", sKlistNew.cstr(), sKlistOld.cstr(), strerrorm(errno) );
 			return false;
 		}
 
 		int iFD = ::open ( sHeader.cstr(), SPH_O_BINARY | O_RDWR, 0644 );
 		if ( iFD<0 )
 		{
-			sError.SetSprintf ( "file: '%s', error: '%s'", sHeader.cstr(), strerror(errno) );
+			sError.SetSprintf ( "file: '%s', error: '%s'", sHeader.cstr(), strerrorm(errno) );
 			return false;
 		}
 
 		if ( sphSeek ( iFD, -4, SEEK_END )==-1L )
 		{
-			sError.SetSprintf ( "file: '%s', error: '%s'", sHeader.cstr(), strerror(errno) );
+			sError.SetSprintf ( "file: '%s', error: '%s'", sHeader.cstr(), strerrorm(errno) );
 			SafeClose ( iFD );
 			return false;
 		}
 
 		if ( ::write ( iFD, &iCount, 4 )==-1 )
 		{
-			sError.SetSprintf ( "file: '%s', error: '%s'", sHeader.cstr(), strerror(errno) );
+			sError.SetSprintf ( "file: '%s', error: '%s'", sHeader.cstr(), strerrorm(errno) );
 			SafeClose ( iFD );
 			return false;
 		}
@@ -237,7 +227,7 @@ bool FixupFiles ( const CSphVector<CSphString> & dFiles, CSphString & sError )
 }
 
 
-bool DoKlistsOptimization ( int iRowSize, const char * sPath, int iChunkCount, CSphVector<CSphString> & dFiles )
+bool DoKlistsOptimization ( int iRowSize, const char * sPath, int iChunkCount, StrVec_t & dFiles )
 {
 	CSphTightVector<SphDocID_t> dLiveID;
 
@@ -270,7 +260,7 @@ bool DoKlistsOptimization ( int iRowSize, const char * sPath, int iChunkCount, C
 			assert ( uFsize<INT_MAX );
 			if ( uFsize<0 )
 			{
-				fprintf ( stdout, "\nfailed to stat kill-list file, error %s\n", strerror ( errno ) );
+				fprintf ( stdout, "\nfailed to stat kill-list file, error %s\n", strerrorm ( errno ) );
 				return false;
 			}
 
@@ -281,21 +271,18 @@ bool DoKlistsOptimization ( int iRowSize, const char * sPath, int iChunkCount, C
 
 			ARRAY_FOREACH ( i, dKlist )
 			{
-				auto uid = (SphDocID_t)dKlist[i];
-				SphDocID_t * pInLive = sphBinarySearch ( dLiveID.Begin(), &dLiveID.Last(), uid );
-				if ( !pInLive )
+				if ( !dLiveID.BinarySearch ( dKlist[i] ) )
 					dKlist.RemoveFast ( i-- );
 			}
 			dKlist.Sort();
 
 			// 2nd step kill all prev ids by this fresh k-list
 
-			SphDocID_t * pFirstLive = dLiveID.Begin();
-			SphDocID_t * pLastLive = &dLiveID.Last();
+			SphDocID_t * pFirstLive = dLiveID.begin();
+			SphDocID_t * pLastLive = dLiveID.end()-1;
 
-			ARRAY_FOREACH ( i, dKlist )
+			for ( SphDocID_t uID : dKlist )
 			{
-				auto uID = (SphDocID_t)dKlist[i];
 				SphDocID_t * pKilled = sphBinarySearch ( pFirstLive, pLastLive, uID );
 
 				assert ( pKilled );
@@ -320,7 +307,7 @@ bool DoKlistsOptimization ( int iRowSize, const char * sPath, int iChunkCount, C
 		// 3d step write new k-list
 
 		if ( dKlist.GetLength()>0 )
-			wrNew.PutBytes ( dKlist.Begin(), dKlist.GetLength()*sizeof(SphAttr_t) );
+			wrNew.PutBytes ( dKlist.Begin(), dKlist.GetLengthBytes() );
 
 		dKlist.Reset();
 		wrNew.CloseFile();
@@ -337,7 +324,7 @@ bool DoKlistsOptimization ( int iRowSize, const char * sPath, int iChunkCount, C
 				rdAttr.GetBytes ( &uID, DOCINFO_IDSIZE*4 );
 				rdAttr.SkipBytes ( iRowSize*4 );
 
-				if ( sphBinarySearch ( dLiveID.Begin(), dLiveID.Begin()+iWasLive, uID )==NULL )
+				if ( !sphBinarySearch ( dLiveID.Begin(), dLiveID.Begin()+iWasLive, uID ) )
 					dLiveID.Add ( uID );
 			}
 
@@ -365,7 +352,7 @@ struct IDFWord_t
 STATIC_SIZE_ASSERT	( IDFWord_t, 12 );
 
 
-bool BuildIDF ( const CSphString & sFilename, const CSphVector<CSphString> & dFiles, CSphString & sError, bool bSkipUnique )
+bool BuildIDF ( const CSphString & sFilename, const StrVec_t & dFiles, CSphString & sError, bool bSkipUnique )
 {
 	// text dictionaries are ordered alphabetically - we can use that fact while reading
 	// to merge duplicates, calculate total number of occurrences and process bSkipUnique
@@ -521,7 +508,7 @@ bool BuildIDF ( const CSphString & sFilename, const CSphVector<CSphString> & dFi
 }
 
 
-bool MergeIDF ( const CSphString & sFilename, const CSphVector<CSphString> & dFiles, CSphString & sError, bool bSkipUnique )
+bool MergeIDF ( const CSphString & sFilename, const StrVec_t & dFiles, CSphString & sError, bool bSkipUnique )
 {
 	// binary dictionaries are ordered by 64-bit word id, we can use that for merging.
 	// read every file, check repeating word ids, merge if found, write to disk if not
@@ -664,7 +651,7 @@ void OptimizeRtKlists ( const CSphString & sIndex, const CSphConfig & hConf )
 	const int64_t tmStart = sphMicroTimer();
 
 	int iDone = 0;
-	CSphVector<CSphString> dFiles;
+	StrVec_t dFiles;
 
 	hConf["index"].IterateStart ();
 	while ( hConf["index"].IterateNext () )
@@ -1188,7 +1175,7 @@ int main ( int argc, char ** argv )
 	CSphString sDumpHeader, sIndex, sKeyword, sFoldFile;
 	bool bWordid = false;
 	bool bStripPath = false;
-	CSphVector<CSphString> dFiles;
+	StrVec_t dFiles;
 	CSphString sOut;
 	bool bStats = false;
 	bool bSkipUnique = false;
@@ -1649,7 +1636,3 @@ int main ( int argc, char ** argv )
 
 	return 0;
 }
-
-//
-// $Id$
-//

@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2011-2016, Andrew Aksyonoff
 // Copyright (c) 2011-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -1288,7 +1285,7 @@ void sphAotLemmatizeDeUTF8 ( BYTE * pWord )
 	Win1252ToLowercaseUtf8 ( pWord, sBuf );
 }
 
-void sphAotLemmatizeRu ( CSphVector<CSphString> & dLemmas, const BYTE * pWord )
+void sphAotLemmatizeRu ( StrVec_t & dLemmas, const BYTE * pWord )
 {
 	assert ( g_pLemmatizers[AOT_RU] );
 	if ( !IsRussianAlphaUtf8(pWord) )
@@ -1323,7 +1320,7 @@ void sphAotLemmatizeRu ( CSphVector<CSphString> & dLemmas, const BYTE * pWord )
 	dLemmas.Uniq();
 }
 
-void sphAotLemmatizeDe ( CSphVector<CSphString> & dLemmas, const BYTE * pWord )
+void sphAotLemmatizeDe ( StrVec_t & dLemmas, const BYTE * pWord )
 {
 	assert ( g_pLemmatizers[AOT_DE] );
 	if ( !IsGermanAlphaUtf8(pWord) )
@@ -1360,7 +1357,7 @@ void sphAotLemmatizeDe ( CSphVector<CSphString> & dLemmas, const BYTE * pWord )
 }
 
 // generic lemmatize for other languages
-void sphAotLemmatize ( CSphVector<CSphString> & dLemmas, const BYTE * pWord, int iLang )
+void sphAotLemmatize ( StrVec_t & dLemmas, const BYTE * pWord, int iLang )
 {
 	assert ( iLang!=AOT_RU ); // must be processed by the specialized function
 	assert ( g_pLemmatizers[iLang] );
@@ -1766,7 +1763,3 @@ void sphAotShutdown ()
 	for ( auto& pLemmantizer : g_pLemmatizers )
 		SafeDelete ( pLemmantizer );
 }
-
-//
-// $Id$
-//

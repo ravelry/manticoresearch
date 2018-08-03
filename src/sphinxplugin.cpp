@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -181,7 +178,7 @@ void sphPluginInit ( const char * sDir )
 }
 
 
-bool sphPluginParseSpec ( const CSphString & sParams, CSphVector<CSphString> & dParams, CSphString & sError )
+bool sphPluginParseSpec ( const CSphString & sParams, StrVec_t & dParams, CSphString & sError )
 {
 	dParams.Resize ( 0 );
 	sphSplit ( dParams, sParams.cstr(), ":" );
@@ -302,7 +299,7 @@ static PluginLib_c * LoadPluginLibrary ( const char * sLibName, CSphString & sEr
 		sTmpfile.SetSprintf ( "%s/%s.%u", g_sPluginDir.cstr(), sLibName, sphRand() );
 		if ( ::rename ( sLibfile.cstr(), sTmpfile.cstr() ) )
 		{
-			sError.SetSprintf ( "failed to rename file (src=%s, dst=%s, errno=%d, error=%s)", sLibfile.cstr(), sTmpfile.cstr(), errno, strerror(errno) );
+			sError.SetSprintf ( "failed to rename file (src=%s, dst=%s, errno=%d, error=%s)", sLibfile.cstr(), sTmpfile.cstr(), errno, strerrorm(errno) );
 			return nullptr;
 		}
 	}
@@ -321,7 +318,7 @@ static PluginLib_c * LoadPluginLibrary ( const char * sLibName, CSphString & sEr
 	{
 		if ( ::rename ( sTmpfile.cstr(), sLibfile.cstr() ) )
 		{
-			sError.SetSprintf ( "failed to rename file (src=%s, dst=%s, errno=%d, error=%s)", sTmpfile.cstr(), sLibfile.cstr(), errno, strerror(errno) );
+			sError.SetSprintf ( "failed to rename file (src=%s, dst=%s, errno=%d, error=%s)", sTmpfile.cstr(), sLibfile.cstr(), errno, strerrorm(errno) );
 			dlclose ( pHandle );
 			return nullptr;
 		}
@@ -705,7 +702,3 @@ void sphPluginList ( CSphVector<PluginInfo_t> & dResult )
 			p.m_sExtra = UdfReturnType ( ((PluginUDF_c*)v)->m_eRetType );
 	}
 }
-
-//
-// $Id$
-//

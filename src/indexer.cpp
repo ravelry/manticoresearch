@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -45,7 +42,7 @@ static bool			g_bProgress		= true;
 static bool			g_bPrintQueries	= false;
 static bool			g_bKeepAttrs	= false;
 static CSphString	g_sKeepAttrsPath;
-static CSphVector<CSphString> g_dKeepAttrs;
+static StrVec_t		g_dKeepAttrs;
 
 static const char *	g_sBuildStops	= NULL;
 static int				g_iTopStops		= 100;
@@ -206,7 +203,7 @@ public:
 	virtual void		LoadStopwords ( const char *, const ISphTokenizer * ) {}
 	virtual void		LoadStopwords ( const CSphVector<SphWordID_t> & ) {}
 	virtual void		WriteStopwords ( CSphWriter & ) const {}
-	virtual bool		LoadWordforms ( const CSphVector<CSphString> &, const CSphEmbeddedFiles *, const ISphTokenizer *, const char * ) { return true; }
+	virtual bool		LoadWordforms ( const StrVec_t &, const CSphEmbeddedFiles *, const ISphTokenizer *, const char * ) { return true; }
 	virtual void		WriteWordforms ( CSphWriter & ) const {}
 	virtual int			SetMorphology ( const char *, CSphString & ) { return ST_OK; }
 
@@ -1352,6 +1349,7 @@ bool DoMerge ( const CSphConfigSection & hDst, const char * sDst,
 	// need to close attribute files that was mapped with RW access to unlink and rename them on windows
 	pSrc->Dealloc();
 	pDst->Dealloc();
+	pDst->Unlock ();
 
 	// pick up merge result
 	const char * sPath = hDst["path"].cstr();
@@ -1443,7 +1441,7 @@ void SetSignalHandlers ()
 	}
 	if ( !bSignalsSet )
 	{
-		fprintf ( stderr, "sigaction(): %s", strerror(errno) );
+		fprintf ( stderr, "sigaction(): %s", strerrorm(errno) );
 		exit ( 1 );
 	}
 }
@@ -1560,7 +1558,7 @@ bool SendRotate ( const CSphConfig & hConf, bool bForce )
 		{
 		case ESRCH:	fprintf ( stdout, "WARNING: no process found by PID %d.\n", iPID ); break;
 		case EPERM:	fprintf ( stdout, "WARNING: access denied to PID %d.\n", iPID ); break;
-		default:	fprintf ( stdout, "WARNING: kill() error: %s.\n", strerror(errno) ); break;
+		default:	fprintf ( stdout, "WARNING: kill() error: %s.\n", strerrorm(errno) ); break;
 		}
 		return false;
 	}
@@ -1883,7 +1881,7 @@ int main ( int argc, char ** argv )
 	{
 		fpDumpRows = fopen ( sDumpRows.cstr(), "wb+" );
 		if ( !fpDumpRows )
-			sphDie ( "failed to open %s: %s", sDumpRows.cstr(), strerror(errno) );
+			sphDie ( "failed to open %s: %s", sDumpRows.cstr(), strerrorm(errno) );
 	}
 
 	hConf["index"].IterateStart();
@@ -1994,7 +1992,3 @@ int main ( int argc, char ** argv )
 
 	return iExitCode;
 }
-
-//
-// $Id$
-//

@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -170,7 +167,7 @@ void sphPluginSaveState ( CSphWriter & tWriter );
 PluginType_e sphPluginGetType ( const CSphString & s );
 
 /// splits and checks plugin spec string in "mylib.dll:plugname[:options]" format
-bool sphPluginParseSpec ( const CSphString & sParams, CSphVector<CSphString> & dParams, CSphString & sError );
+bool sphPluginParseSpec ( const CSphString & sParams, StrVec_t & dParams, CSphString & sError );
 
 /// check if plugin exists (but do not acquire an instance)
 bool sphPluginExists ( PluginType_e eType, const char * sName );
@@ -198,7 +195,3 @@ bool sphPluginReload ( const char * sName, CSphString & sError );
 void sphPluginList ( CSphVector<PluginInfo_t> & dResult );
 
 #endif // _sphinxplugin_
-
-//
-// $Id$
-//

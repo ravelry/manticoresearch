@@ -1,9 +1,5 @@
 <?php
 
-//
-// $Id$
-//
-
 ini_set ( "display_errors", 1 );
 ini_set ( "error_reporting", (E_ALL | E_STRICT) & ~E_USER_DEPRECATED );
 
@@ -388,12 +384,15 @@ function StartSearchd ( $config_file, $error_file, $pidfile, &$error, $use_watch
 		return 1;
 	}
 
-	$test_mode = '--test';
-	if ( $use_watchdog )
-		$test_mode = '';
+	$extra_params = '';
+	if ( !$use_watchdog )
+		$extra_params .= ' --test';
 
 	if ( isset ( $g_locals['use_pool'] ) && $g_locals['use_pool'] )
-		$test_mode .= ' --test-thd-pool';
+		$extra_params .= ' --test-thd-pool';
+
+	if ( isset ( $g_locals['extra_searchd_options'] ) )
+		$extra_params .= ' ' . $g_locals['extra_searchd_options'];
 
 	$testdir = $g_locals['testdir'];
 	$cd = ( $testdir!='' );
@@ -409,11 +408,11 @@ function StartSearchd ( $config_file, $error_file, $pidfile, &$error, $use_watch
 		// using cmd /c for redirection to work
 		if ( file_exists ( $abs_pidfile ) )
 			unlink ( $abs_pidfile );
-		$process = popen ("start /min cmd /c \"$path --config $abs_config_file --pidfile --console $test_mode > $abs_error_file\"", "r" );
+		$process = popen ("start /min cmd /c \"$path --config $abs_config_file --pidfile --console $extra_params > $abs_error_file\"", "r" );
 		pclose ( $process );
 	}
 	else
-		system ( "$path --config $abs_config_file $test_mode > $abs_error_file", $retval );
+		system ( "$path --config $abs_config_file $extra_params > $abs_error_file", $retval );
 
 	if ($cd)
 		chdir($backdir);
@@ -1669,6 +1668,7 @@ class SphinxConfig
 			$sleep_agent=0;
 			$use_agent=0;
 			$vip_connection=0;
+			$system_cmd = "";
 			if (is_array($query))
 			{
 				foreach ( $query[1] as $k => $v )
@@ -1679,6 +1679,8 @@ class SphinxConfig
 						$sleep_agent = $v;
 					elseif ($k=="vip")
 						$vip_connection = $v;
+					elseif ($k="system")
+						$system_cmd = $v;
 				}
 				$query = $query[0];
 			}
@@ -1721,6 +1723,35 @@ class SphinxConfig
 					return false;
 
 				$r = array("sphinxql"=>$query, "error"=>"reconnected ok!", "errno"=>0);
+				$this->_results[] = $r;
+				if ( IsModelGenMode () )
+					$this->_results_model[$this->SubtestNo ()][] = $r;
+				continue;
+			}
+			
+			if ( !empty($system_cmd) )
+			{
+				$status = '';
+				if ( $system_cmd=="restart-daemon" )
+				{
+					$stop = StopWaitSearchd ('config.conf', 'searchd.pid');
+					$status = 'stop=' . ( $stop==0 ? 'ok' : 'error' ) . ', return code=' . $stop;
+					
+					$start = StartSearchd ( 'config.conf', 'error.txt', 'searchd.pid', $error, false );
+					if ( $start == 0 || $start == 2 )
+					{
+						$status .= "; start=ok" . ', return code=' . $start;
+					} else
+					{
+						$status .=  "; start=failed, return code=" . $start . ", error=" . $error;
+					}
+					mysqli_close($connection);
+					$connection = ConnectSpecificQL($use_agent);
+				} else 
+				{
+					$status = "unsupported command " . $command;
+				}
+				$r = array("sphinxql"=>$system_cmd . " => " . $status);
 				$this->_results[] = $r;
 				if ( IsModelGenMode () )
 					$this->_results_model[$this->SubtestNo ()][] = $r;
@@ -3056,6 +3087,7 @@ class SphinxConfig
 		fwrite ( $fp, "\tmax_children	= $sd_max_children\n" );
 		fwrite ( $fp, "\tpid_file		= ".$this->_sd_pid_file."\n" );
 		fwrite ( $fp, "\tworkers		= $workers\n" );
+		fwrite ( $fp, "#\tbinlog_path		=\n" );
 	}
 
 	function WriteSqlSettings ( $fp, $attributes )

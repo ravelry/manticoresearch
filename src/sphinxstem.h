@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -79,9 +76,9 @@ void	sphAotLemmatize ( BYTE * pWord, int iLang );
 
 // functions below by design used in search time
 /// lemmatize (or guess a normal form) a Russian word, return all lemmas
-void	sphAotLemmatizeRu ( CSphVector<CSphString> & dLemmas, const BYTE * pWord );
-void	sphAotLemmatizeDe ( CSphVector<CSphString> & dLemmas, const BYTE * pWord );
-void	sphAotLemmatize ( CSphVector<CSphString> & dLemmas, const BYTE * pWord, int iLang );
+void	sphAotLemmatizeRu ( StrVec_t & dLemmas, const BYTE * pWord );
+void	sphAotLemmatizeDe ( StrVec_t & dLemmas, const BYTE * pWord );
+void	sphAotLemmatize ( StrVec_t & dLemmas, const BYTE * pWord, int iLang );
 
 /// get lemmatizer dictionary info (file name, crc)
 const CSphNamedInt &	sphAotDictinfo ( int iLang );
@@ -95,7 +92,3 @@ CSphTokenFilter *		sphAotCreateFilter ( ISphTokenizer * pTokenizer, CSphDict * p
 void	sphAotShutdown ();
 
 #endif // _sphinxstem_
-
-//
-// $Id$
-//

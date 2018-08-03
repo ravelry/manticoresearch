@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -54,7 +51,7 @@ public:
 	/// forcibly flush RAM chunk to disk
 	virtual void ForceRamFlush ( bool bPeriodic=false ) = 0;
 
-	/// get time of last flush, 0 means no flush required 
+	/// get time of last flush, 0 means no flush required
 	virtual int64_t GetFlushAge() const = 0;
 
 	/// forcibly save RAM chunk as a new disk chunk
@@ -66,7 +63,7 @@ public:
 	/// truncate index (that is, kill all data)
 	virtual bool Truncate ( CSphString & sError ) = 0;
 
-	virtual void Optimize ( volatile bool * pForceTerminate, ThrottleState_t * pThrottle ) = 0;
+	virtual void Optimize ( ) = 0;
 
 	/// check settings vs current and return back tokenizer and dictionary in case of difference
 	virtual bool IsSameSettings ( CSphReconfigureSettings & tSettings, CSphReconfigureSetup & tSetup, CSphString & sError ) const = 0;
@@ -154,9 +151,6 @@ public:
 	virtual bool	Query ( const char * sQuery, const char * sTags, const CSphVector<CSphFilterSettings> * pFilters, const CSphVector<FilterTreeItem_t> * pFilterTree, bool bReplace, bool bQL, uint64_t & uId, CSphString & sError ) = 0;
 
 	virtual void	GetQueries ( const char * sFilterTags, bool bTagsEq, const CSphFilterSettings * pUID, int iOffset, int iLimit, CSphVector<PercolateQueryDesc> & dQueries ) = 0;
-
-	virtual bool IsSameSettings ( CSphReconfigureSettings & tSettings, CSphReconfigureSetup & tSetup, CSphString & sError ) const = 0;
-	virtual void Reconfigure ( CSphReconfigureSetup & tSetup ) = 0;
 };
 
 /// percolate query index factory
@@ -192,7 +186,3 @@ struct BinlogFlushInfo_t
 void sphReplayBinlog ( const SmallStringHash_T<CSphIndex*> & hIndexes, DWORD uReplayFlags, ProgressCallbackSimple_t * pfnProgressCallback, BinlogFlushInfo_t & tFlush );
 
 #endif // _sphinxrt_
-
-//
-// $Id$
-//

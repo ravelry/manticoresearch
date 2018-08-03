@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -1399,7 +1396,7 @@ static const char * sock_error ()
 	_snprintf ( sBuf, sizeof(sBuf), "WSA error %d", iErr );
 	return sBuf;
 #else
-	return strerror ( errno );
+	return strerrorm ( errno );
 #endif
 }
 
@@ -2669,7 +2666,3 @@ void sphinx_status_destroy ( char ** status, int num_rows, int num_cols )
 		free ( status[i] );
 	free ( status );
 }
-
-//
-// $Id$
-//

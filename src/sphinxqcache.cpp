@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -81,20 +78,6 @@ public:
 Qcache_c						g_Qcache;
 
 //////////////////////////////////////////////////////////////////////////
-
-QcacheEntry_c::QcacheEntry_c()
-	: m_iIndexId ( -1 )
-	, m_tmStarted ( sphMicroTimer() )
-	, m_iElapsedMsec ( 0 )
-	, m_Key ( 0 )
-	, m_iMruPrev ( -1 )
-	, m_iMruNext ( -1 )
-	, m_iTotalMatches ( 0 )
-	, m_uLastDocid ( 0 )
-{
-}
-
-
 void QcacheEntry_c::Append ( SphDocID_t uDocid, DWORD uWeight )
 {
 	m_iTotalMatches++;
@@ -341,7 +324,7 @@ static bool CalcFilterHashes ( CSphVector<uint64_t> & dFilters, const CSphQuery 
 		CSphColumnInfo * pAttr = const_cast<CSphColumnInfo *>(tSorterSchema.GetAttr ( tFS.m_sAttrName.cstr() ));
 		if ( pAttr )
 		{
-			if ( pAttr->m_pExpr.Ptr() )
+			if ( pAttr->m_pExpr )
 			{
 				bool bDisableCaching = false;
 				uFilterHash = pAttr->m_pExpr->GetHash ( tSorterSchema, uFilterHash, bDisableCaching );
@@ -727,7 +710,3 @@ void QcacheDeleteIndex ( int64_t iIndexId )
 {
 	g_Qcache.DeleteIndex ( iIndexId );
 }
-
-//
-// $Id$
-//

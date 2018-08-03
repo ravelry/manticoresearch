@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -52,6 +49,14 @@
 #else
 #define VARIABLE_IS_NOT_USED
 #endif
+
+// cover on strerror
+inline const char * strerrorm ( int errnum )
+{
+	if (errnum==EMFILE)
+		return "Too many open files (on linux see /etc/security/limits.conf, also 'ulimit -n')";
+	return strerror (errnum);
+}
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -184,7 +189,7 @@ public:
 		Switch ( SPH_QSTATE_TOTAL );
 	}
 
-	virtual void			BuildResult ( XQNode_t * pRoot, const CSphSchema & tSchema, const CSphVector<CSphString> & dZones ) = 0;
+	virtual void			BuildResult ( XQNode_t * pRoot, const CSphSchema & tSchema, const StrVec_t & dZones ) = 0;
 	virtual cJSON *			LeakResultAsJson() = 0;
 	virtual const char *	GetResultAsStr() const = 0;
 };
@@ -243,7 +248,6 @@ public:
 
 	bool			IsError () const	{ return m_bError; }
 	SphOffset_t		GetPos () const		{ return m_iPos; }
-	void			SetThrottle ( ThrottleState_t * pState ) { m_pThrottle = pState; }
 
 protected:
 	CSphString		m_sName;
@@ -260,33 +264,29 @@ protected:
 
 	bool			m_bError;
 	CSphString *	m_pError;
-	ThrottleState_t * m_pThrottle;
 
 	virtual void	Flush ();
 };
-
 
 /// file which closes automatically when going out of scope
 class CSphAutofile : ISphNoncopyable
 {
 protected:
-	int			m_iFD;			///< my file descriptor
-	CSphString	m_sFilename;	///< my file name
-	bool		m_bTemporary;	///< whether to unlink this file on Close()
-	bool		m_bWouldTemporary; ///< backup of the m_bTemporary
+	int			m_iFD = -1;					///< my file descriptor
+	CSphString	m_sFilename;				///< my file name
+	bool		m_bTemporary = false;		///< whether to unlink this file on Close()
+	bool		m_bWouldTemporary = false;	///< backup of the m_bTemporary
 
-	CSphIndexProgress *					m_pStat;
+	CSphIndexProgress *	m_pStat = nullptr;
 
 public:
-					CSphAutofile ();
+					CSphAutofile () = default;
 					CSphAutofile ( const CSphString & sName, int iMode, CSphString & sError, bool bTemp=false );
 					~CSphAutofile ();
 
 	int				Open ( const CSphString & sName, int iMode, CSphString & sError, bool bTemp=false );
 	void			Close ();
 	void			SetTemporary(); ///< would be set if a shit happened and the file is not actual.
-
-public:
 	int				GetFD () const { return m_iFD; }
 	const char *	GetFilename () const;
 	SphOffset_t		GetSize ( SphOffset_t iMinSize, bool bCheckSizeT, CSphString & sError );
@@ -340,7 +340,6 @@ public:
 	SphWordID_t	UnzipWordid ()	{ return UnzipOffset(); }
 
 	const CSphReader &	operator = ( const CSphReader & rhs );
-	void		SetThrottle ( ThrottleState_t * pState ) { m_pThrottle = pState; }
 
 protected:
 
@@ -359,7 +358,6 @@ protected:
 	bool		m_bError;
 	CSphString	m_sError;
 	CSphString	m_sFilename;
-	ThrottleState_t * m_pThrottle;
 
 protected:
 	virtual void		UpdateCache ();
@@ -966,25 +964,15 @@ void AttrIndexBuilder_t<DOCID>::FinishCollect ()
 
 struct PoolPtrs_t
 {
-	const DWORD *	m_pMva;
-	const BYTE *	m_pStrings;
-	bool			m_bArenaProhibit;
-
-	PoolPtrs_t ()
-		: m_pMva ( NULL )
-		, m_pStrings ( NULL )
-		, m_bArenaProhibit ( false )
-	{}
+	const DWORD *	m_pMva = nullptr;
+	const BYTE *	m_pStrings = nullptr;
+	bool			m_bArenaProhibit = false;
 };
 
 class CSphTaggedVector
 {
 public:
-	const PoolPtrs_t & operator [] ( int iTag ) const
-	{
-		return m_dPool [ iTag & 0x7FFFFFF ];
-	}
-	PoolPtrs_t & operator [] ( int iTag )
+	PoolPtrs_t & operator [] ( int iTag ) const
 	{
 		return m_dPool [ iTag & 0x7FFFFFF ];
 	}
@@ -1587,7 +1575,7 @@ public:
 	virtual void		LoadStopwords ( const char * sFiles, const ISphTokenizer * pTokenizer ) { m_pDict->LoadStopwords ( sFiles, pTokenizer ); }
 	virtual void		LoadStopwords ( const CSphVector<SphWordID_t> & dStopwords ) { m_pDict->LoadStopwords ( dStopwords ); }
 	virtual void		WriteStopwords ( CSphWriter & tWriter ) const { m_pDict->WriteStopwords ( tWriter ); }
-	virtual bool		LoadWordforms ( const CSphVector<CSphString> & dFiles, const CSphEmbeddedFiles * pEmbedded, const ISphTokenizer * pTokenizer, const char * sIndex ) { return m_pDict->LoadWordforms ( dFiles, pEmbedded, pTokenizer, sIndex ); }
+	virtual bool		LoadWordforms ( const StrVec_t & dFiles, const CSphEmbeddedFiles * pEmbedded, const ISphTokenizer * pTokenizer, const char * sIndex ) { return m_pDict->LoadWordforms ( dFiles, pEmbedded, pTokenizer, sIndex ); }
 	virtual void		WriteWordforms ( CSphWriter & tWriter ) const { m_pDict->WriteWordforms ( tWriter ); }
 	virtual int			SetMorphology ( const char * szMorph, CSphString & sMessage ) { return m_pDict->SetMorphology ( szMorph, sMessage ); }
 
@@ -1721,6 +1709,7 @@ uint64_t sphGetSettingsFNV ( const CSphIndexSettings & tSettings );
 /// value container for the intset uservar type
 class UservarIntSet_c : public CSphVector<SphAttr_t>, public ISphRefcountedMT
 {
+	~UservarIntSet_c() = default;
 };
 
 extern UservarIntSet_c * ( *g_pUservarsHook )( const CSphString & sUservar );
@@ -1749,19 +1738,6 @@ struct SphStringSorterRemap_t
 	CSphAttrLocator m_tDst;
 };
 
-struct ThrottleState_t
-{
-	int64_t	m_tmLastIOTime;
-	int		m_iMaxIOps;
-	int		m_iMaxIOSize;
-
-	ThrottleState_t ()
-		: m_tmLastIOTime ( 0 )
-		, m_iMaxIOps ( 0 )
-		, m_iMaxIOSize ( 0 )
-	{}
-};
-
 const BYTE *	SkipQuoted ( const BYTE * p );
 
 bool			sphSortGetStringRemap ( const ISphSchema & tSorterSchema, const ISphSchema & tIndexSchema, CSphVector<SphStringSorterRemap_t> & dAttrs );
@@ -1772,12 +1748,13 @@ void			sphColumnToLowercase ( char * sVal );
 bool			sphCheckQueryHeight ( const struct XQNode_t * pRoot, CSphString & sError );
 void			sphTransformExtendedQuery ( XQNode_t ** ppNode, const CSphIndexSettings & tSettings, bool bHasBooleanOptimization, const ISphKeywordsStat * pKeywords );
 void			TransformAotFilter ( XQNode_t * pNode, const CSphWordforms * pWordforms, const CSphIndexSettings& tSettings );
-bool			sphMerge ( const CSphIndex * pDst, const CSphIndex * pSrc, const CSphVector<SphDocID_t> & dKillList, CSphString & sError, CSphIndexProgress & tProgress, ThrottleState_t * pThrottle, volatile bool * pGlobalStop, volatile bool * pLocalStop, bool bSrcSettings );
+bool			sphMerge ( const CSphIndex * pDst, const CSphIndex * pSrc, const CSphVector<SphDocID_t> & dKillList, CSphString & sError, CSphIndexProgress & tProgress, volatile bool * pLocalStop, bool bSrcSettings );
 CSphString		sphReconstructNode ( const XQNode_t * pNode, const CSphSchema * pSchema );
 int				ExpandKeywords ( int iIndexOpt, QueryOption_e eQueryOpt, const CSphIndexSettings & tSettings );
 bool			ParseMorphFields ( const CSphString & sMorphology, const CSphString & sMorphFields, const CSphVector<CSphColumnInfo> & dFields, CSphBitvec & tMorphFields, CSphString & sError );
 
 void			sphSetUnlinkOld ( bool bUnlink );
+bool			sphGetUnlinkOld ();
 void			sphUnlinkIndex ( const char * sName, bool bForce );
 
 void			WriteSchema ( CSphWriter & fdInfo, const CSphSchema & tSchema );
@@ -1791,13 +1768,12 @@ void			LoadDictionarySettings ( CSphReader & tReader, CSphDictSettings & tSettin
 void			LoadFieldFilterSettings ( CSphReader & tReader, CSphFieldFilterSettings & tFieldFilterSettings );
 void			SaveFieldFilterSettings ( CSphWriter & tWriter, const ISphFieldFilter * pFieldFilter );
 
-DWORD			ReadVersion ( const char * sPath, CSphString & sError );
 bool			AddFieldLens ( CSphSchema & tSchema, bool bDynamic, CSphString & sError );
 
 /// Get current thread local index - internal do not use
 ISphRtIndex * sphGetCurrentIndexRT();
 
-void			RebalanceWeights ( const CSphFixedVector<int64_t> & dTimers, WORD * pWeights );
+void			RebalanceWeights ( const CSphFixedVector<int64_t> & dTimers, CSphFixedVector<float>& pWeights );
 
 // all indexes should produce same terms for same query
 struct SphWordStatChecker_t
@@ -1825,9 +1801,62 @@ enum ESphExt
 	SPH_EXT_MVP = 9
 };
 
-const char ** sphGetExts ( ESphExtType eType, DWORD uVersion=INDEX_FORMAT_VERSION );
+const char ** sphGetExts ( ESphExtType eType = SPH_EXT_TYPE_CUR, DWORD uVersion=INDEX_FORMAT_VERSION );
 int sphGetExtCount ( DWORD uVersion=INDEX_FORMAT_VERSION );
 const char * sphGetExt ( ESphExtType eType, ESphExt eExt );
+
+/// encapsulates all common actions over index files in general (copy/rename/delete etc.)
+class IndexFiles_c : public ISphNoncopyable
+{
+	DWORD		m_uVersion = INDEX_FORMAT_VERSION;
+	CSphString	m_sIndexName;	// used for information purposes (logs)
+	CSphString	m_sFilename;	// prefix (i.e. folder + index name, excluding extensions)
+	CSphString	m_sLastError;
+	bool		m_bFatal = false; // if fatal fail happened (unable to rename during rollback)
+	CSphString FullPath ( const char * sExt, const char * sSuffix = "", const char * sBase = nullptr );
+
+public:
+	IndexFiles_c() = default;
+	explicit IndexFiles_c ( const CSphString & sBase, DWORD uVersion = INDEX_FORMAT_VERSION )
+		: m_uVersion ( uVersion )
+		, m_sFilename ( sBase )
+	{}
+
+	void InitFrom ( const CSphIndex * pIndex );
+
+	inline void SetName ( const char * sIndex )
+	{
+		m_sIndexName = sIndex;
+	}
+
+	inline void SetBase ( const CSphString & sNewBase )
+	{
+		m_sFilename = sNewBase;
+	}
+
+	inline const CSphString& GetBase() const { return m_sFilename; }
+
+	inline const char * ErrorMsg () const { return m_sLastError.cstr(); }
+	inline bool IsFatal() const { return m_bFatal; }
+
+	// read .sph and adopt index version from there.
+	bool ReadVersion ( const char * sType="" );
+
+	CSphString MakePath ( const char * sSuffix = "", const char * sBase = nullptr );
+
+	bool Rename ( const char * sFrom, const char * sTo );  // move files between different bases
+	bool Rollback ( const char * sBackup, const char * sPath ); // move from backup to path; fail is fatal
+	bool RenameSuffix ( const char * sFromSuffix, const char * sToSuffix="" );  // move files in base between two suffixes
+	bool RenameBase ( const char * sToBase );  // move files to different base
+	bool RenameLock ( const char * sTo, int & iLockFD ); // safely move lock file
+	bool RelocateToNew ( const char * sNewBase ); // relocate to new base and append '.new' suffix
+	bool RollbackSuff ( const char * sBackupSuffix, const char * sActiveSuffix="" ); // move from backup to active; fail is fatal
+	bool HasAllFiles ( const char * sType = "" ); // check that all necessary files are readable
+	void Unlink ( const char * sType = "" );
+
+	// if prev op fails with fatal error - log the message and terminate
+	CSphString FatalMsg(const char * sMsg=nullptr);
+};
 
 int sphDictCmp ( const char * pStr1, int iLen1, const char * pStr2, int iLen2 );
 int sphDictCmpStrictly ( const char * pStr1, int iLen1, const char * pStr2, int iLen2 );
@@ -1940,8 +1969,11 @@ struct SphExpanded_t
 
 struct ISphSubstringPayload
 {
-	ISphSubstringPayload () {}
-	virtual ~ISphSubstringPayload() {}
+	// neither of derivatives uses dynamic data and d-trs.
+//	virtual ~ISphSubstringPayload() {}
+
+	int m_iTotalDocs = 0;
+	int m_iTotalHits = 0;
 };
 
 
@@ -1994,18 +2026,18 @@ struct SuggestResult_t
 	// state
 	CSphVector<char>			m_dTrigrams;
 	// payload
-	void *						m_pWordReader;
-	void *						m_pSegments;
-	bool						m_bMergeWords;
+	void *						m_pWordReader = nullptr;
+	void *						m_pSegments = nullptr;
+	bool						m_bMergeWords = false;
 	// word
 	CSphString		m_sWord;
-	int				m_iLen;
+	int				m_iLen = 0;
 	int				m_dCodepoints[SPH_MAX_WORD_LEN];
-	int				m_iCodepoints;
-	bool			m_bUtf8;
-	bool			m_bHasExactDict;
+	int				m_iCodepoints = 0;
+	bool			m_bUtf8 = false;
+	bool			m_bHasExactDict = false;
 
-	SuggestResult_t () : m_pWordReader ( NULL ), m_pSegments ( NULL ), m_bMergeWords ( false ), m_iLen ( 0 ), m_iCodepoints ( 0 ), m_bUtf8 ( false ), m_bHasExactDict ( false )
+	SuggestResult_t ()
 	{
 		m_dBuf.Reserve ( 8096 );
 		m_dMatched.Reserve ( 512 );
@@ -2093,21 +2125,18 @@ private:
 
 struct ExpansionContext_t
 {
-	const ISphWordlist * m_pWordlist;
-	BYTE * m_pBuf;
-	CSphQueryResultMeta * m_pResult;
-	int m_iMinPrefixLen;
-	int m_iMinInfixLen;
-	int m_iExpansionLimit;
-	bool m_bHasMorphology;
-	bool m_bMergeSingles;
-	CSphScopedPayload * m_pPayloads;
-	ESphHitless m_eHitless;
-	const void * m_pIndexData;
-
-	ExpansionContext_t ();
+	const ISphWordlist * m_pWordlist	= nullptr;
+	BYTE * m_pBuf						= nullptr;
+	CSphQueryResultMeta * m_pResult		= nullptr;
+	int m_iMinPrefixLen					= 0;
+	int m_iMinInfixLen					= 0;
+	int m_iExpansionLimit				= 0;
+	bool m_bHasMorphology				= false;
+	bool m_bMergeSingles				= false;
+	CSphScopedPayload * m_pPayloads		= nullptr;
+	ESphHitless m_eHitless				{SPH_HITLESS_NONE};
+	const void * m_pIndexData			= nullptr;
 };
-
 
 struct GetKeywordsSettings_t
 {
@@ -2270,197 +2299,7 @@ inline int sphUtf8CharBytes ( BYTE uFirst )
 
 //////////////////////////////////////////////////////////////////////////
 
-/// snippet setupper
-/// used by searchd and SNIPPET() function in exprs
-/// should probably be refactored as a single function
-/// a precursor to sphBuildExcerpts() call
-class SnippetContext_t : ISphNoncopyable
-{
-private:
-	CSphScopedPtr<CSphDict> m_tDictCloned;
-	CSphScopedPtr<CSphDict> m_tExactDict;
 
-public:
-	CSphDict * m_pDict;
-	CSphScopedPtr<ISphTokenizer> m_tTokenizer;
-	CSphScopedPtr<CSphHTMLStripper> m_tStripper;
-	ISphTokenizer * m_pQueryTokenizer;
-	XQQuery_t m_tExtQuery;
-	DWORD m_eExtQuerySPZ;
-
-	SnippetContext_t()
-		: m_tDictCloned ( NULL )
-		, m_tExactDict ( NULL )
-		, m_pDict ( NULL )
-		, m_tTokenizer ( NULL )
-		, m_tStripper ( NULL )
-		, m_pQueryTokenizer ( NULL )
-		, m_eExtQuerySPZ ( SPH_SPZ_NONE )
-	{
-	}
-
-	~SnippetContext_t()
-	{
-		SafeDelete ( m_pQueryTokenizer );
-	}
-
-	static CSphDict * SetupExactDict ( const CSphIndexSettings & tSettings, CSphScopedPtr<CSphDict> & tExact, CSphDict * pDict )
-	{
-		// handle index_exact_words
-		if ( !tSettings.m_bIndexExactWords )
-			return pDict;
-
-		tExact = new CSphDictExact ( pDict );
-		return tExact.Ptr();
-	}
-
-	static DWORD CollectQuerySPZ ( const XQNode_t * pNode )
-	{
-		if ( !pNode )
-			return SPH_SPZ_NONE;
-
-		DWORD eSPZ = SPH_SPZ_NONE;
-		if ( pNode->GetOp()==SPH_QUERY_SENTENCE )
-			eSPZ |= SPH_SPZ_SENTENCE;
-		else if ( pNode->GetOp()==SPH_QUERY_PARAGRAPH )
-			eSPZ |= SPH_SPZ_PARAGRAPH;
-
-		ARRAY_FOREACH ( i, pNode->m_dChildren )
-			eSPZ |= CollectQuerySPZ ( pNode->m_dChildren[i] );
-
-		return eSPZ;
-	}
-
-	static bool SetupStripperSPZ ( const CSphIndexSettings & tSettings, const ExcerptQuery_t & q,
-		bool bSetupSPZ, CSphScopedPtr<CSphHTMLStripper> & tStripper, ISphTokenizer * pTokenizer,
-		CSphString & sError )
-	{
-		if ( bSetupSPZ &&
-			( !pTokenizer->EnableSentenceIndexing ( sError ) || !pTokenizer->EnableZoneIndexing ( sError ) ) )
-		{
-			return false;
-		}
-
-
-		if ( q.m_sStripMode=="strip" || q.m_sStripMode=="retain"
-			|| ( q.m_sStripMode=="index" && tSettings.m_bHtmlStrip ) )
-		{
-			// don't strip HTML markup in 'retain' mode - proceed zones only
-			tStripper = new CSphHTMLStripper ( q.m_sStripMode!="retain" );
-
-			if ( q.m_sStripMode=="index" )
-			{
-				if (
-					!tStripper->SetIndexedAttrs ( tSettings.m_sHtmlIndexAttrs.cstr (), sError ) ||
-					!tStripper->SetRemovedElements ( tSettings.m_sHtmlRemoveElements.cstr (), sError ) )
-				{
-					sError.SetSprintf ( "HTML stripper config error: %s", sError.cstr() );
-					return false;
-				}
-			}
-
-			if ( bSetupSPZ )
-			{
-				tStripper->EnableParagraphs();
-			}
-
-			// handle zone(s) in special mode only when passage_boundary enabled
-			if ( bSetupSPZ && !tStripper->SetZones ( tSettings.m_sZones.cstr (), sError ) )
-			{
-				sError.SetSprintf ( "HTML stripper config error: %s", sError.cstr() );
-				return false;
-			}
-		}
-
-		return true;
-	}
-
-	bool Setup ( const CSphIndex * pIndex, const ExcerptQuery_t & tSettings, CSphString & sError )
-	{
-		assert ( pIndex );
-		CSphScopedPtr<CSphDict> tDictCloned ( nullptr );
-		m_pDict = pIndex->GetDictionary();
-		if ( m_pDict->HasState() )
-			m_tDictCloned = m_pDict = m_pDict->Clone();
-
-		// AOT tokenizer works only with query mode
-		if ( pIndex->GetSettings().m_uAotFilterMask &&
-			( !tSettings.m_bHighlightQuery || tSettings.m_bExactPhrase ) )
-		{
-			if ( !tSettings.m_bHighlightQuery )
-				sError.SetSprintf ( "failed to setup AOT with query_mode=0, use query_mode=1" );
-			else
-				sError.SetSprintf ( "failed to setup AOT with exact_phrase, use phrase search operator with query_mode=1" );
-			return false;
-		}
-
-		// OPTIMIZE! do a lightweight indexing clone here
-		if ( tSettings.m_bHighlightQuery && pIndex->GetSettings().m_uAotFilterMask )
-			m_tTokenizer = sphAotCreateFilter ( pIndex->GetTokenizer()->Clone ( SPH_CLONE_INDEX ), m_pDict, pIndex->GetSettings().m_bIndexExactWords, pIndex->GetSettings().m_uAotFilterMask );
-		else
-			m_tTokenizer = pIndex->GetTokenizer()->Clone ( SPH_CLONE_INDEX );
-
-		m_pQueryTokenizer = nullptr;
-		if ( tSettings.m_bHighlightQuery || tSettings.m_bExactPhrase )
-		{
-			m_pQueryTokenizer =	pIndex->GetQueryTokenizer()->Clone ( SPH_CLONE_QUERY_LIGHTWEIGHT );
-		} else
-		{
-			// legacy query mode should handle exact form modifier and star wildcard
-			m_pQueryTokenizer = pIndex->GetTokenizer()->Clone ( SPH_CLONE_INDEX );
-			if ( pIndex->IsStarDict() )
-			{
-				m_pQueryTokenizer->AddPlainChar ( '*' );
-				m_pQueryTokenizer->AddPlainChar ( '?' );
-				m_pQueryTokenizer->AddPlainChar ( '%' );
-			}
-			if ( pIndex->GetSettings().m_bIndexExactWords )
-				m_pQueryTokenizer->AddPlainChar ( '=' );
-		}
-
-		// setup exact dictionary if needed
-		m_pDict = SetupExactDict ( pIndex->GetSettings(), m_tExactDict, m_pDict );
-
-		if ( tSettings.m_bHighlightQuery )
-		{
-			CSphScopedPtr<ISphTokenizer> tTokenizerJson ( nullptr );
-			CSphScopedPtr<QueryParser_i> tParser ( nullptr );
-			if ( !tSettings.m_bJsonQuery )
-			{
-				tParser = sphCreatePlainQueryParser();
-			} else
-			{
-				tTokenizerJson = pIndex->GetQueryTokenizer()->Clone ( SPH_CLONE_QUERY_LIGHTWEIGHT );
-				sphSetupQueryTokenizer ( tTokenizerJson.Ptr(), pIndex->IsStarDict(), pIndex->GetSettings().m_bIndexExactWords, true );
-				tParser = sphCreateJsonQueryParser();
-			}
-			// OPTIMIZE? double lightweight clone here? but then again it's lightweight
-			if ( !tParser->ParseQuery ( m_tExtQuery, tSettings.m_sWords.cstr(), nullptr, m_pQueryTokenizer, tTokenizerJson.Ptr(), &pIndex->GetMatchSchema(), m_pDict, pIndex->GetSettings() ) )
-			{
-				sError = m_tExtQuery.m_sParseError;
-				return false;
-			}
-			if ( m_tExtQuery.m_pRoot )
-				m_tExtQuery.m_pRoot->ClearFieldMask();
-
-			m_eExtQuerySPZ = SPH_SPZ_NONE;
-			m_eExtQuerySPZ |= CollectQuerySPZ ( m_tExtQuery.m_pRoot );
-			if ( m_tExtQuery.m_dZones.GetLength() )
-				m_eExtQuerySPZ |= SPH_SPZ_ZONE;
-
-			if ( pIndex->GetSettings().m_uAotFilterMask )
-				TransformAotFilter ( m_tExtQuery.m_pRoot, m_pDict->GetWordforms(), pIndex->GetSettings() );
-		}
-
-		bool bSetupSPZ = ( tSettings.m_ePassageSPZ!=SPH_SPZ_NONE || m_eExtQuerySPZ!=SPH_SPZ_NONE ||
-			( tSettings.m_sStripMode=="retain" && tSettings.m_bHighlightQuery ) );
-
-		if ( !SetupStripperSPZ ( pIndex->GetSettings(), tSettings, bSetupSPZ, m_tStripper, m_tTokenizer.Ptr(), sError ) )
-			return false;
-
-		return true;
-	}
-};
 
 /// parser to build lowercaser from textual config
 class CSphCharsetDefinitionParser
@@ -2616,6 +2455,7 @@ struct SchemaItemVariant_t
 {
 	int m_iField = -1;
 	int m_iStr = -1;
+	int m_iMva = -1;
 	ESphAttr m_eType = SPH_ATTR_NONE;
 	CSphAttrLocator m_tLoc;
 };
@@ -2642,7 +2482,3 @@ typedef void CrashQuerySet_fn ( const CrashQuery_t & tCrash );
 void CrashQuerySetupHandlers ( CrashQuerySetTop_fn * pSetTop, CrashQueryGet_fn * pGet, CrashQuerySet_fn * pSet );
 
 #endif // _sphinxint_
-
-//
-// $Id$
-//

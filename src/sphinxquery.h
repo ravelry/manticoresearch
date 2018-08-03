@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -281,18 +278,11 @@ struct XQQuery_t : public ISphNoncopyable
 	CSphString				m_sParseError;
 	CSphString				m_sParseWarning;
 
-	CSphVector<CSphString>	m_dZones;
-	XQNode_t *				m_pRoot;
-	bool					m_bNeedSZlist;
-	bool					m_bSingleWord;
-
-	/// ctor
-	XQQuery_t ()
-	{
-		m_pRoot = NULL;
-		m_bNeedSZlist = false;
-		m_bSingleWord = false;
-	}
+	StrVec_t				m_dZones;
+	XQNode_t *				m_pRoot = nullptr;
+	bool					m_bNeedSZlist = false;
+	bool					m_bSingleWord = false;
+	bool					m_bEmpty = false;
 
 	/// dtor
 	~XQQuery_t ()
@@ -357,7 +347,7 @@ protected:
 	bool					m_bWasBlended {false};
 
 	CSphVector<XQNode_t*>		m_dSpawned;
-	CSphVector<CSphString>		m_dDestForms;
+	StrVec_t					m_dDestForms;
 	CSphVector<MultiformNode_t>	m_dMultiforms;
 
 	virtual bool	HandleFieldBlockStart ( const char * & pPtr ) = 0;
@@ -397,7 +387,3 @@ void	sphOptimizeBoolean ( XQNode_t ** pXQ, const ISphKeywordsStat * pKeywords );
 int		sphMarkCommonSubtrees ( int iXQ, const XQQuery_t * pXQ );
 
 #endif // _sphinxquery_
-
-//
-// $Id$
-//

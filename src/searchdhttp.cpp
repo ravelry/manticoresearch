@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -529,7 +526,7 @@ class CSphQueryProfileJson : public CSphQueryProfile
 public:
 	virtual					~CSphQueryProfileJson();
 
-	virtual void			BuildResult ( XQNode_t * pRoot, const CSphSchema & tSchema, const CSphVector<CSphString> & dZones );
+	virtual void			BuildResult ( XQNode_t * pRoot, const CSphSchema & tSchema, const StrVec_t & dZones );
 	virtual cJSON *			LeakResultAsJson();
 	virtual const char *	GetResultAsStr() const;
 
@@ -544,7 +541,7 @@ CSphQueryProfileJson::~CSphQueryProfileJson()
 }
 
 
-void CSphQueryProfileJson::BuildResult ( XQNode_t * pRoot, const CSphSchema & tSchema, const CSphVector<CSphString> & /*dZones*/ )
+void CSphQueryProfileJson::BuildResult ( XQNode_t * pRoot, const CSphSchema & tSchema, const StrVec_t & /*dZones*/ )
 {
 	assert ( !m_pResult );
 	m_pResult = sphBuildProfileJson ( pRoot, tSchema );
@@ -582,7 +579,7 @@ public:
 		cJSON_Delete ( m_pQuery );
 	}
 
-	void BuildRequest ( const AgentConn_t & tAgent, CachedOutputBuffer_c & tOut ) const override
+	void BuildRequest ( const AgentConn_t & tAgent, CachedOutputBuffer_c & tOut ) const final
 	{
 		// replace "index" value in the json query
 		cJSON_DeleteItemFromObject ( m_pQuery, "index" );
@@ -611,7 +608,7 @@ public:
 		, m_iWarnings ( iWarnings )
 	{}
 
-	virtual bool ParseReply ( MemInputBuffer_c & tReq, AgentConn_t & ) const
+	bool ParseReply ( MemInputBuffer_c & tReq, AgentConn_t & ) const final
 	{
 		CSphString sEndpoint = tReq.GetString();
 		ESphHttpEndpoint eEndpoint = sphStrToHttpEndpoint ( sEndpoint );
@@ -690,7 +687,7 @@ class HttpHandler_c
 {
 public:
 	HttpHandler_c ( const CSphString & sQuery, int iCID, bool bNeedHttpResponse )
-		: m_sQuery { sQuery }
+		: m_sQuery ( sQuery )
 		, m_iCID ( iCID )
 		, m_bNeedHttpResponse ( bNeedHttpResponse )
 	{}
@@ -1232,7 +1229,7 @@ public:
 private:
 	const OptionsHash_t & m_tOptions;
 
-	bool GotDocuments ( PercolateIndex_i * pIndex, const CSphString & sIndex, const cJSON * pPercolate );
+	bool GotDocuments ( PercolateIndex_i * pIndex, const CSphString & sIndex, const cJSON * pPercolate, bool bVerbose );
 	bool GotQuery ( PercolateIndex_i * pIndex, const CSphString & sIndex, const cJSON * pQuery, const cJSON * pRoot, CSphString * pUID, bool bReplace );
 	bool ListQueries ( PercolateIndex_i * pIndex, const CSphString & sIndex );
 	bool Delete ( PercolateIndex_i * pIndex, const CSphString & sIndex, const cJSON * pRoot );
@@ -1369,26 +1366,6 @@ public:
 	}
 };
 
-class ScopedIndex_c
-{
-	ServedIndex_c * m_pPtr = nullptr;
-
-public:
-	explicit ScopedIndex_c ( ServedIndex_c * pIndex  )
-		: m_pPtr ( pIndex )
-	{}
-
-	ServedIndex_c * Ptr() const { return m_pPtr; }
-	ServedIndex_c * operator -> () const { return m_pPtr; }
-
-	~ScopedIndex_c()
-	{
-		if ( m_pPtr )
-			m_pPtr->Unlock();
-		m_pPtr = nullptr;
-	}
-};
-
 struct SourceMatch_c : public CSphMatch
 {
 	static SphAttr_t ToInt ( const cJSON * pVal )
@@ -1477,6 +1454,20 @@ static void EncodePercolateMatchResult ( const PercolateMatchResult_t & tRes, co
 	AppendJsonKey ( "max_score", tOut );
 	tOut += "1,"; // FIXME!!! track and provide weight
 
+	if ( tRes.m_bVerbose )
+	{
+		AppendJsonKey ( "early_out_queries", tOut );
+		tOut.Appendf ( "%d,", tRes.m_iEarlyOutQueries );
+		AppendJsonKey ( "matched_queries", tOut );
+		tOut.Appendf ( "%d,", tRes.m_iQueriesMatched );
+		AppendJsonKey ( "matched_docs", tOut );
+		tOut.Appendf ( "%d,", tRes.m_iDocsMatched );
+		AppendJsonKey ( "only_terms_queries", tOut );
+		tOut.Appendf ( "%d,", tRes.m_iOnlyTerms );
+		AppendJsonKey ( "total_queries", tOut );
+		tOut.Appendf ( "%d,", tRes.m_iTotalQueries );
+	}
+
 	// documents
 	AppendJsonKey ( "hits", tOut );
 	tOut += "[";
@@ -1547,7 +1538,7 @@ static void EncodePercolateMatchResult ( const PercolateMatchResult_t & tRes, co
 }
 
 
-bool HttpHandlerPQ_c::GotDocuments ( PercolateIndex_i * pIndex, const CSphString & sIndex, const cJSON * pPercolate )
+bool HttpHandlerPQ_c::GotDocuments ( PercolateIndex_i * pIndex, const CSphString & sIndex, const cJSON * pPercolate, bool bVerbose )
 {
 	CSphString sWarning, sError, sTmp;
 	CSphVector<const cJSON *> dDocs;
@@ -1695,7 +1686,7 @@ bool HttpHandlerPQ_c::GotDocuments ( PercolateIndex_i * pIndex, const CSphString
 
 	PercolateMatchResult_t tRes;
 	tRes.m_bGetDocs = true;
-	tRes.m_bVerbose = false;
+	tRes.m_bVerbose = bVerbose;
 	tRes.m_bGetQuery = true;
 	tRes.m_bGetFilters = false;
 
@@ -1930,7 +1921,7 @@ bool HttpHandlerPQ_c::Process()
 	}
 
 	assert ( sEndpoint->Begins ( "json/pq/" ) );
-	CSphVector<CSphString> dPoints;
+	StrVec_t dPoints;
 	sphSplit ( dPoints, sEndpoint->cstr() + sizeof("json/pq/") - 1, "/" );
 	if ( dPoints.GetLength()<2 )
 	{
@@ -1952,20 +1943,19 @@ bool HttpHandlerPQ_c::Process()
 		bMatch = true;
 
 	// get index
-	const ScopedIndex_c tServed ( g_pLocalIndexes->GetRlockedEntry ( sIndex ) );
-	if ( !tServed.Ptr() )
+	ServedDescRPtr_c pServed ( GetServed ( sIndex ) );
+	if ( !pServed )
 	{
-		FormatError ( SPH_HTTP_STATUS_500, "no such index '%s'", sIndex.cstr() );
+		FormatError ( SPH_HTTP_STATUS_500, "no such index '%s'", sIndex.cstr () );
+		return false;
+	}
+	if ( pServed->m_eType!=eITYPE::PERCOLATE || !pServed->m_pIndex )
+	{
+		FormatError ( SPH_HTTP_STATUS_500, "index '%s' is not percolate (enabled=%d)", sIndex.cstr() );
 		return false;
 	}
 
-	if ( !tServed->m_bPercolate || !tServed->m_bEnabled || !tServed->m_pIndex )
-	{
-		FormatError ( SPH_HTTP_STATUS_500, "index '%s' is not percolate (enabled=%d)", sIndex.cstr(), tServed->m_bEnabled );
-		return false;
-	}
-
-	PercolateIndex_i * pIndex = (PercolateIndex_i *)tServed->m_pIndex;
+	auto * pIndex = (PercolateIndex_i *) pServed->m_pIndex;
 
 	if ( m_sQuery.IsEmpty() )
 		return ListQueries ( pIndex, sIndex );
@@ -1995,9 +1985,21 @@ bool HttpHandlerPQ_c::Process()
 		return false;
 	}
 
+	bool bVerbose = false;
+	const cJSON * pVerbose = cJSON_GetObjectItem ( tRoot.Ptr(), "verbose" );
+	if ( pVerbose )
+	{
+		if ( cJSON_IsNumber ( pVerbose ) )
+			bVerbose = ( pVerbose->valuedouble!=0.0 );
+		else if ( cJSON_IsInteger ( pVerbose ) )
+			bVerbose = ( pVerbose->valueint!=0 );
+		else if ( cJSON_IsBool ( pVerbose ) )
+			bVerbose = ( cJSON_IsTrue ( pVerbose )!=0 );
+	}
+
 	if ( bMatch )
 	{
-		return GotDocuments ( pIndex, sIndex, pPerc );
+		return GotDocuments ( pIndex, sIndex, pPerc, bVerbose );
 	} else if ( bDelete )
 	{
 		return Delete ( pIndex, sIndex, tRoot.Ptr() );

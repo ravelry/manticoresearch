@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -52,19 +49,22 @@ inline bool sphIsWild ( T c )
 	return c=='*' || c=='?' || c=='%';
 }
 
-/// my own converter unsigned to sctring. Instanciated for DWORD and uint64_t
+/// my own converter unsigned to string. Instanciated for DWORD and uint64_t
 void sphUItoA ( char ** ppOutput, DWORD uVal, int iBase = 10, int iWidth = 0, int iPrec = 0, char cFill = ' ' );
 
 
 /// string splitter, extracts sequences of alphas (as in sphIsAlpha)
-void sphSplit ( CSphVector<CSphString> & dOut, const char * sIn );
+void sphSplit ( StrVec_t & dOut, const char * sIn );
 
 /// string splitter, splits by the given boundaries
-void sphSplit ( CSphVector<CSphString> & dOut, const char * sIn, const char * sBounds );
+void sphSplit ( StrVec_t & dOut, const char * sIn, const char * sBounds );
 
 /// string wildcard matching (case-sensitive, supports * and ? patterns)
 bool sphWildcardMatch ( const char * sSstring, const char * sPattern, const int * pPattern = NULL );
 
+/// parse size from text (int, or K/M/G/T suffix), or return provided default value.
+/// *ppErr, if provided, will point to parsing error, if any
+int64_t sphGetSize64 ( const char * sValue, char ** ppErr = nullptr, int64_t iDefault=-1 );
 //////////////////////////////////////////////////////////////////////////
 
 /// config section (hash of variant values)
@@ -104,10 +104,10 @@ public:
 };
 
 /// config section type (hash of sections)
-typedef SmallStringHash_T < CSphConfigSection >	CSphConfigType;
+using CSphConfigType = SmallStringHash_T < CSphConfigSection >;
 
 /// config (hash of section types)
-typedef SmallStringHash_T < CSphConfigType >	CSphConfig;
+using CSphConfig = SmallStringHash_T < CSphConfigType >;
 
 /// simple config file
 class CSphConfigParser
@@ -171,8 +171,6 @@ bool			sphFixupIndexSettings ( CSphIndex * pIndex, const CSphConfigSection & hIn
 
 bool			sphInitCharsetAliasTable ( CSphString & sError );
 
-bool sphFileGetContents ( const char * szFileName, CSphVector<BYTE> & dContents );
-
 const char * sphBigramName ( ESphBigram eType );
 
 enum ESphLogLevel
@@ -182,18 +180,25 @@ enum ESphLogLevel
 	SPH_LOG_INFO	= 2,
 	SPH_LOG_DEBUG	= 3,
 	SPH_LOG_VERBOSE_DEBUG = 4,
-	SPH_LOG_VERY_VERBOSE_DEBUG = 5
+	SPH_LOG_VERY_VERBOSE_DEBUG = 5,
+	SPH_LOG_MAX = SPH_LOG_VERY_VERBOSE_DEBUG
 };
 
 typedef void ( *SphLogger_fn )( ESphLogLevel, const char *, va_list );
+void sphSetLogger ( SphLogger_fn fnLog );
 
+void sphLogVa ( const char * sFmt, va_list ap, ESphLogLevel eLevel = SPH_LOG_WARNING );
 void sphWarning ( const char * sFmt, ... ) __attribute__((format(printf,1,2))); //NOLINT
 void sphInfo ( const char * sFmt, ... ) __attribute__((format(printf,1,2))); //NOLINT
 void sphLogFatal ( const char * sFmt, ... ) __attribute__((format(printf,1,2))); //NOLINT
 void sphLogDebug ( const char * sFmt, ... ) __attribute__((format(printf,1,2))); //NOLINT
 void sphLogDebugv ( const char * sFmt, ... ) __attribute__((format(printf,1,2))); //NOLINT
 void sphLogDebugvv ( const char * sFmt, ... ) __attribute__((format(printf,1,2))); //NOLINT
-void sphSetLogger ( SphLogger_fn fnLog );
+
+
+// set the prefix to supress the log
+void sphLogSupress ( const char * sPrefix, ESphLogLevel eLevel = SPH_LOG_WARNING );
+void sphLogSupressRemove ( const char * sPrefix, ESphLogLevel eLevel = SPH_LOG_WARNING );
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -268,7 +273,3 @@ public:
 };
 
 #endif // _sphinxutils_
-
-//
-// $Id$
-//

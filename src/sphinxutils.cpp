@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -78,8 +75,9 @@ static char * trim ( char * sLine )
 	return ltrim ( rtrim ( sLine ) );
 }
 
-
-void sphSplit ( CSphVector<CSphString> & dOut, const char * sIn )
+// split alnums by non-alnums symbols
+// (alnums are  [0..9a..zA..Z-_])
+void sphSplit ( StrVec_t & dOut, const char * sIn )
 {
 	if ( !sIn )
 		return;
@@ -103,8 +101,9 @@ void sphSplit ( CSphVector<CSphString> & dOut, const char * sIn )
 	}
 }
 
-
-void sphSplit ( CSphVector<CSphString> & dOut, const char * sIn, const char * sBounds )
+// split by any char from sBounds.
+// if line starts from a bound char, first splitted str will be an empty string
+void sphSplit ( StrVec_t & dOut, const char * sIn, const char * sBounds )
 {
 	if ( !sIn )
 		return;
@@ -115,14 +114,12 @@ void sphSplit ( CSphVector<CSphString> & dOut, const char * sIn, const char * sB
 		// skip until the first non-boundary character
 		const char * sNext = p;
 		while ( *p && !strchr ( sBounds, *p ) )
-			p++;
+			++p;
 
 		// add the token, skip the char
 		dOut.Add().SetBinary ( sNext, int (p-sNext) );
-		if ( *p=='\0' )
-			break;
-
-		p++;
+		if ( *p )
+			++p;
 	}
 }
 
@@ -349,6 +346,39 @@ bool sphWildcardMatch ( const char * sString, const char * sPattern, const int *
 }
 
 //////////////////////////////////////////////////////////////////////////
+// cases are covered by (functions, size_parser) gtest_functions.cpp
+int64_t sphGetSize64 ( const char * sValue, char ** ppErr, int64_t iDefault )
+{
+	if ( !sValue )
+		return iDefault;
+
+	if ( !strlen(sValue) )
+		return iDefault;
+
+	char * sEnd;
+	int64_t iRes = strtoll ( sValue, &sEnd, 10 );
+
+	switch ( *sEnd )
+	{
+	case 't': case 'T':
+		iRes *= 1024;
+	case 'g': case 'G':
+		iRes *= 1024;
+	case 'm': case 'M':
+		iRes *= 1024;
+	case 'k': case 'K':
+		iRes *= 1024;
+		++sEnd;
+	case '\0':
+		break;
+	default:
+		// an error happened; write address to ppErr
+		if ( ppErr )
+			*ppErr = sEnd;
+		iRes = iDefault;
+	}
+	return iRes;
+}
 
 int64_t CSphConfigSection::GetSize64 ( const char * sKey, int64_t iDefault ) const
 {
@@ -356,39 +386,14 @@ int64_t CSphConfigSection::GetSize64 ( const char * sKey, int64_t iDefault ) con
 	if ( !pEntry )
 		return iDefault;
 
-	char sMemLimit[256];
-	strncpy ( sMemLimit, pEntry->cstr(), sizeof(sMemLimit) );
-	sMemLimit [ sizeof(sMemLimit)-1 ] = '\0';
+	char * sErr = nullptr;
+	auto iRes = sphGetSize64 ( pEntry->cstr(), &sErr, iDefault );
 
-	size_t iLen = strlen ( sMemLimit );
-	if ( !iLen )
-		return iDefault;
-
-	iLen--;
-	int iScale = 1;
-	if ( toupper ( sMemLimit[iLen] )=='K' )
-	{
-		iScale = 1024;
-		sMemLimit[iLen] = '\0';
-
-	} else if ( toupper ( sMemLimit[iLen] )=='M' )
-	{
-		iScale = 1048576;
-		sMemLimit[iLen] = '\0';
-	}
-
-	char * sErr;
-	int64_t iRes = strtoll ( sMemLimit, &sErr, 10 );
-
-	if ( !*sErr )
-	{
-		iRes *= iScale;
-	} else
+	if ( sErr && *sErr )
 	{
 		sphWarning ( "'%s = %s' parse error '%s'", sKey, pEntry->cstr(), sErr );
 		iRes = iDefault;
 	}
-
 	return iRes;
 }
 
@@ -642,6 +647,7 @@ static KeyDesc_t g_dKeysSearchd[] =
 	{ "mva_updates_pool",		0, NULL },
 	{ "max_filters",			0, NULL },
 	{ "max_filter_values",		0, NULL },
+	{ "max_open_files",			0, NULL },
 	{ "listen_backlog",			0, NULL },
 	{ "listen_tfo",				0, NULL },
 	{ "read_buffer",			0, NULL },
@@ -859,7 +865,7 @@ bool TryToExec ( char * pBuffer, const char * szFilename, CSphVector<char> & dRe
 
 	if ( pipe ( dPipe ) )
 	{
-		snprintf ( sError, iErrorLen, "pipe() failed (error=%s)", strerror(errno) );
+		snprintf ( sError, iErrorLen, "pipe() failed (error=%s)", strerrorm(errno) );
 		return false;
 	}
 
@@ -899,7 +905,7 @@ bool TryToExec ( char * pBuffer, const char * szFilename, CSphVector<char> & dRe
 
 	} else if ( iChild==-1 )
 	{
-		snprintf ( sError, iErrorLen, "fork failed: [%d] %s", errno, strerror(errno) );
+		snprintf ( sError, iErrorLen, "fork failed: [%d] %s", errno, strerrorm(errno) );
 		return false;
 	}
 
@@ -941,7 +947,7 @@ bool TryToExec ( char * pBuffer, const char * szFilename, CSphVector<char> & dRe
 
 		if ( iResult==-1 && errno!=EINTR )
 		{
-			snprintf ( sError, iErrorLen, "waitpid() failed: [%d] %s", errno, strerror(errno) );
+			snprintf ( sError, iErrorLen, "waitpid() failed: [%d] %s", errno, strerrorm(errno) );
 			return false;
 		}
 	}
@@ -962,7 +968,7 @@ bool TryToExec ( char * pBuffer, const char * szFilename, CSphVector<char> & dRe
 
 	if ( iBytesRead < 0 )
 	{
-		snprintf ( sError, iErrorLen, "pipe read error: [%d] %s", errno, strerror(errno) );
+		snprintf ( sError, iErrorLen, "pipe read error: [%d] %s", errno, strerrorm(errno) );
 		return false;
 	}
 
@@ -1268,28 +1274,6 @@ bool CSphConfigParser::Parse ( const char * sFileName, const char * pBuffer )
 	return true;
 }
 
-
-bool sphFileGetContents ( const char * szFileName, CSphVector<BYTE> & dContents )
-{
-	FILE * pFile = fopen ( szFileName, "rb" );
-	if ( !pFile )
-		return false;
-
-	struct stat st = { 0 };
-	if ( fstat ( fileno ( pFile ), &st )<0 )
-	{
-		fclose ( pFile );
-		return false;
-	}
-
-	dContents.Resize ( (int)st.st_size );
-	auto iRead = fread ( dContents.Begin(), (int)st.st_size, 1, pFile );
-	fclose ( pFile );
-
-	return iRead==1;
-}
-
-
 /////////////////////////////////////////////////////////////////////////////
 
 void sphConfTokenizer ( const CSphConfigSection & hIndex, CSphTokenizerSettings & tSettings )
@@ -1332,7 +1316,7 @@ void sphConfDictionary ( const CSphConfigSection & hIndex, CSphDictSettings & tS
 		if ( !pWordforms->cstr() || !*pWordforms->cstr() )
 			continue;
 
-		CSphVector<CSphString> dFilesFound;
+		StrVec_t dFilesFound;
 
 #if USE_WINDOWS
 		WIN32_FIND_DATA tFFData;
@@ -1615,7 +1599,7 @@ bool sphConfIndex ( const CSphConfigSection & hIndex, CSphIndexSettings & tSetti
 	}
 
 	// aot
-	CSphVector<CSphString> dMorphs;
+	StrVec_t dMorphs;
 	sphSplit ( dMorphs, hIndex.GetStr ( "morphology" ) );
 
 	tSettings.m_uAotFilterMask = 0;
@@ -1631,8 +1615,8 @@ bool sphConfIndex ( const CSphConfigSection & hIndex, CSphIndexSettings & tSetti
 			}
 	}
 
-	bool bPlainRLP = ARRAY_ANY ( bPlainRLP, dMorphs, dMorphs[_any]=="rlp_chinese" );
-	bool bBatchedRLP = ARRAY_ANY ( bBatchedRLP, dMorphs, dMorphs[_any]=="rlp_chinese_batched" );
+	bool bPlainRLP = dMorphs.Contains ( "rlp_chinese" );
+	bool bBatchedRLP = dMorphs.Contains ( "rlp_chinese_batched" );
 
 	if ( bPlainRLP && bBatchedRLP )
 	{
@@ -1660,7 +1644,7 @@ bool sphFixupIndexSettings ( CSphIndex * pIndex, const CSphConfigSection & hInde
 		CSphTokenizerSettings tSettings;
 		sphConfTokenizer ( hIndex, tSettings );
 
-		ISphTokenizer * pTokenizer = ISphTokenizer::Create ( tSettings, NULL, sError );
+		ISphTokenizer * pTokenizer = ISphTokenizer::Create ( tSettings, nullptr, sError );
 		if ( !pTokenizer )
 			return false;
 
@@ -1670,19 +1654,19 @@ bool sphFixupIndexSettings ( CSphIndex * pIndex, const CSphConfigSection & hInde
 
 	if ( !pIndex->GetDictionary () )
 	{
-		CSphDict * pDict = NULL;
+		CSphDict * pDict = nullptr;
 		CSphDictSettings tSettings;
 		if ( bTemplateDict )
 		{
 			sphConfDictionary ( hIndex, tSettings );
-			pDict = sphCreateDictionaryTemplate ( tSettings, NULL, pIndex->GetTokenizer (), pIndex->GetName(), sError );
+			pDict = sphCreateDictionaryTemplate ( tSettings, nullptr, pIndex->GetTokenizer (), pIndex->GetName(), sError );
 			CSphIndexSettings tIndexSettings = pIndex->GetSettings();
 			tIndexSettings.m_uAotFilterMask = sphParseMorphAot ( tSettings.m_sMorphology.cstr() );
 			pIndex->Setup ( tIndexSettings );
 		} else
 		{
 			sphConfDictionary ( hIndex, tSettings );
-			pDict = sphCreateDictionaryCRC ( tSettings, NULL, pIndex->GetTokenizer (), pIndex->GetName(), sError );
+			pDict = sphCreateDictionaryCRC ( tSettings, nullptr, pIndex->GetTokenizer (), pIndex->GetName(), sError );
 		}
 		if ( !pDict )
 		{
@@ -1818,28 +1802,66 @@ static void StdoutLogger ( ESphLogLevel eLevel, const char * sFmt, va_list ap )
 	fprintf ( stdout, "\n" );
 }
 
+static const int MAX_PREFIXES = 10;
+const char * dDisabledLevelLogs[SPH_LOG_MAX+1][MAX_PREFIXES] = {0};
+
+void sphLogSupress ( const char * sNewPrefix, ESphLogLevel eLevel )
+{
+	for ( const char * &sPrefix : dDisabledLevelLogs[eLevel] )
+		if ( !sPrefix )
+		{
+			sPrefix = sNewPrefix;
+			return;
+		} else if ( !strcmp ( sPrefix, sNewPrefix ) )
+			return;
+	// no space, just overwrite the last one
+	dDisabledLevelLogs[eLevel][MAX_PREFIXES-1] = sNewPrefix;
+}
+
+void sphLogSupressRemove ( const char * sDelPrefix, ESphLogLevel eLevel )
+{
+	const char ** ppSource = dDisabledLevelLogs[eLevel];
+	int i = 0;
+	for ( const char *&sPrefix : dDisabledLevelLogs[eLevel] )
+		if ( sPrefix && !strcmp (sDelPrefix, sPrefix) )
+			ppSource[i++] = sPrefix;
+	for (;i<MAX_PREFIXES;++i)
+		dDisabledLevelLogs[eLevel][i] = nullptr;
+}
+
+
 static SphLogger_fn g_pLogger = &StdoutLogger;
 
 inline void Log ( ESphLogLevel eLevel, const char * sFmt, va_list ap )
 {
 	if ( !g_pLogger ) return;
+	for ( const char * sPrefix : dDisabledLevelLogs[eLevel] )
+		if ( sPrefix && !strncmp ( sPrefix, sFmt, strlen ( sPrefix ) ) )
+			return;
+		else if ( !sPrefix )
+			break;
+
 	( *g_pLogger ) ( eLevel, sFmt, ap );
+}
+
+void sphLogVa ( const char * sFmt, va_list ap, ESphLogLevel eLevel )
+{
+	Log ( eLevel, sFmt, ap );
 }
 
 void sphWarning ( const char * sFmt, ... )
 {
 	va_list ap;
 	va_start ( ap, sFmt );
-	Log ( SPH_LOG_WARNING, sFmt, ap );
+	sphLogVa ( sFmt, ap );
 	va_end ( ap );
 }
-
 
 void sphInfo ( const char * sFmt, ... )
 {
 	va_list ap;
 	va_start ( ap, sFmt );
-	Log ( SPH_LOG_INFO, sFmt, ap );
+	sphLogVa ( sFmt, ap, SPH_LOG_INFO );
 	va_end ( ap );
 }
 
@@ -1847,7 +1869,7 @@ void sphLogFatal ( const char * sFmt, ... )
 {
 	va_list ap;
 	va_start ( ap, sFmt );
-	Log ( SPH_LOG_FATAL, sFmt, ap );
+	sphLogVa ( sFmt, ap, SPH_LOG_FATAL );
 	va_end ( ap );
 }
 
@@ -1855,7 +1877,7 @@ void sphLogDebug ( const char * sFmt, ... )
 {
 	va_list ap;
 	va_start ( ap, sFmt );
-	Log ( SPH_LOG_DEBUG, sFmt, ap );
+	sphLogVa ( sFmt, ap, SPH_LOG_DEBUG );
 	va_end ( ap );
 }
 
@@ -1863,7 +1885,7 @@ void sphLogDebugv ( const char * sFmt, ... )
 {
 	va_list ap;
 	va_start ( ap, sFmt );
-	Log ( SPH_LOG_VERBOSE_DEBUG, sFmt, ap );
+	sphLogVa ( sFmt, ap, SPH_LOG_VERBOSE_DEBUG );
 	va_end ( ap );
 }
 
@@ -1871,7 +1893,7 @@ void sphLogDebugvv ( const char * sFmt, ... )
 {
 	va_list ap;
 	va_start ( ap, sFmt );
-	Log ( SPH_LOG_VERY_VERBOSE_DEBUG, sFmt, ap );
+	sphLogVa ( sFmt, ap, SPH_LOG_VERY_VERBOSE_DEBUG );
 	va_end ( ap );
 }
 
@@ -2313,7 +2335,7 @@ void sphBacktrace ( int iFD, bool bSafe )
 		// if we here - execvp failed, ask user to do conversion manually
 		sphSafeInfo ( iFD, "conversion failed (error '%s'):\n"
 			"  1. Run the command provided below over the crashed binary (for example, '%s'):\n"
-			"  2. Attach the source.txt to the bug report.", strerror ( errno ), g_pArgv[SPH_BT_BINARY_NAME] );
+			"  2. Attach the source.txt to the bug report.", strerrorm ( errno ), g_pArgv[SPH_BT_BINARY_NAME] );
 
 		int iColumn = 0;
 		for ( int i=0; g_pArgv[i]!=NULL; i++ )
@@ -2336,7 +2358,7 @@ void sphBacktrace ( int iFD, bool bSafe )
 	} else
 	if ( iChild==-1 )
 	{
-		sphSafeInfo ( iFD, "fork for running execvp failed: [%d] %s", errno, strerror(errno) );
+		sphSafeInfo ( iFD, "fork for running execvp failed: [%d] %s", errno, strerrorm(errno) );
 		return;
 	}
 
@@ -2356,7 +2378,7 @@ void sphBacktrace ( int iFD, bool bSafe )
 
 		if ( iResult==-1 && errno!=EINTR )
 		{
-			sphSafeInfo ( iFD, "waitpid() failed: [%d] %s", errno, strerror(errno) );
+			sphSafeInfo ( iFD, "waitpid() failed: [%d] %s", errno, strerrorm(errno) );
 			return;
 		}
 	} while ( iResult!=iChild );
@@ -2417,22 +2439,16 @@ void sphSetUnlinkOld ( bool bUnlink )
 	g_bUnlinkOld = bUnlink;
 }
 
+bool sphGetUnlinkOld ()
+{
+	return g_bUnlinkOld;
+}
 
 void sphUnlinkIndex ( const char * sName, bool bForce )
 {
 	if ( !( g_bUnlinkOld || bForce ) )
 		return;
-
-	char sFileName[SPH_MAX_FILENAME_LEN];
-
-	// +1 is for .mvp
-	for ( int i=0; i<sphGetExtCount()+1; i++ )
-	{
-		snprintf ( sFileName, sizeof(sFileName), "%s%s", sName, sphGetExts ( SPH_EXT_TYPE_CUR )[i] );
-		// 'mvp' is optional file
-		if ( ::unlink ( sFileName ) && errno!=ENOENT )
-			sphWarning ( "unlink failed (file '%s', error '%s'", sFileName, strerror(errno) );
-	}
+	IndexFiles_c ( sName ).Unlink ();
 }
 
 
@@ -2603,54 +2619,57 @@ bool CSphDynamicLibrary::LoadSymbols ( const char **, void ***, int ) { return f
 
 #endif
 
-
-void RebalanceWeights ( const CSphFixedVector<int64_t> & dTimers, WORD * pWeights )
+// calculate new weights as inverse freqs of timers, giving also small probability to bad timers.
+void RebalanceWeights ( const CSphFixedVector<int64_t> & dTimers, CSphFixedVector<float>& dWeights )
 {
+	// in case of mirror without response still set small probability to it
+	const float fEmptiesPercent = 10.0f;
+
 	assert ( dTimers.GetLength () );
 	float fSum = 0.0;
-	int iCounters = 0;
+	int iAlive = 0;
 
 	// weights are proportional to frequencies (inverse to timers)
-	CSphFixedVector<float> dFrequencies ( dTimers.GetLength() );
+	CSphFixedVector<float> dFrequencies { dTimers.GetLength () };
+
 	ARRAY_FOREACH ( i, dTimers )
 	if ( dTimers[i]>0 )
 	{
-		dFrequencies[i] = (float)1000/dTimers[i];
+		dFrequencies[i] = ( 1.0f / dTimers[i] );
 		fSum += dFrequencies[i];
-		++iCounters;
+		++iAlive;
 	}
 
 	// no statistics, all timers bad, keep previous weights
-	if ( fSum<=0 )
+	if ( !iAlive )
 		return;
 
-	// in case of mirror without response still set small probability to it
-	const float fEmptiesPercent = 0.1f;
-	int iEmpties = dTimers.GetLength() - iCounters;
+	// if one or more bad (empty) timers provided, give fEmptiesPercent frac to all of them,
+	// and also assume fEmptiesPercent/num_of_deads fraq per each of them.
+	int iEmpties = dTimers.GetLength () - iAlive;
+	float fEmptyPercent = 0.0f;
+	if ( iEmpties )
+	{
+		fSum /= (1.0f-fEmptiesPercent*0.01);
+		fEmptyPercent = fEmptiesPercent/iEmpties;
+	}
 
 	// balance weights
-	int64_t iCheck = 0;
+	float fCheck = 0;
 	ARRAY_FOREACH ( i, dFrequencies )
 	{
 		// mirror weight is inverse of timer \ query time
-		float fWeight = dFrequencies[i] / fSum;
-
-		// subtract coef-empty percent to get sum eq to 1.0
-		if ( iEmpties )
-			fWeight = fWeight - fWeight * fEmptiesPercent;
+		float fWeight = 100.0f * dFrequencies[i] / fSum;
 
 		// mirror without response
-		if ( !dTimers[i] )
-			fWeight = fEmptiesPercent / iEmpties;
-		else if ( iCounters==1 ) // case when only one mirror has valid counter
-			fWeight = 1.0f - fEmptiesPercent;
+		if ( dTimers[i]<=0 )
+			fWeight = fEmptyPercent;
 
-		int iWeight = int ( fWeight * 65535.0f );
-		assert ( iWeight>=0 && iWeight<=65535 );
-		pWeights[i] = (WORD)iWeight;
-		iCheck += pWeights[i];
+		assert ( fWeight>=0.0 && fWeight<=100.0 );
+		dWeights[i] = fWeight;
+		fCheck += fWeight;
 	}
-	assert ( iCheck<=65535 );
+	assert ( fCheck<=100.000001 && fCheck>=99.99999);
 }
 
 
@@ -2683,8 +2702,3 @@ void CrashQuerySetupHandlers ( CrashQuerySetTop_fn * pSetTop, CrashQueryGet_fn *
 	g_pCrashQueryGet = pGet;
 	g_pCrashQuerySet = pSet;
 }
-
-
-//
-// $Id$
-//

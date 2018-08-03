@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -31,35 +28,35 @@ struct QcacheMatch_t
 class QcacheEntry_c : public ISphRefcountedMT
 {
 	friend class QcacheRanker_c;
+	~QcacheEntry_c() = default;
 
 public:
-	int64_t						m_iIndexId;
-	int64_t						m_tmStarted;
-	int							m_iElapsedMsec;
+	int64_t						m_iIndexId = -1;
+	int64_t						m_tmStarted { sphMicroTimer() };
+	int							m_iElapsedMsec = 0;
 	CSphVector<uint64_t>		m_dFilters;			///< hashes of the filters that were applied to cached query
-	uint64_t					m_Key;
-	int							m_iMruPrev;
-	int							m_iMruNext;
+	uint64_t					m_Key = 0;
+	int							m_iMruPrev = -1;
+	int							m_iMruNext = -1;
 
 private:
 	static const int			MAX_FRAME_SIZE = 32;
 
 	// commonly used members
-	int							m_iTotalMatches;	///< total matches
+	int							m_iTotalMatches = 0;///< total matches
 	CSphTightVector<BYTE>		m_dData;			///< compressed frames
 	CSphTightVector<int>		m_dWeights;			///< weights table
 
 	// entry build-time only members
 	CSphVector<QcacheMatch_t>	m_dFrame;			///< current compression frame
 	CSphHash<int>				m_hWeights;			///< hashed weights
-	SphDocID_t					m_uLastDocid;		///< last encoded docid
+	SphDocID_t					m_uLastDocid = 0;	///< last encoded docid
 
 public:
-	QcacheEntry_c();
 
 	void						Append ( SphDocID_t uDocid, DWORD uWeight );
 	void						Finish();
-	int							GetSize() const { return sizeof(*this) + m_dFilters.GetSizeBytes() + m_dData.GetSizeBytes() + m_dWeights.GetSizeBytes(); }
+	int							GetSize() const { return sizeof(*this) + m_dFilters.AllocatedBytes () + m_dData.AllocatedBytes () + m_dWeights.AllocatedBytes (); }
 	void						RankerReset();
 
 private:
@@ -89,7 +86,3 @@ void					QcacheSetup ( int64_t iMaxBytes, int iThreshMsec, int iTtlSec );
 void					QcacheDeleteIndex ( int64_t iIndexId );
 
 #endif // _sphinxqcache_
-
-//
-// $Id$
-//

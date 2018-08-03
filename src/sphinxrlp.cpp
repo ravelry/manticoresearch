@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -306,14 +303,14 @@ private:
 		if ( bChinese )
 		{
 			// fixme! maybe surround these chinese text chunks by spaces?
-			memcpy ( m_dCJKBuffer.AddN ( iLen ), pStart, iLen );
+			m_dCJKBuffer.Append ( pStart, iLen );
 		} else
 		{
 			// store non-chinese content
 			TextChunk_t & tChunk = m_dNonCJKChunks.Add();
 			tChunk.m_iStart = m_dNonCJKBuffer.GetLength ();
 			tChunk.m_iLength = iLen;
-			memcpy ( m_dNonCJKBuffer.AddN(iLen), pStart, iLen );
+			m_dNonCJKBuffer.Append ( pStart, iLen );
 
 			// copy marker to chinese buffer
 			COPY_MARKER ( m_dCJKBuffer.AddN ( PROXY_MARKER_LEN + 2 ), m_pMarkerChunkSeparator );
@@ -609,8 +606,3 @@ void sphRLPDone()
 }
 
 #endif
-
-
-//
-// $Id$
-//

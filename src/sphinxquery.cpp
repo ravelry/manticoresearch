@@ -1,10 +1,7 @@
 //
-// $Id$
-//
-
-//
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -297,8 +294,7 @@ bool XQParseHelper_c::CheckQuorumProximity ( XQNode_t * pNode )
 	if ( pNode->GetOp()==SPH_QUERY_PROXIMITY && pNode->m_iOpArg<1 )
 		return Error ( "proximity threshold too low (%d)", pNode->m_iOpArg );
 
-	bool bValid = ARRAY_ALL ( bValid, pNode->m_dChildren, CheckQuorumProximity ( pNode->m_dChildren[_all] ) );
-	return bValid;
+	return pNode->m_dChildren.TestAll ( [&] ( XQNode_t * pNode ) { return CheckQuorumProximity ( pNode ); } );
 }
 
 
@@ -456,16 +452,16 @@ void XQParseHelper_c::FixupNulls ( XQNode_t * pNode )
 		// smth AND null = null.
 	} else if ( pNode->GetOp()==SPH_QUERY_AND )
 	{
-		bool bHasNull = ARRAY_ANY ( bHasNull, pNode->m_dChildren, pNode->m_dChildren[_any]->GetOp()==SPH_QUERY_NULL );
-		if ( bHasNull )
+		if ( pNode->m_dChildren.FindFirst (
+			[] ( XQNode_t * pChild ) { return pChild->GetOp ()==SPH_QUERY_NULL; } ) )
 		{
 			pNode->SetOp ( SPH_QUERY_NULL );
-			ARRAY_FOREACH ( i, pNode->m_dChildren )
+			for ( auto &pChild : pNode->m_dChildren )
 			{
-				m_dSpawned.RemoveValue ( pNode->m_dChildren[i] );
-				SafeDelete ( pNode->m_dChildren[i] )
+				m_dSpawned.RemoveValue ( pChild );
+				SafeDelete ( pChild );
 			}
-			pNode->m_dChildren.Reset();
+			pNode->m_dChildren.Reset ();
 		}
 	}
 }
@@ -561,7 +557,8 @@ void XQParseHelper_c::DeleteNodesWOFields ( XQNode_t * pNode )
 			CSphVector<XQNode_t *> dChildren;
 			CollectChildren ( pChild, dChildren );
 #ifndef NDEBUG
-			bool bAllEmpty = ARRAY_ALL ( bAllEmpty, dChildren, dChildren[_all]->m_dSpec.m_dFieldMask.TestAll ( false ) );
+			bool bAllEmpty = dChildren.TestAll (
+				[] ( XQNode_t * pNode ) { return pNode->m_dSpec.m_dFieldMask.TestAll ( false ); } );
 			assert ( pChild->m_dChildren.GetLength()==0 || ( dChildren.GetLength() && bAllEmpty ) );
 #endif
 			if ( dChildren.GetLength() )
@@ -716,7 +713,7 @@ public:
 	int						m_iQuorumFSlash = -1;
 	bool					m_bCheckNumber = false;
 
-	CSphVector<CSphString>	m_dIntTokens;
+	StrVec_t				m_dIntTokens;
 
 	CSphVector < CSphVector<int> >	m_dZoneVecs;
 	CSphVector<XQLimitSpec_t *>		m_dStateSpec;
@@ -976,6 +973,7 @@ XQQuery_t * XQQuery_t::Clone () const
 	pQuery->m_bNeedSZlist = m_bNeedSZlist;
 	pQuery->m_bSingleWord = m_bSingleWord;
 	pQuery->m_pRoot = m_pRoot->Clone();
+	pQuery->m_bEmpty = m_bEmpty;
 
 	return pQuery;
 }
@@ -2005,6 +2003,7 @@ bool sphParseExtendedQuery ( XQQuery_t & tParsed, const char * sQuery, const CSp
 	// moved here from ranker creation
 	// as at that point term expansion could produce many terms from expanded term and this condition got failed
 	tParsed.m_bSingleWord = ( tParsed.m_pRoot && tParsed.m_pRoot->m_dChildren.GetLength()==0 && tParsed.m_pRoot->m_dWords.GetLength()==1 );
+	tParsed.m_bEmpty = qp.m_bEmpty;
 
 	return bRes;
 }
@@ -4494,6 +4493,3 @@ QueryParser_i * sphCreatePlainQueryParser()
 	return new QueryParserPlain_c();
 }
 
-//
-// $Id$
-//
