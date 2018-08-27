@@ -490,11 +490,11 @@ Unix-domain sockets are not supported on Windows.
 listen_tfo
 ~~~~~~~~~~
 
-This setting allows TCP_FASTOPEN flag for all listeners. By default it is 0,
-but it is safe to have it set '1' always.
+This setting allows TCP_FASTOPEN flag for all listeners. By default it is managed by system,
+but may be explicitly switched off by setting to '0'.
 
 For general knowledge about TCP Fast Open extension you can visit Wikipedia.
-Shortly speaking, it allows to eliminate one TCP packages round-trip when establishing
+Shortly speaking, it allows to eliminate one TCP round-trip when establishing
 connection.
 
 In practice using TFO in many situation may optimize client-agent network efficiency
@@ -506,9 +506,9 @@ not the rule. Linux (as most progressive) supports it since 2011, on kernels sta
 (for server side). Windows supports it from some build of Windows 10. Anothers (FreeBSD, MacOS)
 also in game.
 
-For Linux system check variable ``/proc/sys/net/ipv4/tcp_fastopen`` and ensure that bit 1 (which
-manages server side of TFO) is set (i.e. value is 2 or 3). Remote clients, in turn, must have bit 0
-to be set on their side, but this is common default.
+For Linux system daemon checks variable ``/proc/sys/net/ipv4/tcp_fastopen`` and behaves according
+ to it. Bit 0 manages client side, bit 1 rules listeners. By default system has this param set to 1,
+ i.e. clients enabled, listeners disabled.
 
 .. _log:
 
@@ -1269,7 +1269,17 @@ Example:
 
     shutdown_timeout = 5 # wait for up to 5 seconds
 
+.. _shutdown_token:
+
+shutdown_token
+~~~~~~~~~~~~~~
+
+SHA1 hash of the password which is necessary to invoke 'shutdown' command
+from VIP sphinxql connection. Without it :ref:`debug <debug_syntax>` shutdown' subcommand
+will never cause daemon's stop.
+
 .. _snippets_file_prefix:
+
 
 snippets_file_prefix
 ~~~~~~~~~~~~~~~~~~~~
@@ -1398,9 +1408,10 @@ directly or through term expansion) can eventually run out of stack.
 potentially dangerous queries. To process such queries, you can either
 set the thread stack size by using the ``thread_stack`` directive (or
 switch to a different ``workers`` setting if that is possible).
+The setting can take values from 64K to 8M. In case a wrong value is provided, the minimum 64K will be used instead.
 
 A query with N levels of nesting is estimated to require approximately
-30+0.16\*N KB of stack, meaning that the default 64K is enough for
+30+0.16\*N KB of stack, meaning that the minimum 64K is enough for
 queries with upto 250 levels, 150K for upto 700 levels, etc. If the
 stack size limit is not met, ``searchd`` fails the query and reports the
 required stack size in the error message.

@@ -1,7 +1,7 @@
 //
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -103,6 +103,10 @@
 	#define IOPTR(tX) (tX.iov_base)
 	#define IOLEN(tX) (tX.iov_len)
 #endif
+
+// declarations for correct work of code analysis
+#include "sphinxutils.h"
+#include "sphinxint.h"
 
 const char * sphSockError ( int =0 );
 int sphSockGetErrno ();
@@ -308,6 +312,7 @@ public:
 
 public:
 	void Flush() override; // just check integrity before flush
+	bool BlobsEmpty() const { return m_dBlobs.IsEmpty (); }
 
 protected:
 	void StartChunk(); // reserve int in the buf, push it's position
@@ -328,8 +333,11 @@ public:
 	void StartNewChunk ();
 //	void AppendBuf ( SmartOutputBuffer_t &dBuf );
 //	void PrependBuf ( SmartOutputBuffer_t &dBuf );
-	size_t GetIOVec ( CSphVector<sphIovec> &dOut );
+	size_t GetIOVec ( CSphVector<sphIovec> &dOut ) const;
 	void Reset();
+#if USE_WINDOWS
+	void LeakTo ( CSphVector<ISphOutputBuffer *> dOut );
+#endif
 };
 
 class NetOutputBuffer_c : public CachedOutputBuffer_c
@@ -750,6 +758,7 @@ using ServedIndexRefPtr_c = CSphRefcountedPtr<ServedIndex_c>;
 class GuardedHash_c : public ISphNoncopyable
 {
 	friend class RLockedHashIt_c;
+	friend class WLockedHashIt_c;
 	using RefCntHash_t = SmallStringHash_T<ISphRefcountedMT *>;
 
 public:
@@ -779,6 +788,9 @@ public:
 	// returns addreffed value
 	ISphRefcountedMT * Get ( const CSphString &tKey ) const EXCLUDES ( m_tIndexesRWLock );
 
+	// if value not exist, addref and add it. Then act as Get (addref and return by key)
+	ISphRefcountedMT * TryAddThenGet ( ISphRefcountedMT * pValue, const CSphString &tKey ) EXCLUDES ( m_tIndexesRWLock );
+
 	// fake alias to private m_tLock to allow clang thread-safety analysis
 	CSphRwlock * IndexesRWLock () const RETURN_CAPABILITY ( m_tIndexesRWLock )
 	{ return nullptr; }
@@ -786,6 +798,7 @@ public:
 private:
 	int GetLengthUnl () const REQUIRES_SHARED ( m_tIndexesRWLock );
 	void Rlock () const ACQUIRE_SHARED( m_tIndexesRWLock );
+	void Wlock () const ACQUIRE ( m_tIndexesRWLock );
 	void Unlock () const UNLOCK_FUNCTION ( m_tIndexesRWLock );
 
 private:
@@ -797,9 +810,23 @@ private:
 // iterates guarded hash, holding it's readlock
 // that is important, since accidental changing of the hash during iteration
 // may invalidate the iterator, and then cause crash.
+// each iterator has own iteration cookie, so several of them could work in parallel
+
+/* Usage example:
+ * 	for ( RLockedServedIt_c it ( g_pLocalIndexes ); it.Next (); )
+	{
+		auto pIdx = it.Get(); // returns smart pointer to value, addrefed; autorelease on destroy
+		if ( !pIdx )
+			continue;
+		...
+		const CSphString &sIndex = it.GetName (); // returns key value
+	}
+ */
+
 class SCOPED_CAPABILITY RLockedHashIt_c : public ISphNoncopyable
 {
 public:
+	using RefPtr_c = CSphRefcountedPtr<ISphRefcountedMT>;
 	explicit RLockedHashIt_c ( const GuardedHash_c * pHash ) ACQUIRE_SHARED ( pHash->m_tIndexesRWLock
 																		  , m_pHash->m_tIndexesRWLock )
 		: m_pHash ( pHash )
@@ -813,13 +840,13 @@ public:
 	bool Next () REQUIRES_SHARED ( m_pHash->m_tIndexesRWLock )
 	{ return m_pHash->m_hIndexes.IterateNext ( &m_pIterator ); }
 
-	ISphRefcountedMT * Get () REQUIRES_SHARED ( m_pHash->m_tIndexesRWLock )
+	RefPtr_c Get () REQUIRES_SHARED ( m_pHash->m_tIndexesRWLock )
 	{
 		assert ( m_pIterator );
 		auto pRes = GuardedHash_c::RefCntHash_t::IterateGet ( &m_pIterator );
 		if ( pRes )
 			pRes->AddRef ();
-		return pRes;
+		return RefPtr_c ( pRes );
 	}
 
 	const CSphString &GetName () REQUIRES_SHARED ( m_pHash->m_tIndexesRWLock )
@@ -833,6 +860,60 @@ protected:
 	void * m_pIterator = nullptr;
 };
 
+// same as above, but wlocked due to delete() member.
+// since it holds exclusive, rlocked iterator will not co-exist.
+// also it uses hash's internal iteration to allow deletion (it is ok since it is exclusive).
+/* Usage example:
+	for ( WLockedHashIt_c it ( &gAgents ); it.Next (); )
+	{
+		auto pAgent = it.Get (); // returns smart pointer to value, addrefed; autorelease on destroy
+		if ( !pAgent )
+			continue;
+		...
+		it.Delete ();	// it is safe. Delete current item, move iterator back to previous.
+	}
+ */
+class SCOPED_CAPABILITY WLockedHashIt_c : public ISphNoncopyable
+{
+public:
+	explicit WLockedHashIt_c ( GuardedHash_c * pHash ) ACQUIRE ( pHash->m_tIndexesRWLock
+																  , m_pHash->m_tIndexesRWLock )
+		: m_pHash ( pHash )
+	{
+		m_pHash->Wlock ();
+		m_pHash->m_hIndexes.IterateStart ();
+	}
+
+	~WLockedHashIt_c () UNLOCK_FUNCTION ()
+	{
+		m_pHash->Unlock ();
+	}
+
+	bool Next () REQUIRES_SHARED ( m_pHash->m_tIndexesRWLock )
+	{ return m_pHash->m_hIndexes.IterateNext (); }
+
+	ISphRefcountedMT * Get () REQUIRES_SHARED ( m_pHash->m_tIndexesRWLock )
+	{
+		auto pRes = m_pHash->m_hIndexes.IterateGet ();
+		if ( pRes )
+			pRes->AddRef ();
+		return pRes;
+	}
+
+	void Delete () REQUIRES ( m_pHash->m_tIndexesRWLock )
+	{
+		m_pHash->m_hIndexes.Delete ( m_pHash->m_hIndexes.IterateGetKey () );
+	}
+
+	const CSphString &GetName () REQUIRES_SHARED ( m_pHash->m_tIndexesRWLock )
+	{
+		return m_pHash->m_hIndexes.IterateGetKey ();
+	}
+
+protected:
+	GuardedHash_c * m_pHash;
+};
+
 class SCOPED_CAPABILITY RLockedServedIt_c : public RLockedHashIt_c
 {
 public:
@@ -843,7 +924,8 @@ public:
 
 	ServedIndexRefPtr_c Get () REQUIRES_SHARED ( m_pHash->IndexesRWLock() )
 	{
-		return ServedIndexRefPtr_c ( ( ServedIndex_c * ) RLockedHashIt_c::Get () );
+		auto pServed = ( ServedIndex_c * ) RLockedHashIt_c::Get ().Leak ();
+		return ServedIndexRefPtr_c ( pServed );
 	}
 };
 
@@ -912,6 +994,7 @@ enum SqlStmt_e
 	STMT_FLUSH_LOGS,
 	STMT_RELOAD_INDEXES,
 	STMT_SYSFILTERS,
+	STMT_DEBUG,
 
 	STMT_TOTAL
 };

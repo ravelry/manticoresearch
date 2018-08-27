@@ -1,7 +1,7 @@
 //
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -384,7 +384,10 @@ int64_t CSphConfigSection::GetSize64 ( const char * sKey, int64_t iDefault ) con
 {
 	CSphVariant * pEntry = (*this)( sKey );
 	if ( !pEntry )
+	{
+		sphLogDebug ( "'%s' - nothing specified, using default value " INT64_FMT, sKey, iDefault );
 		return iDefault;
+	}
 
 	char * sErr = nullptr;
 	auto iRes = sphGetSize64 ( pEntry->cstr(), &sErr, iDefault );
@@ -402,8 +405,8 @@ int CSphConfigSection::GetSize ( const char * sKey, int iDefault ) const
 	int64_t iSize = GetSize64 ( sKey, iDefault );
 	if ( iSize>INT_MAX )
 	{
-		iSize = INT_MAX;
 		sphWarning ( "'%s = " INT64_FMT "' clamped to %d(INT_MAX)", sKey, iSize, INT_MAX );
+		iSize = INT_MAX;
 	}
 	return (int)iSize;
 }
@@ -700,6 +703,7 @@ static KeyDesc_t g_dKeysSearchd[] =
 	{ "grouping_in_utc",		0, NULL },
 	{ "query_log_mode",			0, NULL },
 	{ "prefer_rotate",			KEY_DEPRECATED, "seamless_rotate" },
+	{ "shutdown_token",			0, NULL },
 	{ NULL,						0, NULL }
 };
 
@@ -1782,10 +1786,10 @@ const char * sphLoadConfig ( const char * sOptConfig, bool bQuiet, CSphConfigPar
 }
 
 //////////////////////////////////////////////////////////////////////////
-
+ESphLogLevel g_eLogLevel = SPH_LOG_INFO;        // current log level, can be changed on the fly
 static void StdoutLogger ( ESphLogLevel eLevel, const char * sFmt, va_list ap )
 {
-	if ( eLevel>=SPH_LOG_DEBUG )
+	if ( eLevel>g_eLogLevel )
 		return;
 
 	switch ( eLevel )
@@ -1793,7 +1797,7 @@ static void StdoutLogger ( ESphLogLevel eLevel, const char * sFmt, va_list ap )
 	case SPH_LOG_FATAL: fprintf ( stdout, "FATAL: " ); break;
 	case SPH_LOG_WARNING: fprintf ( stdout, "WARNING: " ); break;
 	case SPH_LOG_INFO: fprintf ( stdout, "WARNING: " ); break;
-	case SPH_LOG_DEBUG: // yes, I know that this branch will never execute because of the condition above.
+	case SPH_LOG_DEBUG:
 	case SPH_LOG_VERBOSE_DEBUG:
 	case SPH_LOG_VERY_VERBOSE_DEBUG: fprintf ( stdout, "DEBUG: " ); break;
 	}
@@ -1803,7 +1807,7 @@ static void StdoutLogger ( ESphLogLevel eLevel, const char * sFmt, va_list ap )
 }
 
 static const int MAX_PREFIXES = 10;
-const char * dDisabledLevelLogs[SPH_LOG_MAX+1][MAX_PREFIXES] = {0};
+const char * dDisabledLevelLogs[SPH_LOG_MAX+1][MAX_PREFIXES] = {{0}};
 
 void sphLogSupress ( const char * sNewPrefix, ESphLogLevel eLevel )
 {
@@ -2650,7 +2654,7 @@ void RebalanceWeights ( const CSphFixedVector<int64_t> & dTimers, CSphFixedVecto
 	float fEmptyPercent = 0.0f;
 	if ( iEmpties )
 	{
-		fSum /= (1.0f-fEmptiesPercent*0.01);
+		fSum /= (1.0f-fEmptiesPercent*0.01f);
 		fEmptyPercent = fEmptiesPercent/iEmpties;
 	}
 

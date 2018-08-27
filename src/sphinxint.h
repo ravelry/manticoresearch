@@ -1,7 +1,7 @@
 //
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -459,7 +459,7 @@ public:
 	{
 		CSphAttrLocator			m_tLoc;					///< result locator
 		ESphAttr				m_eType { SPH_ATTR_NONE};	///< result type
-		ISphExpr *				m_pExpr = nullptr;		///< evaluator (non-owned)
+		CSphRefcountedPtr<ISphExpr>	m_pExpr;		///< evaluator (non-owned)
 	};
 	CSphVector<CalcItem_t>		m_dCalcFilter;			///< items to compute for filtering
 	CSphVector<CalcItem_t>		m_dCalcSort;			///< items to compute for sorting/grouping
@@ -1709,7 +1709,6 @@ uint64_t sphGetSettingsFNV ( const CSphIndexSettings & tSettings );
 /// value container for the intset uservar type
 class UservarIntSet_c : public CSphVector<SphAttr_t>, public ISphRefcountedMT
 {
-	~UservarIntSet_c() = default;
 };
 
 extern UservarIntSet_c * ( *g_pUservarsHook )( const CSphString & sUservar );
@@ -1969,9 +1968,7 @@ struct SphExpanded_t
 
 struct ISphSubstringPayload
 {
-	// neither of derivatives uses dynamic data and d-trs.
-//	virtual ~ISphSubstringPayload() {}
-
+	virtual ~ISphSubstringPayload() {}
 	int m_iTotalDocs = 0;
 	int m_iTotalHits = 0;
 };
@@ -2113,8 +2110,8 @@ public:
 	CSphScopedPayload () {}
 	~CSphScopedPayload ()
 	{
-		ARRAY_FOREACH ( i, m_dPayloads )
-			SafeDelete ( m_dPayloads[i] );
+		for ( auto & dPayload : m_dPayloads )
+			SafeDelete ( dPayload );
 	}
 	void Add ( ISphSubstringPayload * pPayload ) { m_dPayloads.Add ( pPayload ); }
 
@@ -2327,9 +2324,9 @@ class MatchesToNewSchema_c : public ISphMatchProcessor
 {
 public:
 							MatchesToNewSchema_c ( const ISphSchema * pOldSchema, const ISphSchema * pNewSchema );
-	virtual void			Process ( CSphMatch * pMatch ) override;
+	void					Process ( CSphMatch * pMatch ) final;
 
-protected:
+private:
 	const ISphSchema *		m_pOldSchema;
 	const ISphSchema *		m_pNewSchema;
 	CSphVector<CSphAttrLocator>	m_dNewAttrs;
@@ -2390,7 +2387,8 @@ static const int HASH20_SIZE = 20;
 static const int SHA1_SIZE = HASH20_SIZE;
 class SHA1_c;
 
-
+CSphString BinToHex ( const CSphVector<BYTE> &dHash );
+CSphString CalcSHA1 ( const void * pData, int iLen );
 
 // string and 20-bytes hash
 struct TaggedHash20_t

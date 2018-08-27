@@ -1,7 +1,7 @@
 //
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -101,7 +101,9 @@ const BYTE * ISphExpr::StringEvalPacked ( const CSphMatch & tMatch ) const
 {
 	const BYTE * pStr = nullptr;
 	int iStrLen = StringEval ( tMatch, &pStr );
-	return sphPackPtrAttr ( pStr, iStrLen );
+	auto pRes = sphPackPtrAttr ( pStr, iStrLen );
+	if ( IsDataPtrAttr () ) SafeDeleteArray ( pStr );
+	return pRes;
 }
 
 
@@ -695,7 +697,7 @@ struct Expr_GetWeight_c : public Expr_NoLocator_c
 
 struct Expr_Arglist_c : public ISphExpr
 {
-	CSphVector<ISphExpr *> m_dArgs;
+	VecRefPtrs_t<ISphExpr*> m_dArgs;
 
 	Expr_Arglist_c ( ISphExpr * pLeft, ISphExpr * pRight )
 	{
@@ -705,27 +707,8 @@ struct Expr_Arglist_c : public ISphExpr
 
 	~Expr_Arglist_c () final
 	{
-		ARRAY_FOREACH ( i, m_dArgs )
-			SafeRelease ( m_dArgs[i] );
-	}
-
-	void AddArgs ( ISphExpr * pExpr )
-	{
-		// not an arglist? just add it
-		if ( !pExpr->IsArglist() )
-		{
-			m_dArgs.Add ( pExpr );
-			return;
-		}
-
-		// arglist? take ownership of its args, and dismiss it
-		auto * pArgs = (Expr_Arglist_c *) pExpr;
-		for (auto& dArg : pArgs->m_dArgs )
-		{
-			m_dArgs.Add ( dArg );
-			dArg = nullptr;
-		}
-		SafeRelease ( pExpr );
+		for ( auto& i : m_dArgs )
+			SafeRelease ( i );
 	}
 
 	bool IsArglist () const final
@@ -759,8 +742,8 @@ struct Expr_Arglist_c : public ISphExpr
 
 	void Command ( ESphExprCommand eCmd, void * pArg ) final
 	{
-		ARRAY_FOREACH ( i, m_dArgs )
-			m_dArgs[i]->Command ( eCmd, pArg );
+		for ( auto i : m_dArgs )
+			i->Command ( eCmd, pArg );
 	}
 
 	uint64_t GetHash ( const ISphSchema &, uint64_t, bool & ) final
@@ -768,23 +751,37 @@ struct Expr_Arglist_c : public ISphExpr
 		assert ( 0 && "internal error: GetHash() must not be explicitly called on arglist" );
 		return 0;
 	}
+
+private:
+	void AddArgs ( ISphExpr * pExpr )
+	{
+		// not an arglist? just add it
+		if ( !pExpr->IsArglist () )
+		{
+			m_dArgs.Add ( pExpr );
+			SafeAddRef ( pExpr );
+			return;
+		}
+
+		// arglist? take ownership of its args, and dismiss it
+		auto * pArgs = ( Expr_Arglist_c * ) pExpr;
+		m_dArgs.Append ( pArgs->m_dArgs );
+		pArgs->m_dArgs.Reset ();
+	}
 };
 
 //////////////////////////////////////////////////////////////////////////
 
 struct Expr_Unary_c : public ISphExpr
 {
-	ISphExpr *		m_pFirst;
+	CSphRefcountedPtr<ISphExpr>		m_pFirst;
 	const char *	m_szExprName;
 
 	explicit Expr_Unary_c ( const char * szClassName, ISphExpr * pFirst )
 		: m_pFirst ( pFirst )
 		, m_szExprName ( szClassName )
-	{}
-
-	~Expr_Unary_c() override
 	{
-		SafeRelease ( m_pFirst );
+		SafeAddRef ( pFirst );
 	}
 
 	void FixupLocator ( const ISphSchema * pOldSchema, const ISphSchema * pNewSchema ) override
@@ -810,20 +807,17 @@ struct Expr_Unary_c : public ISphExpr
 
 struct Expr_Binary_c : public ISphExpr
 {
-	ISphExpr *		m_pFirst;
-	ISphExpr *		m_pSecond;
+	CSphRefcountedPtr<ISphExpr>		m_pFirst;
+	CSphRefcountedPtr<ISphExpr>		m_pSecond;
 	const char *	m_szExprName;
 
 	explicit Expr_Binary_c ( const char * szClassName, ISphExpr * pFirst, ISphExpr * pSecond )
 		: m_pFirst ( pFirst )
 		, m_pSecond ( pSecond )
 		, m_szExprName ( szClassName )
-	{}
-
-	~Expr_Binary_c() override
 	{
-		SafeRelease ( m_pFirst );
-		SafeRelease ( m_pSecond );
+		SafeAddRef ( pFirst );
+		SafeAddRef ( pSecond );
 	}
 
 	void FixupLocator ( const ISphSchema * pOldSchema, const ISphSchema * pNewSchema ) override
@@ -858,8 +852,10 @@ public:
 
 	int IntEval ( const CSphMatch & tMatch ) const final
 	{
-		const BYTE * pStr;		
-		return m_pFirst->StringEval ( tMatch, &pStr );
+		const BYTE * pStr = nullptr;
+		int iLen = m_pFirst->StringEval ( tMatch, &pStr );
+		if ( m_pFirst->IsDataPtrAttr () ) SafeDeleteArray ( pStr );
+		return iLen;
 	}
 
 	float Eval ( const CSphMatch & tMatch ) const final { return (float)IntEval ( tMatch ); }
@@ -1030,7 +1026,7 @@ struct Expr_JsonField_c : public Expr_WithLocator_c
 {
 protected:
 	const BYTE *			m_pStrings = nullptr;
-	CSphVector<ISphExpr *>	m_dArgs;
+	VecRefPtrs_t<ISphExpr *>	m_dArgs;
 	CSphVector<ESphAttr>	m_dRetTypes;
 
 public:
@@ -1043,12 +1039,6 @@ public:
 		m_dRetTypes.SwapData ( dRetTypes );
 	}
 
-	~Expr_JsonField_c () override
-	{
-		ARRAY_FOREACH ( i, m_dArgs )
-			SafeRelease ( m_dArgs[i] );
-	}
-
 	void Command ( ESphExprCommand eCmd, void * pArg ) final
 	{
 		Expr_WithLocator_c::Command ( eCmd, pArg );
@@ -1057,9 +1047,9 @@ public:
 			m_pStrings = (const BYTE*)pArg;
 		else if ( eCmd==SPH_EXPR_GET_DEPENDENT_COLS && m_iLocator!=-1 )
 			static_cast < CSphVector<int>* > ( pArg )->Add ( m_iLocator );
-		ARRAY_FOREACH ( i, m_dArgs )
-			if ( m_dArgs[i] )
-				m_dArgs[i]->Command ( eCmd, pArg );
+		for ( auto& pExpr : m_dArgs )
+			if ( pExpr )
+				pExpr->Command ( eCmd, pArg );
 	}
 
 	float Eval ( const CSphMatch & ) const final
@@ -1178,7 +1168,6 @@ public:
 		m_sKey = pKey->m_sVal;
 		m_iKeyLen = pKey->m_iLen;
 		m_uKeyBloom = sphJsonKeyMask ( m_sKey.cstr(), m_iKeyLen );
-		SafeRelease ( pArg );
 	}
 
 	void Command ( ESphExprCommand eCmd, void * pArg ) final
@@ -1236,14 +1225,7 @@ public:
 	explicit Expr_JsonFieldConv_c ( ISphExpr * pArg )
 		: m_pArg { pArg }
 	{
-		if ( pArg )
-			pArg->AddRef ();
-	}
-
-	~Expr_JsonFieldConv_c() override
-	{
-		SafeRelease ( m_pArg ); // once - sync with addref
-		SafeRelease ( m_pArg ); // secondary - release ownership
+		SafeAddRef ( pArg );
 	}
 
 	int StringEval ( const CSphMatch & tMatch, const BYTE ** ppStr ) const override
@@ -1279,8 +1261,7 @@ public:
 
 protected:
 	const BYTE *	m_pStrings = nullptr;
-	ISphExpr *		m_pArg;
-
+	CSphRefcountedPtr<ISphExpr>		m_pArg;
 
 	ESphJsonType GetKey ( const BYTE ** ppKey, const CSphMatch & tMatch ) const
 	{
@@ -1533,7 +1514,7 @@ public:
 		return JsonAggr<int64_t> ( eJson, pVal, m_eFunc, nullptr );
 	}
 
-	bool IsDataPtrAttr() const override { return true; }
+	bool IsDataPtrAttr() const final { return true; }
 
 	uint64_t GetHash ( const ISphSchema & tSorterSchema, uint64_t uPrevHash, bool & bDisable ) final
 	{
@@ -1694,7 +1675,7 @@ struct Expr_Iterator_c : Expr_JsonField_c
 
 struct Expr_ForIn_c : public Expr_JsonFieldConv_c
 {
-	ISphExpr * m_pExpr = nullptr;
+	CSphRefcountedPtr<ISphExpr> m_pExpr;
 	bool m_bStrict;
 	bool m_bIndex;
 	mutable uint64_t m_uData = 0;
@@ -1705,11 +1686,6 @@ struct Expr_ForIn_c : public Expr_JsonFieldConv_c
 		, m_bIndex ( bIndex )
 	{}
 
-	~Expr_ForIn_c () final
-	{
-		SafeRelease ( m_pExpr );
-	}
-
 	SphAttr_t * GetRef ()
 	{
 		return (SphAttr_t*)&m_uData;
@@ -1717,6 +1693,11 @@ struct Expr_ForIn_c : public Expr_JsonFieldConv_c
 
 	void SetExpr ( ISphExpr * pExpr )
 	{
+		if ( pExpr==m_pExpr )
+			return;
+
+		SafeAddRef ( pExpr );
+		SafeRelease ( m_pExpr );
 		m_pExpr = pExpr;
 	}
 
@@ -1838,8 +1819,8 @@ struct Expr_StrEq_c : public Expr_Binary_c
 
 	int IntEval ( const CSphMatch & tMatch ) const final
 	{
-		const BYTE * pLeft;
-		const BYTE * pRight;
+		const BYTE * pLeft = nullptr;
+		const BYTE * pRight = nullptr;
 		int iLeft = m_pFirst->StringEval ( tMatch, &pLeft );
 		int iRight = m_pSecond->StringEval ( tMatch, &pRight );
 
@@ -2172,9 +2153,9 @@ DECLARE_BINARY_FLT ( Expr_Atan2_c,	float ( atan2 ( FIRST, SECOND ) ) )
 /// boring base stuff
 struct ExprThreeway_c : public ISphExpr
 {
-	ISphExpr *	m_pFirst;
-	ISphExpr *	m_pSecond;
-	ISphExpr *	m_pThird;
+	CSphRefcountedPtr<ISphExpr>	m_pFirst;
+	CSphRefcountedPtr<ISphExpr>	m_pSecond;
+	CSphRefcountedPtr<ISphExpr>	m_pThird;
 	CSphString	m_sExprName;
 
 	ExprThreeway_c ( const char * szClassName, ISphExpr * pFirst, ISphExpr * pSecond, ISphExpr * pThird )
@@ -2182,13 +2163,10 @@ struct ExprThreeway_c : public ISphExpr
 		, m_pSecond ( pSecond )
 		, m_pThird ( pThird )
 		, m_sExprName ( szClassName )
-	{}
-
-	~ExprThreeway_c() override
 	{
-		SafeRelease ( m_pFirst );
-		SafeRelease ( m_pSecond );
-		SafeRelease ( m_pThird );
+		SafeAddRef ( pFirst );
+		SafeAddRef ( pSecond );
+		SafeAddRef ( pThird );
 	}
 
 	void FixupLocator ( const ISphSchema * pOldSchema, const ISphSchema * pNewSchema ) override
@@ -2239,7 +2217,7 @@ DECLARE_TERNARY ( Expr_Mul3_c,	FIRST*SECOND*THIRD,					INTFIRST*INTSECOND*INTTHI
 		int IntEval ( const CSphMatch & tMatch ) const final \
 		{ \
 			time_t ts = (time_t)INTFIRST;	\
-			struct tm s; \
+			struct tm s = {0}; \
 			localtime_r ( &ts, &s ); \
 			return _expr; \
 		} \
@@ -2261,7 +2239,7 @@ DECLARE_TIMESTAMP ( Expr_Second_c, s.tm_sec )
         int IntEval ( const CSphMatch & tMatch ) const final \
         { \
             time_t ts = (time_t)INTFIRST;    \
-            struct tm s; \
+            struct tm s = {0}; \
             gmtime_r ( &ts, &s ); \
             return _expr; \
         } \
@@ -2346,8 +2324,7 @@ struct UdfCall_t
 
 	~UdfCall_t ()
 	{
-		if ( m_pUdf )
-			m_pUdf->Release();
+		SafeRelease ( m_pUdf );
 		SafeDeleteArray ( m_tArgs.arg_types );
 		SafeDeleteArray ( m_tArgs.arg_values );
 		SafeDeleteArray ( m_tArgs.arg_names );
@@ -3587,6 +3564,7 @@ void ExprParser_t::VariousOptimizationsPass ( int iNode )
 /// optimize subtree
 void ExprParser_t::Optimize ( int iNode )
 {
+	// fixme! m.b. iteratively repeat while something changes?
 	CanonizePass ( iNode );
 	ConstantFoldPass ( iNode );
 	VariousOptimizationsPass ( iNode );
@@ -3627,7 +3605,8 @@ void ExprParser_t::Dump ( int iNode )
 
 
 /// fold arglist into array
-static void FoldArglist ( ISphExpr * pLeft, CSphVector<ISphExpr *> & dArgs )
+/// moves also ownership (so, 1-st param owned by dArgs on exit)
+static void MoveToArgList ( ISphExpr * pLeft, VecRefPtrs_t<ISphExpr *> &dArgs )
 {
 	if ( !pLeft || !pLeft->IsArglist ())
 	{
@@ -3637,8 +3616,13 @@ static void FoldArglist ( ISphExpr * pLeft, CSphVector<ISphExpr *> & dArgs )
 
 	// do we have to pArgs->AddArgs instead?
 	auto * pArgs = (Expr_Arglist_c *)pLeft;
-	Swap ( dArgs, pArgs->m_dArgs );
-	SafeRelease ( pLeft );
+	if ( dArgs.IsEmpty () )
+		dArgs.SwapData ( pArgs->m_dArgs );
+	else {
+		dArgs.Append ( pArgs->m_dArgs );
+		pArgs->m_dArgs.Reset();
+	}
+	SafeRelease ( pArgs );
 }
 
 
@@ -3648,11 +3632,10 @@ using UdfCharptr_fn = char * ( * ) ( SPH_UDF_INIT *, SPH_UDF_ARGS *, char * );
 
 class Expr_Udf_c : public ISphExpr
 {
-public:
-	CSphVector<ISphExpr*>			m_dArgs;
+protected:
+	VecRefPtrs_t<ISphExpr*>			m_dArgs;
 	CSphVector<int>					m_dArgs2Free;
 
-protected:
 	UdfCall_t *						m_pCall;
 	mutable CSphVector<int64_t>		m_dArgvals;
 	mutable char					m_bError = 0;
@@ -3681,9 +3664,6 @@ public:
 		if ( m_pCall->m_pUdf->m_fnDeinit )
 			m_pCall->m_pUdf->m_fnDeinit ( &m_pCall->m_tInit );
 		SafeDelete ( m_pCall );
-
-		ARRAY_FOREACH ( i, m_dArgs )
-			SafeRelease ( m_dArgs[i] );
 	}
 
 	void FillArgs ( const CSphMatch & tMatch ) const
@@ -3735,11 +3715,13 @@ public:
 
 	void FreeArgs() const
 	{
-		ARRAY_FOREACH ( i, m_dArgs2Free )
-		{
-			int iAttr = m_dArgs2Free[i];
+		for ( int iAttr : m_dArgs2Free )
 			SafeDeleteArray ( m_pCall->m_tArgs.arg_values[iAttr] );
-		}
+	}
+
+	void AdoptArgs ( ISphExpr * pArglist )
+	{
+		MoveToArgList ( pArglist, m_dArgs );
 	}
 
 	void FixupLocator ( const ISphSchema * pOldSchema, const ISphSchema * pNewSchema ) override
@@ -3757,8 +3739,8 @@ public:
 		}
 		if ( eCmd==SPH_EXPR_SET_STRING_POOL )
 			m_pStrings = (const BYTE*)pArg;
-		ARRAY_FOREACH ( i, m_dArgs )
-			m_dArgs[i]->Command ( eCmd, pArg );
+		for ( auto& pExpr : m_dArgs )
+			pExpr->Command ( eCmd, pArg );
 	}
 
 	uint64_t GetHash ( const ISphSchema &, uint64_t, bool & bDisable ) override
@@ -3896,8 +3878,9 @@ ISphExpr * ExprParser_t::CreateUdfNode ( int iCall, ISphExpr * pLeft )
 	}
 	if ( pRes )
 	{
+		SafeAddRef ( pLeft );
 		if ( pLeft )
-			FoldArglist ( pLeft, pRes->m_dArgs );
+			pRes->AdoptArgs ( pLeft );
 		m_dUdfCalls[iCall] = nullptr; // evaluator owns it now
 	}
 	return pRes;
@@ -3969,8 +3952,8 @@ ISphExpr * ExprParser_t::CreateExistNode ( const ExprNode_t & tNode )
 class Expr_Contains_c : public ISphExpr
 {
 protected:
-	ISphExpr *	m_pLat;
-	ISphExpr *	m_pLon;
+	CSphRefcountedPtr<ISphExpr>	m_pLat;
+	CSphRefcountedPtr<ISphExpr>	m_pLon;
 
 	static bool Contains ( float x, float y, int n, const float * p )
 	{
@@ -4009,12 +3992,9 @@ public:
 	Expr_Contains_c ( ISphExpr * pLat, ISphExpr * pLon )
 		: m_pLat ( pLat )
 		, m_pLon ( pLon )
-	{}
-
-	~Expr_Contains_c() override
 	{
-		SafeRelease ( m_pLat );
-		SafeRelease ( m_pLon );
+		SafeAddRef ( pLat );
+		SafeAddRef ( pLon );
 	}
 
 	float Eval ( const CSphMatch & tMatch ) const override
@@ -4365,7 +4345,7 @@ class Expr_ContainsExprvec_c : public Expr_Contains_c
 {
 protected:
 	mutable CSphVector<float> m_dPoly;
-	CSphVector<ISphExpr*> m_dExpr;
+	VecRefPtrs_t<ISphExpr*> m_dExpr;
 
 public:
 	Expr_ContainsExprvec_c ( ISphExpr * pLat, ISphExpr * pLon, CSphVector<ISphExpr*> & dExprs )
@@ -4373,12 +4353,6 @@ public:
 	{
 		m_dExpr.SwapData ( dExprs );
 		m_dPoly.Resize ( m_dExpr.GetLength() );
-	}
-
-	~Expr_ContainsExprvec_c() final
-	{
-		ARRAY_FOREACH ( i, m_dExpr )
-			SafeRelease ( m_dExpr[i] );
 	}
 
 	int IntEval ( const CSphMatch & tMatch ) const final
@@ -4414,7 +4388,7 @@ public:
 class Expr_ContainsStrattr_c : public Expr_Contains_c
 {
 protected:
-	ISphExpr * m_pStr;
+	CSphRefcountedPtr<ISphExpr> m_pStr;
 	bool m_bGeo;
 
 public:
@@ -4422,11 +4396,8 @@ public:
 		: Expr_Contains_c (pLat, pLon )
 		, m_pStr ( pStr )
 		, m_bGeo ( bGeo )
-	{}
-
-	~Expr_ContainsStrattr_c() final
 	{
-		SafeRelease ( m_pStr );
+		SafeAddRef ( pStr );
 	}
 
 	static void ParsePoly ( const char * p, int iLen, CSphVector<float> & dPoly )
@@ -4495,22 +4466,31 @@ ISphExpr * ExprParser_t::CreateContainsNode ( const ExprNode_t & tNode )
 	CSphVector<int> dPolyArgs;
 	GatherArgNodes ( m_dNodes[iPoly].m_iLeft, dPolyArgs );
 
+	CSphRefcountedPtr<ISphExpr> pLat { CreateTree ( iLat ) };
+	CSphRefcountedPtr<ISphExpr> pLon { CreateTree ( iLon ) };
+
 	bool bGeoTesselate = ( m_dNodes[iPoly].m_iToken==TOK_FUNC && m_dNodes[iPoly].m_iFunc==FUNC_GEOPOLY2D );
 
 	if ( dPolyArgs.GetLength()==1 && m_dNodes[dPolyArgs[0]].m_iToken==TOK_ATTR_STRING )
-		return new Expr_ContainsStrattr_c ( CreateTree(iLat), CreateTree(iLon), CreateTree ( dPolyArgs[0] ), bGeoTesselate );
+	{
+		CSphRefcountedPtr<ISphExpr> dPolyArgs0 { CreateTree ( dPolyArgs[0] ) };
+		return new Expr_ContainsStrattr_c ( pLat, pLon, dPolyArgs0, bGeoTesselate );
+	}
 
 	if ( dPolyArgs.TestAll ( [&] ( int iArg ) { return IsConst ( &m_dNodes[iArg] ); } ) )
 	{
 		// POLY2D(numeric-consts)
-		return new Expr_ContainsConstvec_c ( CreateTree(iLat), CreateTree(iLon), dPolyArgs, m_dNodes.Begin(), bGeoTesselate );
+		return new Expr_ContainsConstvec_c ( pLat, pLon, dPolyArgs, m_dNodes.Begin(), bGeoTesselate );
 	} else
 	{
 		// POLY2D(generic-exprs)
-		CSphVector<ISphExpr*> dExprs ( dPolyArgs.GetLength() );
+		VecRefPtrs_t<ISphExpr*> dExprs;
+		dExprs.Resize ( dPolyArgs.GetLength() );
 		ARRAY_FOREACH ( i, dExprs )
 			dExprs[i] = CreateTree ( dPolyArgs[i] );
-		return new Expr_ContainsExprvec_c ( CreateTree(iLat), CreateTree(iLon), dExprs );
+
+		// will adopt dExprs and utilize them on d-tr
+		return new Expr_ContainsExprvec_c ( pLat, pLon, dExprs );
 	}
 }
 
@@ -4530,8 +4510,8 @@ class Expr_Remap_c : public ISphExpr
 		bool operator== ( const CondValPair_t & rhs ) const { return m_iCond==rhs.m_iCond; }
 	};
 
-	ISphExpr * m_pCond;
-	ISphExpr * m_pVal;
+	CSphRefcountedPtr<ISphExpr> m_pCond;
+	CSphRefcountedPtr<ISphExpr> m_pVal;
 	CSphVector<CondValPair_t> m_dPairs;
 
 public:
@@ -4544,6 +4524,9 @@ public:
 		assert ( dConds.GetLength() );
 		assert ( dConds.GetLength()==tVals.m_dInts.GetLength() ||
 				dConds.GetLength()==tVals.m_dFloats.GetLength() );
+
+		SafeAddRef ( pCondExpr );
+		SafeAddRef ( pValExpr );
 
 		if ( tVals.m_dInts.GetLength() )
 			ARRAY_FOREACH ( i, m_dPairs )
@@ -4559,12 +4542,6 @@ public:
 			}
 
 		m_dPairs.Uniq();
-	}
-
-	~Expr_Remap_c() final
-	{
-		SafeRelease ( m_pCond );
-		SafeRelease ( m_pVal );
 	}
 
 	float Eval ( const CSphMatch & tMatch ) const final
@@ -4654,15 +4631,11 @@ ISphExpr * ExprParser_t::CreateTree ( int iNode )
 		}
 	}
 
-	ISphExpr * pLeft = bSkipLeft ? nullptr : CreateTree ( tNode.m_iLeft );
-	ISphExpr * pRight = bSkipRight ? nullptr : CreateTree ( tNode.m_iRight );
+	CSphRefcountedPtr<ISphExpr> pLeft ( bSkipLeft ? nullptr : CreateTree ( tNode.m_iLeft ) );
+	CSphRefcountedPtr<ISphExpr> pRight ( bSkipRight ? nullptr : CreateTree ( tNode.m_iRight ) );
 
 	if ( GetError() )
-	{
-		SafeRelease ( pLeft );
-		SafeRelease ( pRight );
 		return nullptr;
-	}
 
 #define LOC_SPAWN_POLY(_classname) \
 	if ( tNode.m_eArgType==SPH_ATTR_INTEGER )		return new _classname##Int_c ( pLeft, pRight ); \
@@ -4733,7 +4706,6 @@ ISphExpr * ExprParser_t::CreateTree ( int iNode )
 		case TOK_AND:			LOC_SPAWN_POLY ( Expr_And ); break;
 		case TOK_OR:			LOC_SPAWN_POLY ( Expr_Or ); break;
 		case TOK_NOT:
-			SafeDelete ( pRight );
 			return ( tNode.m_eArgType==SPH_ATTR_BIGINT )
 				? (ISphExpr * ) new Expr_NotInt64_c ( pLeft )
 				: (ISphExpr * ) new Expr_NotInt_c ( pLeft );
@@ -4743,16 +4715,19 @@ ISphExpr * ExprParser_t::CreateTree ( int iNode )
 				return new Expr_Arglist_c ( pLeft, pRight );
 			break;
 
-		case TOK_NEG:			assert ( pRight==nullptr ); return new Expr_Neg_c ( pLeft ); break;
+		case TOK_NEG:			assert ( !pRight ); return new Expr_Neg_c ( pLeft ); break;
 		case TOK_FUNC:
 			{
 				// fold arglist to array
 				auto eFunc = (Func_e)tNode.m_iFunc;
 				assert ( g_dFuncs[tNode.m_iFunc].m_eFunc==eFunc );
 
-				CSphVector<ISphExpr *> dArgs;
+				VecRefPtrs_t<ISphExpr *> dArgs;
 				if ( !bSkipLeft )
-					FoldArglist ( pLeft, dArgs );
+				{
+					SafeAddRef ( pLeft );
+					MoveToArgList ( pLeft, dArgs );
+				}
 
 				// spawn proper function
 				assert ( tNode.m_iFunc>=0 && tNode.m_iFunc<int(sizeof(g_dFuncs)/sizeof(g_dFuncs[0])) );
@@ -4806,8 +4781,8 @@ ISphExpr * ExprParser_t::CreateTree ( int iNode )
 					case FUNC_BITDOT:	return CreateBitdotNode ( tNode.m_iLeft, dArgs );
 					case FUNC_REMAP:
 					{
-						ISphExpr * pCond = CreateTree ( tNode.m_iLeft );
-						ISphExpr * pVal = CreateTree ( tNode.m_iRight );
+						CSphRefcountedPtr<ISphExpr> pCond ( CreateTree ( tNode.m_iLeft ) );
+						CSphRefcountedPtr<ISphExpr> pVal ( CreateTree ( tNode.m_iRight ) );
 						assert ( pCond && pVal );
 						// This is a hack. I know how parser fills m_dNodes and thus know where to find constlists.
 						const CSphVector<int64_t> & dConds = m_dNodes [ iNode-2 ].m_pConsts->m_dInts;
@@ -4861,6 +4836,7 @@ ISphExpr * ExprParser_t::CreateTree ( int iNode )
 					case FUNC_UINT:
 						if ( m_dNodes[tNode.m_iLeft].m_iToken==TOK_ATTR_JSON )
 							return new Expr_JsonFieldConv_c ( dArgs[0] );
+						SafeAddRef ( dArgs[0] );
 						return dArgs[0];
 
 					case FUNC_LEAST:	return CreateAggregateNode ( tNode, SPH_AGGR_MIN, dArgs[0] );
@@ -4907,11 +4883,11 @@ ISphExpr * ExprParser_t::CreateTree ( int iNode )
 			} else
 			{
 				// json key is a generic expression, use generic catch-all JsonField
-				CSphVector<ISphExpr *> dArgs;
+				VecRefPtrs_t<ISphExpr *> dArgs;
 				CSphVector<ESphAttr> dTypes;
 				if ( pLeft ) // may be NULL (top level array)
 				{
-					FoldArglist ( pLeft, dArgs );
+					MoveToArgList ( pLeft.Leak (), dArgs );
 					GatherArgRetTypes ( tNode.m_iLeft, dTypes );
 				}
 				return new Expr_JsonField_c ( tNode.m_tLocator, tNode.m_iLocator, dArgs, dTypes );
@@ -4920,14 +4896,15 @@ ISphExpr * ExprParser_t::CreateTree ( int iNode )
 		case TOK_ITERATOR:
 			{
 				// iterator, e.g. handles "x.gid" in SELECT ALL(x.gid=1 FOR x IN json.array)
-				CSphVector<ISphExpr *> dArgs;
+				VecRefPtrs_t<ISphExpr *> dArgs;
 				CSphVector<ESphAttr> dTypes;
 				if ( pLeft )
 				{
-					FoldArglist ( pLeft, dArgs );
+					MoveToArgList ( pLeft.Leak (), dArgs );
 					GatherArgRetTypes ( tNode.m_iLeft, dTypes );
 				}
-				return new Expr_JsonFieldConv_c ( new Expr_Iterator_c ( tNode.m_tLocator, tNode.m_iLocator, dArgs, dTypes, tNode.m_pAttr ) );
+				CSphRefcountedPtr<ISphExpr> pIterator { new Expr_Iterator_c ( tNode.m_tLocator, tNode.m_iLocator, dArgs, dTypes, tNode.m_pAttr ) };
+				return new Expr_JsonFieldConv_c ( pIterator );
 			}
 		case TOK_IDENT:			m_sCreateError.SetSprintf ( "unknown column: %s", tNode.m_sIdent ); break;
 
@@ -4944,8 +4921,6 @@ ISphExpr * ExprParser_t::CreateTree ( int iNode )
 #undef LOC_SPAWN_POLY
 
 	// fire exit
-	SafeRelease ( pLeft );
-	SafeRelease ( pRight );
 	return nullptr;
 }
 
@@ -4956,8 +4931,7 @@ template < typename T >
 class Expr_ArgVsSet_c : public ISphExpr
 {
 public:
-	explicit Expr_ArgVsSet_c ( ISphExpr * pArg ) : m_pArg ( pArg ) {}
-	~Expr_ArgVsSet_c () override { SafeRelease ( m_pArg ); }
+	explicit Expr_ArgVsSet_c ( ISphExpr * pArg ) : m_pArg ( pArg ) { SafeAddRef ( pArg ); }
 
 	float Eval ( const CSphMatch & tMatch ) const override { return (float) IntEval ( tMatch ); }
 	int64_t Int64Eval ( const CSphMatch & tMatch ) const override { return IntEval ( tMatch ); }
@@ -4974,7 +4948,7 @@ public:
 	}
 
 protected:
-	ISphExpr * m_pArg;
+	CSphRefcountedPtr<ISphExpr> m_pArg; /* { nullptr }; */
 
 	T ExprEval ( ISphExpr * pArg, const CSphMatch & tMatch ) const;
 
@@ -5012,22 +4986,19 @@ template < typename T >
 class Expr_ArgVsConstSet_c : public Expr_ArgVsSet_c<T>
 {
 public:
-	/// take ownership of arg, pre-evaluate and dismiss turn points
-	Expr_ArgVsConstSet_c ( ISphExpr * pArg, CSphVector<ISphExpr *> & dArgs, int iSkip )
+	/// pre-evaluate and dismiss turn points
+	Expr_ArgVsConstSet_c ( ISphExpr * pArg, const CSphVector<ISphExpr *> & dArgs, int iSkip )
 		: Expr_ArgVsSet_c<T> ( pArg )
 		, m_bFloat ( false )
 	{
 		CSphMatch tDummy;
-		for ( int i=iSkip; i<dArgs.GetLength(); i++ )
-		{
+		for ( int i=iSkip; i<dArgs.GetLength(); ++i )
 			m_dValues.Add ( Expr_ArgVsSet_c<T>::ExprEval ( dArgs[i], tDummy ) );
-			SafeRelease ( dArgs[i] );
-		}
 
 		CalcValueHash();
 	}
 
-	/// take ownership of arg, and copy that constlist
+	/// copy that constlist
 	Expr_ArgVsConstSet_c ( ISphExpr * pArg, ConstList_c * pConsts, bool bKeepFloat )
 		: Expr_ArgVsSet_c<T> ( pArg )
 		, m_bFloat ( false )
@@ -5057,7 +5028,7 @@ public:
 		CalcValueHash();
 	}
 
-	/// take ownership of arg, and copy that uservar
+	/// copy that uservar
 	Expr_ArgVsConstSet_c ( ISphExpr * pArg, UservarIntSet_c * pUservar )
 		: Expr_ArgVsSet_c<T> ( pArg )
 		, m_bFloat ( false )
@@ -5101,7 +5072,7 @@ template < typename T >
 class Expr_IntervalConst_c : public Expr_ArgVsConstSet_c<T>
 {
 public:
-	/// take ownership of arg, pre-evaluate and dismiss turn points
+	/// pre-evaluate and dismiss turn points
 	explicit Expr_IntervalConst_c ( CSphVector<ISphExpr *> & dArgs )
 		: Expr_ArgVsConstSet_c<T> ( dArgs[0], dArgs, 1 )
 	{}
@@ -5129,15 +5100,18 @@ template < typename T >
 class Expr_Interval_c : public Expr_ArgVsSet_c<T>
 {
 protected:
-	CSphVector<ISphExpr *> m_dTurnPoints;
+	VecRefPtrs_t<ISphExpr *> m_dTurnPoints;
 
 public:
-	/// take ownership of arg and turn points
+
 	explicit Expr_Interval_c ( const CSphVector<ISphExpr *> & dArgs )
 		: Expr_ArgVsSet_c<T> ( dArgs[0] )
 	{
-		for ( int i=1; i<dArgs.GetLength(); i++ )
+		for ( int i=1; i<dArgs.GetLength(); ++i )
+		{
+			SafeAddRef ( dArgs[i] );
 			m_dTurnPoints.Add ( dArgs[i] );
+		}
 	}
 
 	/// evaluate arg, return interval id
@@ -5806,7 +5780,10 @@ public:
 			: Expr_ArgVsSet_c<T> ( dArgs[0] )
 	{
 		for ( int i = 1; i<dArgs.GetLength (); ++i )
+		{
+			SafeAddRef ( dArgs[i] );
 			m_dBitWeights.Add ( dArgs[i] );
+		}
 	}
 
 	float Eval ( const CSphMatch & tMatch ) const final
@@ -5839,7 +5816,7 @@ public:
 	}
 
 protected:
-	CSphVector<ISphExpr *> m_dBitWeights;
+	VecRefPtrs_t<ISphExpr *> m_dBitWeights;
 
 	/// generic evaluate
 	T DoEval ( const CSphMatch & tMatch ) const
@@ -5955,7 +5932,10 @@ public:
 		, m_pLon ( pLon )
 		, m_fAnchorLat ( fAnchorLat )
 		, m_fAnchorLon ( fAnchorLon )
-	{}
+	{
+		SafeAddRef ( pLat );
+		SafeAddRef ( pLon );
+	}
 
 	~Expr_GeodistConst_c () final
 	{
@@ -6012,7 +5992,12 @@ public:
 		, m_pLon ( pLon )
 		, m_pAnchorLat ( pAnchorLat )
 		, m_pAnchorLon ( pAnchorLon )
-	{}
+	{
+		SafeAddRef ( pLat );
+		SafeAddRef ( pLon );
+		SafeAddRef ( pAnchorLat );
+		SafeAddRef ( pAnchorLon );
+	}
 
 	~Expr_Geodist_c () final
 	{
@@ -6245,7 +6230,11 @@ ISphExpr * ExprParser_t::CreateIntervalNode ( int iArgsNode, CSphVector<ISphExpr
 
 	// force type conversion, where possible
 	if ( dTypes[0]==SPH_ATTR_JSON_FIELD )
-		dArgs[0] = new Expr_JsonFieldConv_c ( dArgs[0] );
+	{
+		auto pConverted = new Expr_JsonFieldConv_c ( dArgs[0] );
+		SafeRelease ( dArgs[0] );
+		dArgs[0] = pConverted;
+	}
 
 	bool bConst = CheckForConstSet ( iArgsNode, 1 );
 	ESphAttr eAttrType = m_dNodes[iArgsNode].m_eArgType;
@@ -6290,10 +6279,10 @@ ISphExpr * ExprParser_t::CreateInNode ( int iNode )
 				case TOK_ATTR_STRING:
 					return new Expr_StrIn_c ( tLeft.m_tLocator, tLeft.m_iLocator, tRight.m_pConsts, nullptr, m_eCollation );
 				case TOK_ATTR_JSON:
-					return new Expr_JsonFieldIn_c ( tRight.m_pConsts, CreateTree ( m_dNodes [ iNode ].m_iLeft ) );
+					return new Expr_JsonFieldIn_c ( tRight.m_pConsts, CSphRefcountedPtr<ISphExpr> { CreateTree ( m_dNodes [ iNode ].m_iLeft ) } );
 				default:
 				{
-					ISphExpr * pArg = CreateTree ( m_dNodes[iNode].m_iLeft );
+					CSphRefcountedPtr<ISphExpr> pArg ( CreateTree ( m_dNodes[iNode].m_iLeft ) );
 					switch ( WidestType ( tLeft.m_eRetType, tRight.m_pConsts->m_eRetType ) )
 					{
 						case SPH_ATTR_INTEGER:	return new Expr_In_c<int> ( pArg, tRight.m_pConsts ); break;
@@ -6329,9 +6318,9 @@ ISphExpr * ExprParser_t::CreateInNode ( int iNode )
 				case TOK_ATTR_STRING:
 					return new Expr_StrIn_c ( tLeft.m_tLocator, tLeft.m_iLocator, nullptr, pUservar, m_eCollation );
 				case TOK_ATTR_JSON:
-					return new Expr_JsonFieldIn_c ( pUservar, CreateTree ( m_dNodes[iNode].m_iLeft ) );
+					return new Expr_JsonFieldIn_c ( pUservar, CSphRefcountedPtr<ISphExpr> { CreateTree ( m_dNodes[iNode].m_iLeft ) } );
 				default:
-					return new Expr_InUservar_c ( CreateTree ( m_dNodes[iNode].m_iLeft ), pUservar );
+					return new Expr_InUservar_c ( CSphRefcountedPtr<ISphExpr> { CreateTree ( m_dNodes[iNode].m_iLeft ) }, pUservar );
 			}
 			break;
 		}
@@ -6436,14 +6425,15 @@ ISphExpr * ExprParser_t::CreateGeodistNode ( int iArgs )
 		{
 			// expr point
 			return new Expr_GeodistConst_c ( GeodistFn ( eMethod, bDeg ), fOut,
-				CreateTree ( dArgs[0] ), CreateTree ( dArgs[1] ),
+				CSphRefcountedPtr<ISphExpr> { CreateTree ( dArgs[0] )},
+				CSphRefcountedPtr<ISphExpr> { CreateTree ( dArgs[1] )},
 				FloatVal ( &m_dNodes[dArgs[2]] ), FloatVal ( &m_dNodes[dArgs[3]] ) );
 		}
 	}
 
 	// four expressions
-	CSphVector<ISphExpr *> dExpr;
-	FoldArglist ( CreateTree ( iArgs ), dExpr );
+	VecRefPtrs_t<ISphExpr *> dExpr;
+	MoveToArgList ( CreateTree ( iArgs ), dExpr );
 	assert ( dExpr.GetLength()==4 );
 	return new Expr_Geodist_c ( GeodistFn ( eMethod, bDeg ), fOut, dExpr[0], dExpr[1], dExpr[2], dExpr[3] );
 }
@@ -6542,10 +6532,10 @@ ISphExpr * ExprParser_t::CreateForInNode ( int iNode )
 	int iNameNode = tNode.m_iRight;
 	int iDataNode = m_dNodes[iNameNode].m_iLeft;
 
-	auto * pFunc = new Expr_ForIn_c ( CreateTree ( iDataNode ), iFunc==FUNC_ALL, iFunc==FUNC_INDEXOF );
+	auto * pFunc = new Expr_ForIn_c ( CSphRefcountedPtr<ISphExpr> { CreateTree ( iDataNode )} , iFunc==FUNC_ALL, iFunc==FUNC_INDEXOF );
 
 	FixupIterators ( iExprNode, m_dNodes[iNameNode].m_sIdent, pFunc->GetRef() );
-	pFunc->SetExpr ( CreateTree ( iExprNode ) );
+	pFunc->SetExpr ( CSphRefcountedPtr<ISphExpr> { CreateTree ( iExprNode ) } );
 
 	return pFunc;
 }
@@ -7650,12 +7640,13 @@ ISphExpr * ExprParser_t::Parse ( const char * sExpr, const ISphSchema & tSchema,
 	}
 
 	// create evaluator
-	ISphExpr * pRes = CreateTree ( m_iParsed );
+	CSphRefcountedPtr<ISphExpr> pRes { CreateTree ( m_iParsed ) };
 	if ( !m_sCreateError.IsEmpty() )
 	{
+		pRes = nullptr;
 		sError = m_sCreateError;
-		SafeRelease ( pRes );
-	} else if ( !pRes )
+	}
+	else if ( !pRes )
 	{
 		sError.SetSprintf ( "empty expression" );
 	}
@@ -7675,7 +7666,7 @@ ISphExpr * ExprParser_t::Parse ( const char * sExpr, const ISphSchema & tSchema,
 		WalkTree ( m_iParsed, tHookFunctor );
 	}
 
-	return pRes;
+	return pRes.Leak();
 }
 
 //////////////////////////////////////////////////////////////////////////

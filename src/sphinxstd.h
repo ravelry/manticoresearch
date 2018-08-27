@@ -1,7 +1,7 @@
 //
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -1016,12 +1016,13 @@ template < typename T, typename POLICY=CSphVectorPolicy<T> > class CSphVector
 	: public VecTraits_T<T>
 {
 protected:
-	using VecTraits_T<T>::m_pData;
-	using VecTraits_T<T>::m_iCount;
+	using BASE = VecTraits_T<T>;
+	using BASE::m_pData;
+	using BASE::m_iCount;
 
 public:
-	using VecTraits_T<T>::Begin;
-	using VecTraits_T<T>::Sort;
+	using BASE::Begin;
+	using BASE::Sort;
 
 	/// ctor
 	CSphVector () = default;
@@ -1119,6 +1120,17 @@ public:
 		return false;
 	}
 
+	/// remove element by value, asuming vec is sorted/uniq
+	bool RemoveValueFromSorted ( T tValue )
+	{
+		T* pValue = VecTraits_T<T>::BinarySearch (tValue);
+		if ( !pValue )
+			return false;
+
+		Remove ( pValue - Begin() );
+		return true;
+	}
+
 	/// pop last value
 	const T & Pop ()
 	{
@@ -1164,9 +1176,9 @@ public:
 	/// reset
 	void Reset ()
 	{
+		SafeDeleteArray ( m_pData );
 		m_iCount = 0;
 		m_iLimit = 0;
-		SafeDeleteArray ( m_pData );
 	}
 
 	/// memset whole reserved vec
@@ -2363,6 +2375,7 @@ public:
 					~CSphScopedPtr ()			{ SafeDelete ( m_pPtr ); }
 	T *				operator -> () const		{ return m_pPtr; }
 	T *				Ptr () const				{ return m_pPtr; }
+	explicit operator bool () const				{ return m_pPtr!=nullptr; }
 	CSphScopedPtr &	operator = ( T * pPtr )		{ SafeDelete ( m_pPtr ); m_pPtr = pPtr; return *this; }
 	T *				LeakPtr ()					{ T * pPtr = m_pPtr; m_pPtr = NULL; return pPtr; }
 	void			ReplacePtr ( T * pPtr )		{ m_pPtr = pPtr; }
@@ -2416,7 +2429,7 @@ public:
 	~CSphRefcountedPtr ()				{ SafeRelease ( m_pPtr ); }
 
 	T *	operator -> () const			{ return m_pPtr; }
-		explicit operator bool() const			{ return m_pPtr!=nullptr; }
+		explicit operator bool() const	{ return m_pPtr!=nullptr; }
 		operator T * () const			{ return m_pPtr; }
 
 	// drop the ownership and reset pointer

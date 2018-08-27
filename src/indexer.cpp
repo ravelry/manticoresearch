@@ -1,7 +1,7 @@
 //
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -52,9 +52,9 @@ static bool			g_bBuildFreqs	= false;
 static bool			g_bSendHUP		= true;
 
 static int				g_iMemLimit				= 128*1024*1024;
-static int				g_iMaxXmlpipe2Field		= 0;
-static int				g_iWriteBuffer			= 0;
-static int				g_iMaxFileFieldBuffer	= 1024*1024;
+static int				g_iMaxXmlpipe2Field		= 2*1024*1024;
+static int				g_iWriteBuffer			= 1024*1024;
+static int				g_iMaxFileFieldBuffer	= 8*1024*1024;
 
 static ESphOnFileFieldError	g_eOnFileFieldError = FFE_IGNORE_FIELD;
 
@@ -1594,7 +1594,8 @@ static void ShowHelp ()
 		"\t\t\t(default is sphinx.conf)\n"
 		"--all\t\t\treindex all configured indexes\n"
 		"--quiet\t\t\tbe quiet, only print errors\n"
-		"--verbose\t\tverbose indexing issues report\n"
+		"--verbose [debug|debugv|debugvv]\n"
+		"\t\t\tverbose indexing issues report\n"
 		"--noprogress\t\tdo not display progress\n"
 		"\t\t\t(automatically on if output is not to a tty)\n"
 		"--rotate\t\tsend SIGHUP to searchd when indexing is over\n"
@@ -1705,7 +1706,22 @@ int main ( int argc, char ** argv )
 		} else if ( strcasecmp ( argv[i], "--verbose" )==0 )
 		{
 			bVerbose = true;
-
+			if ( (i+2) < argc )
+			{
+				if ( strcmp (argv[i+1], "debug" )==0 )
+				{
+					g_eLogLevel = SPH_LOG_DEBUG;
+					++i;
+				} else if ( strcmp ( argv[i+1], "debugv" )==0 )
+				{
+					g_eLogLevel = SPH_LOG_VERBOSE_DEBUG;
+					++i;
+				} else if ( strcmp ( argv[i+1], "debugvv" )==0 )
+				{
+					g_eLogLevel = SPH_LOG_VERY_VERBOSE_DEBUG;
+					++i;
+				}
+			}
 		} else if ( isalnum ( argv[i][0] ) || argv[i][0]=='_' || sphIsWild ( argv[i][0] ) )
 		{
 			bool bHasWilds = false;
@@ -1822,9 +1838,9 @@ int main ( int argc, char ** argv )
 		CSphConfigSection & hIndexer = hConf["indexer"]["indexer"];
 
 		g_iMemLimit = hIndexer.GetSize ( "mem_limit", g_iMemLimit );
-		g_iMaxXmlpipe2Field = hIndexer.GetSize ( "max_xmlpipe2_field", 2*1024*1024 );
-		g_iWriteBuffer = hIndexer.GetSize ( "write_buffer", 1024*1024 );
-		g_iMaxFileFieldBuffer = Max ( 1024*1024, hIndexer.GetSize ( "max_file_field_buffer", 8*1024*1024 ) );
+		g_iMaxXmlpipe2Field = hIndexer.GetSize ( "max_xmlpipe2_field", g_iMaxXmlpipe2Field );
+		g_iWriteBuffer = hIndexer.GetSize ( "write_buffer", g_iWriteBuffer );
+		g_iMaxFileFieldBuffer = Max ( 1024*1024, hIndexer.GetSize ( "max_file_field_buffer", g_iMaxFileFieldBuffer ) );
 
 		if ( hIndexer("on_file_field_error") )
 		{
@@ -1839,9 +1855,8 @@ int main ( int argc, char ** argv )
 				sphDie ( "unknown on_field_field_error value (must be one of ignore_field, skip_document, fail_index)" );
 		}
 
-		bool bJsonStrict = false;
-		bool bJsonAutoconvNumbers = false;
-		bool bJsonKeynamesToLowercase = false;
+		bool bJsonStrict = g_bJsonStrict;
+		bool bJsonKeynamesToLowercase = g_bJsonKeynamesToLowercase;
 		if ( hIndexer("on_json_attr_error") )
 		{
 			const CSphString & sVal = hIndexer["on_json_attr_error"].strval();
@@ -1862,7 +1877,7 @@ int main ( int argc, char ** argv )
 				sphDie ( "unknown json_autoconv_keynames value (must be 'lowercase')" );
 		}
 
-		bJsonAutoconvNumbers = ( hIndexer.GetInt ( "json_autoconv_numbers", 0 )!=0 );
+		bool bJsonAutoconvNumbers = ( hIndexer.GetInt ( "json_autoconv_numbers", 0 )!=0 );
 		sphSetJsonOptions ( bJsonStrict, bJsonAutoconvNumbers, bJsonKeynamesToLowercase );
 
 		sphSetThrottling ( hIndexer.GetInt ( "max_iops", 0 ), hIndexer.GetSize ( "max_iosize", 0 ) );

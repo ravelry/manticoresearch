@@ -701,7 +701,7 @@ index dist1
 #
 # you can run INSERT, REPLACE, and DELETE on this index on the fly
 # using MySQL protocol (see 'listen' directive below)
-index rt
+index testrt
 {
 	# 'rt' index type must be specified to use RT index
 	type			= rt
@@ -960,7 +960,7 @@ searchd
 
 
 	# per-thread stack size, only affects workers=threads mode
-	# optional, default is 64K
+	# optional, default is 1M
 	#
 	# thread_stack			= 128K
 

@@ -1,7 +1,7 @@
 //
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -31,6 +31,9 @@
 bool LoadExFunctions ();
 
 #endif
+
+#include "sphinxutils.h"
+#include "searchdaemon.h"
 
 /////////////////////////////////////////////////////////////////////////////
 // SOME SHARED GLOBAL VARIABLES
@@ -213,248 +216,17 @@ struct AgentDesc_t : HostDesc_t
 	AgentDesc_t &CloneFrom ( const AgentDesc_t &tOther );
 };
 
-extern int g_iAgentRetryCount;
-extern int g_iAgentRetryDelay;
-
-struct IReporter_t : ISphNoncopyable
+// set of options which are applied to every agent line
+// and come partially from global config, partially m.b. set immediately in agent line as an option.
+struct AgentOptions_t
 {
-	virtual ~IReporter_t () {};
-	virtual void SetTotal ( int iTasks ) = 0;
-	virtual void Report ( bool bSuccess ) = 0;
+	bool m_bBlackhole;
+	bool m_bPersistent;
+	HAStrategies_e m_eStrategy;
+	int m_iRetryCount;
+	int m_iRetryCountMultiplier;
 };
 
-#if USE_WINDOWS
-	struct SingleOverlapped_t : public OVERLAPPED
-	{
-		ULONG_PTR	m_uParentOffset; // how many bytes add to this to take pointer to parent
-		inline void Zero ()
-		{
-			ZeroMemory ( this, sizeof ( OVERLAPPED ) );
-		}
-	};
-	struct DoubleOverlapped_t
-	{
-		SingleOverlapped_t	m_dWrite;
-		SingleOverlapped_t	m_dRead;
-		CSphAtomic			m_iRefs { 0 };
-		DoubleOverlapped_t ()
-		{
-			m_dWrite.Zero();
-			m_dRead.Zero();
-			m_dWrite.m_uParentOffset = (LPBYTE) &m_dWrite-(LPBYTE) this;
-			m_dRead.m_uParentOffset = (LPBYTE) &m_dRead-(LPBYTE) this;
-		}
-	};
-	using LPKEY = DoubleOverlapped_t *;
-#else
-	using LPKEY = void *;
-#endif
-
-class MultiAgentDesc_c;
-
-class IOVec_c
-{
-	SmartOutputBuffer_t &m_dSource; // source we associated with
-
-	CSphVector<sphIovec> m_dIOVec;
-	size_t m_iIOChunks = 0;
-
-public:
-
-	IOVec_c( SmartOutputBuffer_t & dSrc)
-		: m_dSource ( dSrc )
-	{
-		m_dSource.AddRef ();
-	};
-
-	~IOVec_c()
-	{
-		m_dSource.Release();
-	};
-
-	void Build (); /// take data from linked source
-	void Reset ();
-
-	/// consume received chunk
-	void StepForward ( size_t uStep );
-
-	inline bool HasUnsent () const
-	{
-		return m_iIOChunks!=0;
-	}
-
-	/// if we have data (despite it is sent or not)
-	inline bool IsEmpty () const
-	{
-		return m_dIOVec.IsEmpty ();
-	}
-
-	/// buf for sendmsg/WSAsend
-	inline sphIovec * IOPtr () const
-	{
-		return m_dIOVec.end () - m_iIOChunks;
-	}
-
-	/// num of io vecs for sendmsg/WSAsend
-	inline size_t IOSize () const
-	{
-		return m_iIOChunks;
-	}
-};
-
-using Clbck_f = std::function<void ()>;
-using Clbcktm_f = std::function<void ( int64_t, DWORD )>;
-
-/// remote agent connection (local per-query state)
-struct AgentConn_t : public ISphRefcountedMT
-{
-	AgentDesc_t		m_tDesc;			///< desc of my host // fixme! turn to ref to MultiAgent mirror?
-	int				m_iSock = -1;
-
-	// time-tracking and timeout settings
-	int				m_iMyConnectTimeout { g_iAgentConnectTimeout };	///< populated from parent distr
-	int				m_iMyQueryTimeout { g_iAgentQueryTimeout };		///< in msec
-	int64_t			m_iStartQuery = 0;	///< the timestamp of the latest request // actualized
-	int64_t			m_iEndQuery = 0;	///< the timestamp of the end of the latest operation // actual
-	int64_t			m_iWall = 0;		///< wall time spent vs this agent // actualized
-	int64_t			m_iWaited = 0;		///< statistics of waited
-
-	// some external stuff
-	CSphVector<CSphQueryResult> m_dResults;	///< multi-query results
-	CSphString		m_sFailure;				///< failure message (both network and logical)
-	mutable int		m_iStoreTag = -1;	///< cookie, m.b. used to 'glue' to concrete connection
-	int				m_iWeight = -1;		///< weight of the index, will be send with query to remote host
-
-	IReporter_t *	m_pReporter = nullptr;	///< used to report back when we're finished
-	LPKEY			m_pPollerTask = nullptr; ///< internal for poller. fixme! privatize?
-	bool			m_bSuccess = false;		///< agent got processed, no need to retry
-
-public:
-	AgentConn_t () = default;
-
-	void SetMultiAgent ( const CSphString &sIndex, MultiAgentDesc_c * pMirror );
-	void SetRetryLimit ( int iValue, bool bScale = true );
-
-	inline bool NeedKick () { bool bRes = m_bNeedKick; m_bNeedKick = false; return bRes; }
-	inline bool InNetLoop() const { return m_bInNetLoop; }
-	inline bool IsBl () const { return m_tDesc.m_bBlackhole; }
-
-	void InitRemoteTask ( IRequestBuilder_t * pQuery, IReplyParser_t * pParser, IReporter_t * pReporter
-						  , int iQueryRetry, int iQueryDelay );
-	void StartRemoteLoopTry (bool bSkipFirstRetry=false);
-
-	void ErrorCallback ( int64_t iWaited );
-	void SendCallback ( int64_t iWaited, DWORD uSent );
-	void RecvCallback ( int64_t iWaited, DWORD uReceived );
-
-	// helper for beatiful logging
-	inline const char * StateName () const 	{ return Agent_e_Name ( m_eConnState ); }
-
-private:
-
-	// prepare buf, parse result
-	IRequestBuilder_t * m_pBuilder = nullptr; ///< fixme! check if it is ok to have as the member, or we don't need it actually
-	IReplyParser_t *	m_pParser = nullptr;
-
-	// working with mirrors
-	MultiAgentDesc_c *	m_pMultiAgent = nullptr; ///< my manager, could turn me into another mirror
-	int			m_iRetries = 0;        ///< initialized to max num of tries. When zeroed, it is time to fail
-	int			m_iMirrorsCount = 1;
-	int			m_iDelay { g_iAgentRetryDelay };	///< delay between retries
-
-	// active timeout (directly used by poller)
-	int64_t			m_iPoolerTimeout = 0;    ///< m.b. query, or connect+query when TCP_FASTOPEN
-
-	// receiving buffer stuff
-	CSphFixedVector<BYTE>	m_dReplyBuf { 0 };
-	int			m_iReplySize = -1;    ///< how many reply bytes are there
-	static const size_t	REPLY_HEADER_SIZE = 12;
-	BYTE		m_dReplyHeader[REPLY_HEADER_SIZE];
-	BYTE *		m_pReplyCur = nullptr;
-
-	// sending buffer stuff
-	SmartOutputBuffer_t m_tOutput;		///< chain of blobs we're sending to a host
-	IOVec_c 			m_dIOVec { m_tOutput };
-
-	// states and flags
-	bool m_bConnectHandshake = false;	///< if we need to establish new connection, and so, wait back handshake version
-	bool m_bInNetLoop	= false;			///< if we're inside netloop (1-thread work with schedule)
-	bool m_bNeedKick	= false;            ///< if we've installed callback from outside th and need to kick netloop
-	bool m_bNeedInitiatePersist = false;    ///< for just created persistent - need SEARCHD_COMMAND_PERSIST
-	bool m_bManyTries = false;	///< to avoid report 'retries limit esceeded' if we have ONLY one retry
-
-	Agent_e			m_eConnState { Agent_e::HEALTHY };	///< current state
-	SearchdStatus_e m_eReplyStatus { SEARCHD_ERROR };    ///< reply status code
-
-private:
-	~AgentConn_t () override;
-
-	// switch/check internal state
-	inline bool StateIs ( Agent_e eState ) const { return eState==m_eConnState; }
-	void State ( Agent_e eState );
-
-
-
-	bool GetPersist ();
-	void ReturnPersist ();
-
-	bool Fail ( const char * sFmt, ... ) __attribute__ ( ( format ( printf, 2, 3 ) ) );
-	bool Fatal ( AgentStats_e eStat, const char * sMessage, ... ) __attribute__ ( ( format ( printf, 3, 4 ) ) );
-	void Finish ( bool bFailed = false ); /// finish the task, stat time.
-	void BadResult ( int iError = 0 );	/// always return false
-	void ReportFinish ( bool bSuccess = true );
-	void SendingState (); ///< from CONNECTING state go to HEALTHY and switch timer to QUERY timeout.
-
-	void SetupPersist();
-	bool StartNextRetry ();
-	bool ConnectionAlive ();
-
-	void TimeoutTask ( int64_t iTimeoutMS = -1, Clbck_f &&fTimeout = nullptr, BYTE ActivateIO=0 );
-	void ScheduleCallbacks ();
-	void DisableWrite();
-
-	void BuildData ();
-	size_t ReplyBufPlace () const;
-	void InitReplyBuf ( int iSize = 0 );
-	inline bool IsReplyHeader() const { return m_iReplySize<0; }
-
-	SSIZE_T SendChunk (); // low-level (platform specific) send
-	SSIZE_T RecvChunk (); // low-level (platform specific) recv
-
-	int DoTFO ( struct sockaddr * pSs, int iLen );
-
-	bool DoQuery ();
-	bool EstablishConnection ();
-	bool SendQuery (DWORD uSent = 0);
-	bool ReceiveAnswer (DWORD uReceived = 0);
-	bool CommitResult ();
-};
-
-using VectorAgentConn_t = CSphVector<AgentConn_t *>;
-using VecRefPtrsAgentConn_t = VecRefPtrs_t<AgentConn_t *>;
-class IRemoteAgentsObserver : public IReporter_t
-{
-public:
-	// check that there are no works to do
-	virtual bool IsDone () const = 0;
-
-	// get num of succeeded agents
-	virtual long GetSucceeded () const = 0;
-
-	// get num of succeeded agents
-	virtual long GetFinished () const = 0;
-
-	// block execution while there are works to do
-	virtual void Finish () = 0;
-
-	// block execution while some works finished
-	virtual void WaitChanges () = 0;
-};
-
-IRemoteAgentsObserver * GetObserver ();
-
-void ScheduleDistrJobs ( VectorAgentConn_t &dRemotes, IRequestBuilder_t * pQuery,
-	IReplyParser_t * pParser, IRemoteAgentsObserver * pReporter=nullptr, int iQueryRetry = -1, int iQueryDelay = -1 );
 
 extern const char * sAgentStatsNames[eMaxAgentStat + ehMaxStat];
 using HostStatSnapshot_t = uint64_t[eMaxAgentStat + ehMaxStat];
@@ -462,22 +234,23 @@ using HostStatSnapshot_t = uint64_t[eMaxAgentStat + ehMaxStat];
 /// per-host dashboard
 struct HostDashboard_t : public ISphRefcountedMT
 {
-	HostDesc_t		m_tHost;				// only host info, no indices. Used for ping.
-	bool			m_bNeedPing = false;	// we'll ping only HA agents, not everyone
-	PersistentConnectionsPool_c * m_pPersPool = nullptr;	// persistence pool also lives here, one per dashboard
+	HostDesc_t m_tHost;          // only host info, no indices. Used for ping.
+	volatile int m_iNeedPing = 0;    // we'll ping only HA agents, not everyone
+	PersistentConnectionsPool_c * m_pPersPool = nullptr;    // persistence pool also lives here, one per dashboard
 
-	mutable RwLock_t	 m_dDataLock;		// guards everything essential (see thread annotations)
-	int64_t		m_iLastAnswerTime GUARDED_BY ( m_dDataLock ) = 0;	// updated when we get an answer from the host
-	int64_t		m_iLastQueryTime GUARDED_BY ( m_dDataLock ) = 0;	// updated when we send a query to a host
-	int64_t		m_iErrorsARow GUARDED_BY ( m_dDataLock ) = 0;		// num of errors a row, updated when we update the general statistic.
+	mutable RwLock_t m_dDataLock;        // guards everything essential (see thread annotations)
+	int64_t m_iLastAnswerTime GUARDED_BY ( m_dDataLock ) = 0;    // updated when we get an answer from the host
+	int64_t m_iLastQueryTime GUARDED_BY ( m_dDataLock ) = 0;    // updated when we send a query to a host
+	int64_t m_iErrorsARow GUARDED_BY (
+		m_dDataLock ) = 0;        // num of errors a row, updated when we update the general statistic.
 
 public:
-	explicit HostDashboard_t ( const HostDesc_t & tAgent );
+	explicit HostDashboard_t ( const HostDesc_t &tAgent );
 	bool IsOlder ( int64_t iTime ) const REQUIRES_SHARED ( m_dDataLock );
 	AgentDash_t &GetCurrentStat () REQUIRES ( m_dDataLock );
 	void GetCollectedStat ( HostStatSnapshot_t &dResult, int iPeriods = 1 ) const REQUIRES ( !m_dDataLock );
 
-	static DWORD GetCurSeconds();
+	static DWORD GetCurSeconds ();
 	static bool IsHalfPeriodChanged ( DWORD * pLast );
 
 private:
@@ -490,17 +263,6 @@ private:
 	~HostDashboard_t ();
 };
 
-
-// set of options which are applied to every agent line
-// and come partially from global config, partially m.b. set immediately in agent line as an option.
-struct AgentOptions_t
-{
-	bool m_bBlackhole;
-	bool m_bPersistent;
-	HAStrategies_e m_eStrategy;
-	int m_iRetryCount;
-	int m_iRetryCountMultiplier;
-};
 
 /// context which keeps name of the index and agent
 /// (mainly for error-reporting)
@@ -530,11 +292,12 @@ struct WarnInfo_t
 		va_start ( ap, sFmt );
 		if ( m_szIndexName )
 			sphLogVa (
-				CSphString ().SetSprintf ( "index '%s': agent '%s': %s, - SKIPPING AGENT", m_szIndexName, m_szAgent, sFmt ).cstr ()
-				   , ap );
+				CSphString ().SetSprintf ( "index '%s': agent '%s': %s, - SKIPPING AGENT", m_szIndexName, m_szAgent
+										   , sFmt ).cstr ()
+				, ap );
 		else
 			sphLogVa (
-				CSphString ().SetSprintf ( "host '%s': %s, - SKIPPING AGENT", m_szAgent , sFmt ).cstr ()
+				CSphString ().SetSprintf ( "host '%s': %s, - SKIPPING AGENT", m_szAgent, sFmt ).cstr ()
 				, ap );
 		va_end ( ap );
 		return false;
@@ -544,66 +307,323 @@ struct WarnInfo_t
 /// descriptor for set of agents (mirrors) (stored in a global hash)
 class MultiAgentDesc_c : public ISphRefcountedMT, public CSphFixedVector<AgentDesc_t>
 {
-	CSphAtomic				m_iRRCounter;	/// round-robin counter
-	mutable RwLock_t		m_dWeightLock;	/// manages access to m_pWeights
-	CSphFixedVector<float>	m_dWeights		/// the weights of the hosts
-			GUARDED_BY (m_dWeightLock) { 0 };
-	DWORD					m_uTimestamp { HostDashboard_t::GetCurSeconds() };	/// timestamp of last weight's actualization
-	HAStrategies_e			m_eStrategy { HA_DEFAULT };
-	int 					m_iMultiRetryCount = 0;
+	CSphAtomic			m_iRRCounter;    /// round-robin counter
+	mutable RwLock_t	m_dWeightLock;   /// manages access to m_pWeights
+	CSphFixedVector<float> m_dWeights    /// the weights of the hosts
+		GUARDED_BY ( m_dWeightLock ) { 0 };
+	DWORD				m_uTimestamp { HostDashboard_t::GetCurSeconds () };    /// timestamp of last weight's actualization
+	HAStrategies_e		m_eStrategy { HA_DEFAULT };
+	int					m_iMultiRetryCount = 0;
+	bool 				m_bNeedPing = false;	/// ping need to hosts if we're HA and NOT bl.
 
-	~MultiAgentDesc_c () final = default;
+	~MultiAgentDesc_c () final;
 
 public:
-	MultiAgentDesc_c()
-		: CSphFixedVector<AgentDesc_t> {0}
+	MultiAgentDesc_c ()
+		: CSphFixedVector<AgentDesc_t> { 0 }
 	{}
 
 	// configure using dTemplateHosts as source of urls/indexes
-	bool Init ( const CSphVector<AgentDesc_t*> &dTemplateHosts, const AgentOptions_t &tOpt, const WarnInfo_t &tWarn );
+	static MultiAgentDesc_c* GetAgent ( const CSphVector<AgentDesc_t *> &dTemplateHosts,
+		const AgentOptions_t &tOpt, const WarnInfo_t &tWarn );
 
-	const AgentDesc_t & ChooseAgent () REQUIRES ( !m_dWeightLock );
+	// housekeeping: walk throw global hash and finally release all 1-refs agents
+	static void CleanupOrphaned();
 
-	inline bool IsHA() const
+	const AgentDesc_t &ChooseAgent () REQUIRES ( !m_dWeightLock );
+
+	inline bool IsHA () const
 	{
-		return GetLength() > 1;
+		return GetLength ()>1;
 	}
 
-	inline int GetRetryLimit() const
+	inline int GetRetryLimit () const
 	{
 		return m_iMultiRetryCount;
 	}
 
-	CSphFixedVector<float> GetWeights () const REQUIRES (!m_dWeightLock)
+	CSphFixedVector<float> GetWeights () const REQUIRES ( !m_dWeightLock )
 	{
 		CSphScopedRLock tRguard ( m_dWeightLock );
-		CSphFixedVector<float> dResult {0};
+		CSphFixedVector<float> dResult { 0 };
 		dResult.CopyFrom ( m_dWeights );
 		return dResult;
 	}
 
 private:
 
-	const AgentDesc_t & RRAgent ();
-	const AgentDesc_t & RandAgent ();
-	const AgentDesc_t & StDiscardDead () REQUIRES ( !m_dWeightLock );
-	const AgentDesc_t & StLowErrors () REQUIRES ( !m_dWeightLock );
+	const AgentDesc_t &RRAgent ();
+	const AgentDesc_t &RandAgent ();
+	const AgentDesc_t &StDiscardDead () REQUIRES ( !m_dWeightLock );
+	const AgentDesc_t &StLowErrors () REQUIRES ( !m_dWeightLock );
 
-	void ChooseWeightedRandAgent ( int * pBestAgent, CSphVector<int> & dCandidates ) REQUIRES ( !m_dWeightLock );
+	void ChooseWeightedRandAgent ( int * pBestAgent, CSphVector<int> &dCandidates ) REQUIRES ( !m_dWeightLock );
 	void CheckRecalculateWeights ( const CSphFixedVector<int64_t> &dTimers ) REQUIRES ( !m_dWeightLock );
+	static CSphString GetKey( const CSphVector<AgentDesc_t *> &dTemplateHosts, const AgentOptions_t &tOpt );
+	bool Init ( const CSphVector<AgentDesc_t *> &dTemplateHosts, const AgentOptions_t &tOpt, const WarnInfo_t &tWarn );
 };
 
-using MultiAgentDescPtr_c = CSphRefcountedPtr<MultiAgentDesc_c>;
+using MultiAgentDescRefPtr_c = CSphRefcountedPtr<MultiAgentDesc_c>;
+
+extern int g_iAgentRetryCount;
+extern int g_iAgentRetryDelay;
+
+struct IReporter_t : ISphRefcountedMT
+{
+	virtual void SetTotal ( int iTasks ) = 0;
+	virtual void Report ( bool bSuccess ) = 0;
+	virtual bool IsDone () const = 0;
+protected:
+	virtual ~IReporter_t () {};
+};
+
+#if USE_WINDOWS
+	struct SingleOverlapped_t : public OVERLAPPED
+	{
+		ULONG_PTR	m_uParentOffset; // how many bytes add to this to take pointer to parent
+		volatile bool		m_bInUse = false;
+		inline void Zero ()
+		{
+			ZeroMemory ( this, sizeof ( OVERLAPPED ) );
+		}
+	};
+	struct DoubleOverlapped_t
+	{
+		SingleOverlapped_t					m_dWrite;
+		SingleOverlapped_t					m_dRead;
+		CSphFixedVector<BYTE>				m_dReadBuf { 0 };	// used for canceling recv operation
+		VecRefPtrs_t<ISphOutputBuffer *>	m_dWriteBuf;		// used for canceling send operation
+		CSphVector<sphIovec>				m_dOutIO;			// used for canceling send operation
+		inline bool IsInUse ()
+		{
+			return m_dWrite.m_bInUse || m_dRead.m_bInUse;
+		};
+		DoubleOverlapped_t ()
+		{
+			m_dWrite.Zero();
+			m_dRead.Zero();
+			m_dWrite.m_uParentOffset = (LPBYTE) &m_dWrite-(LPBYTE) this;
+			m_dRead.m_uParentOffset = (LPBYTE) &m_dRead-(LPBYTE) this;
+		}
+	};
+	using LPKEY = DoubleOverlapped_t *;
+#else
+	using LPKEY = void *;
+#endif
+
+class IOVec_c
+{
+	CSphVector<sphIovec> m_dIOVec;
+	size_t m_iIOChunks = 0;
+
+public:
+
+	void BuildFrom ( const SmartOutputBuffer_t& tSource ); /// take data from linked source
+	void Reset ();
+
+	/// consume received chunk
+	void StepForward ( size_t uStep );
+
+	inline bool HasUnsent () const
+	{
+		return m_iIOChunks!=0;
+	}
+
+	/// if we have data (despite it is sent or not)
+	inline bool IsEmpty () const
+	{
+		return m_dIOVec.IsEmpty ();
+	}
+
+	/// buf for sendmsg/WSAsend
+	inline sphIovec * IOPtr () const
+	{
+		if ( !m_iIOChunks )
+			return nullptr;
+		return m_dIOVec.end () - m_iIOChunks;
+	}
+
+	/// num of io vecs for sendmsg/WSAsend
+	inline size_t IOSize () const
+	{
+		return m_iIOChunks;
+	}
+
+#if USE_WINDOWS
+	inline void LeakTo ( CSphVector<sphIovec>& dIOVec )
+	{
+		m_dIOVec.SwapData ( dIOVec );
+	}
+#endif
+};
+
+/// remote agent connection (local per-query state)
+struct AgentConn_t : public ISphRefcountedMT
+{
+	enum ETimeoutKind { TIMEOUT_UNKNOWN, TIMEOUT_RETRY, TIMEOUT_HARD, };
+public:
+	AgentDesc_t		m_tDesc;			///< desc of my host // fixme! turn to ref to MultiAgent mirror?
+	int				m_iSock = -1;
+
+	// time-tracking and timeout settings
+	int				m_iMyConnectTimeout { g_iAgentConnectTimeout };	///< populated from parent distr
+	int				m_iMyQueryTimeout { g_iAgentQueryTimeout };		///< in msec
+	int64_t			m_iStartQuery = 0;	///< the timestamp of the latest request // actualized
+	int64_t			m_iEndQuery = 0;	///< the timestamp of the end of the latest operation // actual
+	int64_t			m_iWall = 0;		///< wall time spent vs this agent // actualized
+	int64_t			m_iWaited = 0;		///< statistics of waited
+
+	// some external stuff
+	CSphVector<CSphQueryResult> m_dResults;	///< multi-query results
+	CSphString		m_sFailure;				///< failure message (both network and logical)
+	mutable int		m_iStoreTag = -1;	///< cookie, m.b. used to 'glue' to concrete connection
+	int				m_iWeight = -1;		///< weight of the index, will be send with query to remote host
+
+	CSphRefcountedPtr<IReporter_t>	m_pReporter { nullptr };	///< used to report back when we're finished
+	LPKEY			m_pPollerTask = nullptr; ///< internal for poller. fixme! privatize?
+	bool			m_bSuccess = false;		///< agent got processed, no need to retry
+
+public:
+	AgentConn_t () = default;
+
+	void SetMultiAgent ( const CSphString &sIndex, MultiAgentDesc_c * pMirror );
+	inline bool IsBlackhole () const { return m_tDesc.m_bBlackhole; }
+	inline bool InNetLoop() const { return m_bInNetLoop; }
+	inline void SetNetLoop ( bool bInNetLoop = true ) { m_bInNetLoop = bInNetLoop; }
+	inline bool FireKick () { bool bRes = m_bNeedKick; m_bNeedKick = false; return bRes; }
+
+	void GenericInit ( IRequestBuilder_t * pQuery, IReplyParser_t * pParser, IReporter_t * pReporter, int iQueryRetry, int iQueryDelay );
+	void StartRemoteLoopTry ();
+
+	void ErrorCallback ( int64_t iWaited );
+	void SendCallback ( int64_t iWaited, DWORD uSent );
+	void RecvCallback ( int64_t iWaited, DWORD uReceived );
+	void TimeoutCallback ();
+	void AbortCallback();
+	bool CheckOrphaned();
+
+#if USE_WINDOWS
+	// move recv buffer to dOut, reinit mine.
+	void LeakRecvTo ( CSphFixedVector<BYTE>& dOut );
+	void LeakSendTo ( CSphVector <ISphOutputBuffer* >& dOut, CSphVector<sphIovec>& dOutIO );
+#endif
+
+	// helper for beautiful logging
+	inline const char * StateName () const 	{ return Agent_e_Name ( m_eConnState ); }
+
+private:
+
+	// prepare buf, parse result
+	IRequestBuilder_t * m_pBuilder = nullptr; ///< fixme! check if it is ok to have as the member, or we don't need it actually
+	IReplyParser_t *	m_pParser = nullptr;
+
+	// working with mirrors
+	MultiAgentDescRefPtr_c m_pMultiAgent { nullptr }; ///< my manager, could turn me into another mirror
+	int			m_iRetries = 0;						///< initialized to max num of tries. 0 mean 1 try, no re-tries.
+	int			m_iMirrorsCount = 1;
+	int			m_iDelay { g_iAgentRetryDelay };	///< delay between retries
+
+	// active timeout (directly used by poller)
+	int64_t		m_iPoolerTimeout = -1;	///< m.b. query, or connect+query when TCP_FASTOPEN
+	ETimeoutKind 	m_eTimeoutKind { TIMEOUT_UNKNOWN };
+
+	// receiving buffer stuff
+	CSphFixedVector<BYTE>	m_dReplyBuf { 0 };
+	int			m_iReplySize = -1;    ///< how many reply bytes are there
+	static const size_t	REPLY_HEADER_SIZE = 12;
+	CSphFixedVector<BYTE>	m_dReplyHeader { REPLY_HEADER_SIZE };
+	BYTE *		m_pReplyCur = nullptr;
+
+	// sending buffer stuff
+	SmartOutputBuffer_t m_tOutput;		///< chain of blobs we're sending to a host
+	IOVec_c 			m_dIOVec;
+
+	// states and flags
+	bool m_bConnectHandshake = false;	///< if we need to establish new connection, and so, wait back handshake version
+	bool m_bInNetLoop	= false;		///< if we're inside netloop (1-thread work with schedule)
+	bool m_bNeedKick	= false;		///< if we've installed callback from outside th and need to kick netloop
+	bool m_bManyTries = false;			///< to avoid report 'retries limit esceeded' if we have ONLY one retry
+
+	Agent_e			m_eConnState { Agent_e::HEALTHY };	///< current state
+	SearchdStatus_e m_eReplyStatus { SEARCHD_ERROR };    ///< reply status code
+
+private:
+	~AgentConn_t () override;
+
+	// switch/check internal state
+	inline bool StateIs ( Agent_e eState ) const { return eState==m_eConnState; }
+	void State ( Agent_e eState );
+
+	bool IsPersistent();
+	void ReturnPersist ();
+
+	bool Fail ( const char * sFmt, ... ) __attribute__ ( ( format ( printf, 2, 3 ) ) );
+	bool Fatal ( AgentStats_e eStat, const char * sMessage, ... ) __attribute__ ( ( format ( printf, 3, 4 ) ) );
+	void Finish ( bool bFailed = false ); /// finish the task, stat time.
+	bool BadResult ( int iError = 0 );	/// always return false
+	void ReportFinish ( bool bSuccess = true );
+	void SendingState (); ///< from CONNECTING state go to HEALTHY and switch timer to QUERY timeout.
+
+	bool StartNextRetry ();
+
+	void LazyTask ( int64_t iTimeoutMS, bool bHardTimeout = false, BYTE ActivateIO = 0 ); // 1=RW, 2=RO.
+	void LazyDeleteOrChange ( int64_t iTimeoutMS = -1 );
+	void ScheduleCallbacks ();
+	void DisableWrite();
+
+	void BuildData ();
+	size_t ReplyBufPlace () const;
+	void InitReplyBuf ( int iSize = 0 );
+	inline bool IsReplyHeader() const { return m_iReplySize<0; }
+
+	SSIZE_T SendChunk (); // low-level (platform specific) send
+	SSIZE_T RecvChunk (); // low-level (platform specific) recv
+
+	int DoTFO ( struct sockaddr * pSs, int iLen );
+
+	bool DoQuery ();
+	bool EstablishConnection ();
+	bool SendQuery (DWORD uSent = 0);
+	bool ReceiveAnswer (DWORD uReceived = 0);
+	bool CommitResult ();
+	bool SwitchBlackhole ();
+};
+
+using VectorAgentConn_t = CSphVector<AgentConn_t *>;
+using VecRefPtrsAgentConn_t = VecRefPtrs_t<AgentConn_t *>;
+class IRemoteAgentsObserver : public IReporter_t
+{
+public:
+
+	// get num of succeeded agents
+	virtual long GetSucceeded () const = 0;
+
+	// get num of succeeded agents
+	virtual long GetFinished () const = 0;
+
+	// block execution while there are works to do
+	virtual void Finish () = 0;
+
+	// block execution while some works finished
+	virtual void WaitChanges () = 0;
+};
+
+IRemoteAgentsObserver * GetObserver ();
+
+void ScheduleDistrJobs ( VectorAgentConn_t &dRemotes, IRequestBuilder_t * pQuery, IReplyParser_t * pParser,
+	IRemoteAgentsObserver * pReporter=nullptr, int iQueryRetry = -1, int iQueryDelay = -1 );
+
+// simplified full task - schedule jobs, wait for complete, report num of succeeded
+int PerformRemoteTasks ( VectorAgentConn_t &dRemotes, IRequestBuilder_t * pQuery, IReplyParser_t * pParser );
 
 /////////////////////////////////////////////////////////////////////////////
 // DISTRIBUTED QUERIES
 /////////////////////////////////////////////////////////////////////////////
 
-
 /// distributed index
 struct DistributedIndex_t : public ServedStats_c, public ISphRefcountedMT
 {
-	VecRefPtrs_t<MultiAgentDesc_c *> m_dAgents;	///< remote agents
+	CSphVector<MultiAgentDesc_c *> m_dAgents;	///< remote agents
 	StrVec_t m_dLocal;								///< local indexes
 	CSphBitvec m_dKillBreak;
 	int m_iAgentConnectTimeout		{ g_iAgentConnectTimeout };	///< in msec
@@ -625,9 +645,7 @@ struct DistributedIndex_t : public ServedStats_c, public ISphRefcountedMT
 	void ForEveryHost ( ProcessFunctor );
 
 private:
-	~DistributedIndex_t () {
-		sphLogDebugv ( "DistributedIndex_t %p removed", this );
-	};
+	~DistributedIndex_t ();
 };
 
 using DistributedIndexRefPtr_t = CSphRefcountedPtr<DistributedIndex_t>;
@@ -644,13 +662,13 @@ public:
 
 	DistributedIndexRefPtr_t Get () REQUIRES_SHARED ( m_pHash->IndexesRWLock () )
 	{
-		auto pDistr = ( DistributedIndex_t * ) RLockedHashIt_c::Get ();
-		DistributedIndexRefPtr_t pRes ( pDistr );
-		return pRes;
+		auto pDistr = ( DistributedIndex_t * ) RLockedHashIt_c::Get ().Leak();
+		return DistributedIndexRefPtr_t ( pDistr );
 	}
 };
 
-extern GuardedHash_c * g_pDistIndexes;    // distributed indexes hash
+extern GuardedHash_c * g_pDistIndexes;	// distributed indexes hash
+extern GuardedHash_c * g_pMultiAgents;	// global hash of all agents
 
 inline DistributedIndexRefPtr_t GetDistr ( const CSphString &sName )
 {
@@ -659,7 +677,7 @@ inline DistributedIndexRefPtr_t GetDistr ( const CSphString &sName )
 
 struct SearchdStats_t
 {
-	DWORD		m_uStarted = 0;
+	DWORD			m_uStarted = 0;
 	CSphAtomicL		m_iConnections;
 	CSphAtomicL		m_iMaxedOut;
 	CSphAtomicL		m_iCommandCount[SEARCHD_COMMAND_TOTAL];
@@ -689,9 +707,10 @@ class cDashStorage : public ISphNoncopyable
 	mutable RwLock_t				m_tDashLock;
 
 public:
-	void				LinkHost ( HostDesc_t &dHost );
+	void				LinkHost ( HostDesc_t &dHost ); ///< put host into dashboard and init link to it
 	HostDashboardPtr_t	FindAgent ( const CSphString& sAgent ) const;
-	void				GetActiveDashes ( VecRefPtrs_t<HostDashboard_t *> & dAgents ) const;
+	void				GetActiveDashes ( CSphVector<HostDashboard_t *> & dAgents ) const;
+	void				CleanupOrphaned();
 };
 
 extern SearchdStats_t			g_tStats;
@@ -708,9 +727,12 @@ void ParseIndexList ( const CSphString &sIndexes, StrVec_t &dOut );
 // if :port is skipped in the line, IANA 9312 will be used in the case
 bool ParseAddressPort ( HostDesc_t & pAgent, const char ** ppLine, const WarnInfo_t& dInfo );
 
-//bool ParseAgentLine ( MultiAgentDesc_c &tAgent, const char * szAgent, const char * szIndexName, AgentOptions_t tDesc );
-bool ConfigureMultiAgent ( MultiAgentDesc_c &tAgent, const char * szAgent, const char * szIndexName
-						   , AgentOptions_t tOptions );
+//! Parse line with agent definition and return addreffed pointer to multiagent (new or from global cache)
+//! \param szAgent - line with agent definition from config
+//! \param szIndexName - index we apply to
+//! \param tOptions - global options affecting agent
+//! \return configured multiagent, or null if failed
+MultiAgentDesc_c * ConfigureMultiAgent ( const char * szAgent, const char * szIndexName, AgentOptions_t tOptions );
 
 struct IRequestBuilder_t : public ISphNoncopyable
 {
@@ -757,11 +779,6 @@ bool sphNBSockEof ( int iSock );
 //////////////////////////////////////////////////////////////////////////
 // Universal work with select/poll/epoll/kqueue
 //////////////////////////////////////////////////////////////////////////
-using Clbck_f = std::function<void ()>;
-using Clbcktm_f = std::function<void (int64_t, DWORD)>;
-
-void EvActions ( AgentConn_t * pConnection, Clbcktm_f && fRead = nullptr
-				 , Clbcktm_f && fWrite = nullptr);
 void FirePoller ();
 
 // wrapper around epoll/kqueue/poll

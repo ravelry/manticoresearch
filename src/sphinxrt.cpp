@@ -1,7 +1,7 @@
 //
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -3922,6 +3922,7 @@ void RtIndex_t::SaveDiskHeader ( const char * sFilename, SphDocID_t iMinDocID, i
 	SaveTokenizerSettings ( tWriter, m_pTokenizer, m_tSettings.m_iEmbeddedLimit );
 
 	// dictionary
+	// can not use embedding as stopwords id differs between RT and plain dictionaries
 	SaveDictionarySettings ( tWriter, m_pDict, m_bKeywordDict, 0 );
 
 	// kill-list size
@@ -6618,42 +6619,9 @@ static CSphDict * SetupStarDict ( CSphScopedPtr<CSphDict> & tContainer, CSphDict
 	return tContainer.Ptr();
 }
 
-struct CSphAttrTypedLocator : public CSphAttrLocator
+struct SphRtFinalMatchCalc_t : ISphMatchProcessor, ISphNoncopyable // fixme! that is actually class, not struct.
 {
-	ESphAttr m_eAttrType;
-	CSphAttrTypedLocator()
-		: m_eAttrType ( SPH_ATTR_NONE )
-	{}
-	inline void Set ( const CSphAttrLocator& tLoc, ESphAttr eAttrType )
-	{
-		m_bDynamic = tLoc.m_bDynamic;
-		m_iBitCount = tLoc.m_iBitCount;
-		m_iBitOffset = tLoc.m_iBitOffset;
-		m_eAttrType = eAttrType;
-	}
-};
-
-struct SphFinalMatchCounter_t : ISphMatchProcessor
-{
-	int		m_iCount;
-	int		m_iSegments;
-
-	explicit SphFinalMatchCounter_t ( int iSegments )
-		: m_iCount ( 0 )
-		, m_iSegments ( iSegments )
-	{ }
-
-	virtual void Process ( CSphMatch * pMatch )
-	{
-		int iMatchSegment = pMatch->m_iTag-1;
-		if ( iMatchSegment>=0 && iMatchSegment<m_iSegments && pMatch->m_pStatic )
-			m_iCount++;
-	}
-};
-
-
-struct SphRtFinalMatchCalc_t : ISphMatchProcessor, ISphNoncopyable
-{
+private:
 	const CSphQueryContext &	m_tCtx;
 	int							m_iSeg;
 	int							m_iSegments;
@@ -6661,6 +6629,7 @@ struct SphRtFinalMatchCalc_t : ISphMatchProcessor, ISphNoncopyable
 	// to skip iteration of matches at sorter and pool setup for segment without matches at sorter
 	CSphBitvec					m_dSegments;
 
+public:
 	SphRtFinalMatchCalc_t ( int iSegments, const CSphQueryContext & tCtx )
 		: m_tCtx ( tCtx )
 		, m_iSeg ( 0 )
@@ -6690,7 +6659,7 @@ struct SphRtFinalMatchCalc_t : ISphMatchProcessor, ISphNoncopyable
 		return ( m_iSeg==0 || m_dSegments.BitCount()>0 );
 	}
 
-	virtual void Process ( CSphMatch * pMatch )
+	void Process ( CSphMatch * pMatch ) final
 	{
 		int iMatchSegment = pMatch->m_iTag-1;
 		if ( iMatchSegment==m_iSeg && pMatch->m_pStatic )
@@ -6714,13 +6683,13 @@ public:
 		, m_tMvaArenaFlag ( tMvaArenaFlag )
 	{}
 
-protected:
+private:
 	const SphChunkGuard_t &				m_tGuard;
 	const CSphVector<const DWORD *> &	m_dDiskMVA;
 	const CSphVector<const BYTE *> &	m_dDiskStrings;
 	const CSphBitvec &					m_tMvaArenaFlag;
 
-	virtual const DWORD * GetMVAPool ( const CSphMatch * pMatch ) override
+	const DWORD * GetMVAPool ( const CSphMatch * pMatch ) final
 	{
 		int nRamChunks = m_tGuard.m_dRamChunks.GetLength();
 		int iChunkId = pMatch->m_iTag-1;
@@ -6730,7 +6699,7 @@ protected:
 		return m_dDiskMVA[iChunkId-nRamChunks];
 	}
 
-	virtual const BYTE * GetStringPool ( const CSphMatch * pMatch ) override
+	const BYTE * GetStringPool ( const CSphMatch * pMatch ) final
 	{
 		int nRamChunks = m_tGuard.m_dRamChunks.GetLength();
 		int iChunkId = pMatch->m_iTag-1;
@@ -6740,7 +6709,7 @@ protected:
 		return m_dDiskStrings[iChunkId-nRamChunks];
 	}
 
-	virtual bool GetArenaProhibitFlag ( const CSphMatch * pMatch ) override
+	bool GetArenaProhibitFlag ( const CSphMatch * pMatch ) final
 	{
 		int nRamChunks = m_tGuard.m_dRamChunks.GetLength();
 		int iChunkId = pMatch->m_iTag-1;
@@ -11676,6 +11645,10 @@ static void MatchingWork ( const StoredQuery_t * pStored, PercolateMatchContext_
 	const bool bCollectDocs = tMatchCtx.m_bGetDocs;
 	int iDocsOff = tMatchCtx.m_dDocsMatched.GetLength();
 	int iMatchCount = 0;
+	// reserve space for matched docs counter
+	if ( bCollectDocs )
+		tMatchCtx.m_dDocsMatched.Add ( 0 );
+
 
 	if ( !pStored->IsFullscan() ) // matching path
 	{
@@ -11697,8 +11670,6 @@ static void MatchingWork ( const StoredQuery_t * pStored, PercolateMatchContext_
 			if ( bCollectDocs )
 			{
 				// docs encoding: docs-count; docs matched
-				if ( !iMatchCount )
-					tMatchCtx.m_dDocsMatched.Add ( 0 );									
 				tMatchCtx.m_dDocsMatched.Reserve ( tMatchCtx.m_dDocsMatched.GetLength() + iMatches );
 				for ( int iMatch=0; iMatch<iMatches; iMatch++ )
 					tMatchCtx.m_dDocsMatched.Add ( pMatch[iMatch].m_uDocID );
@@ -11708,10 +11679,6 @@ static void MatchingWork ( const StoredQuery_t * pStored, PercolateMatchContext_
 		}
 	} else // full-scan path
 	{
-		// reserve space for matched docs counter
-		if ( bCollectDocs )
-			tMatchCtx.m_dDocsMatched.Add ( 0 );
-
 		CSphMatch tDoc;
 		int iStride = DOCINFO_IDSIZE + tMatchCtx.m_tSchema.GetRowSize();
 		const CSphIndex * pIndex = tMatchCtx.m_pTermSetup->m_pIndex;
@@ -11751,6 +11718,9 @@ static void MatchingWork ( const StoredQuery_t * pStored, PercolateMatchContext_
 				tDesc.m_sFilters = tMatchCtx.m_tFilterBuf.cstr();
 			}
 		}
+	} else if ( bCollectDocs ) // pop's up reserved but not used matched counter
+	{
+		tMatchCtx.m_dDocsMatched.Resize ( iDocsOff );
 	}
 
 	if ( tMatchCtx.m_bVerbose )

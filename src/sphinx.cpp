@@ -1,7 +1,7 @@
 //
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -1587,13 +1587,13 @@ static size_t sphReadThrottled ( int iFD, void * pBuf, size_t iCount )
 	if ( iCount<=0 )
 		return iCount;
 
-	auto iStep = g_iMaxIOSize ? Min ( iCount, g_iMaxIOSize ) : iCount;
+	auto iStep = g_iMaxIOSize ? Min ( iCount, (size_t)g_iMaxIOSize ) : iCount;
 	auto * p = ( BYTE * ) pBuf;
 	size_t nBytesToRead = iCount;
 	while ( iCount )
 	{
 		ThrottleSleep();
-		auto iChunk = Min ( iCount, iStep );
+		auto iChunk = (long) Min ( iCount, iStep );
 		auto iRead = sphRead ( iFD, p, iChunk );
 		p += iRead;
 		iCount -= iRead;
@@ -3337,7 +3337,7 @@ void SaveTokenizerSettings ( CSphWriter & tWriter, const ISphTokenizer * pTokeni
 	tWriter.PutString ( tSettings.m_sCaseFolding.cstr () );
 	tWriter.PutDword ( tSettings.m_iMinWordLen );
 
-	bool bEmbedSynonyms = pTokenizer->GetSynFileInfo ().m_uSize<=(SphOffset_t)iEmbeddedLimit;
+	bool bEmbedSynonyms = ( iEmbeddedLimit>0 && pTokenizer->GetSynFileInfo ().m_uSize<=(SphOffset_t)iEmbeddedLimit );
 	tWriter.PutByte ( bEmbedSynonyms ? 1 : 0 );
 	if ( bEmbedSynonyms )
 		pTokenizer->WriteSynonyms ( tWriter );
@@ -3447,7 +3447,8 @@ void SaveDictionarySettings ( CSphWriter & tWriter, const CSphDict * pDict, bool
 	ARRAY_FOREACH ( i, dSWFileInfos )
 		uTotalSize += dSWFileInfos[i].m_uSize;
 
-	bool bEmbedStopwords = uTotalSize<=(SphOffset_t)iEmbeddedLimit;
+	// embed only in case it allowed
+	bool bEmbedStopwords = ( iEmbeddedLimit>0 && uTotalSize<=(SphOffset_t)iEmbeddedLimit );
 	tWriter.PutByte ( bEmbedStopwords ? 1 : 0 );
 	if ( bEmbedStopwords )
 		pDict->WriteStopwords ( tWriter );
@@ -3465,7 +3466,7 @@ void SaveDictionarySettings ( CSphWriter & tWriter, const CSphDict * pDict, bool
 	ARRAY_FOREACH ( i, dWFFileInfos )
 		uTotalSize += dWFFileInfos[i].m_uSize;
 
-	bool bEmbedWordforms = uTotalSize<=(SphOffset_t)iEmbeddedLimit;
+	bool bEmbedWordforms = ( iEmbeddedLimit>0 && uTotalSize<=(SphOffset_t)iEmbeddedLimit );
 	tWriter.PutByte ( bEmbedWordforms ? 1 : 0 );
 	if ( bEmbedWordforms )
 		pDict->WriteWordforms ( tWriter );
@@ -6034,6 +6035,11 @@ void CSphSchemaHelper::FreeDataPtrs ( CSphMatch * pMatch ) const
 	}
 }
 
+void CSphSchemaHelper::DiscardPtr ( int iAttr )
+{
+	m_dDataPtrAttrs.RemoveValue ( iAttr );
+}
+
 
 void CSphSchemaHelper::CloneMatch ( CSphMatch * pDst, const CSphMatch & rhs ) const
 {
@@ -6098,7 +6104,7 @@ CSphSchema & CSphSchema::operator = ( const ISphSchema & rhs )
 }
 
 
-CSphSchema & CSphSchema::operator = ( CSphSchema && rhs )
+CSphSchema & CSphSchema::operator = ( CSphSchema && rhs ) noexcept
 {
 	if ( this!=&rhs )
 	{
@@ -6350,7 +6356,7 @@ bool CSphSchema::IsReserved ( const char * szToken )
 {
 	static const char * dReserved[] =
 	{
-		"AND", "AS", "BY", "DIV", "FACET", "FALSE", "FROM", "ID", "IN", "INDEXES", "IS", "LIMIT", "LOGS",
+		"AND", "AS", "BY", "DIV", "DEBUG", "FACET", "FALSE", "FROM", "ID", "IN", "INDEXES", "IS", "LIMIT", "LOGS",
 		"MOD", "NOT", "NULL", "OR", "ORDER", "RELOAD", "SELECT", "SYSFILTERS", "TRUE", "WAIT_TIMEOUT", nullptr
 	};
 
@@ -8751,17 +8757,17 @@ private:
 	const DWORD *	m_pMVAPool;
 	bool			m_bArenaProhibit;
 
-	virtual const DWORD * GetMVAPool ( const CSphMatch * /*pMatch*/ ) override
+	const DWORD * GetMVAPool ( const CSphMatch * /*pMatch*/ ) final
 	{
 		return m_pMVAPool;
 	}
 
-	virtual const BYTE * GetStringPool ( const CSphMatch * /*pMatch*/ ) override
+	const BYTE * GetStringPool ( const CSphMatch * /*pMatch*/ ) final
 	{
 		return m_pStringPool;
 	}
 
-	virtual bool GetArenaProhibitFlag ( const CSphMatch * /*pMatch*/ ) override
+	bool GetArenaProhibitFlag ( const CSphMatch * /*pMatch*/ ) final
 	{
 		return m_bArenaProhibit;
 	}
@@ -14429,9 +14435,18 @@ bool CSphIndex_VLN::EarlyReject ( CSphQueryContext * pCtx, CSphMatch & tMatch ) 
 		}
 		CopyDocinfo ( pCtx, tMatch, pRow );
 	}
-	pCtx->CalcFilter ( tMatch ); // FIXME!!! leak of filtered STRING_PTR
 
-	return pCtx->m_pFilter ? !pCtx->m_pFilter->Eval ( tMatch ) : false;
+	pCtx->CalcFilter ( tMatch );
+	if ( !pCtx->m_pFilter )
+		return false;
+
+	if ( !pCtx->m_pFilter->Eval ( tMatch ) )
+	{
+		pCtx->FreeDataFilter ( tMatch );
+		return true;
+	}
+
+	return false;
 }
 
 SphDocID_t * CSphIndex_VLN::GetKillList () const
@@ -14625,7 +14640,7 @@ static inline void CalcContextItems ( CSphMatch & tMatch, const CSphVector<CSphQ
 				break;
 
 			case SPH_ATTR_STRINGPTR:
-				tMatch.SetAttr ( tCalc.m_tLoc, (SphAttr_t)tCalc.m_pExpr->StringEvalPacked ( tMatch ) ); // FIXME! a potential leak of *previous* value?
+				tMatch.SetAttr ( tCalc.m_tLoc, (SphAttr_t)tCalc.m_pExpr->StringEvalPacked ( tMatch ) );
 				break;
 
 			case SPH_ATTR_FACTORS:
@@ -14888,6 +14903,12 @@ struct SphFinalMatchCalc_t : ISphMatchProcessor, ISphNoncopyable
 
 	void Process ( CSphMatch * pMatch ) final
 	{
+		// fixme! tag is signed int,
+		// for distr. tags from remotes set with | 0x80000000,
+		// i e in terms of signed int they're <0!
+		// Is it intention, or bug?
+		// If intention, lt us use uniformely either <0, either &0x80000000
+		// conditions to avoid messing. If bug, shit already happened!
 		if ( pMatch->m_iTag>=0 )
 			return;
 
@@ -15061,6 +15082,10 @@ bool CSphIndex_VLN::MultiScan ( const CSphQuery * pQuery, CSphQueryResult * pRes
 	CSphMatch tMatch;
 	tMatch.Reset ( tMaxSorterSchema.GetDynamicSize() );
 	tMatch.m_iWeight = tArgs.m_iIndexWeight;
+	// fixme! tag also used over bitmask | 0x80000000,
+	// which marks that match comes from remote.
+	// using -1 might be also interpreted as 0xFFFFFFFF in such context!
+	// Does it intended?
 	tMatch.m_iTag = tCtx.m_dCalcFinal.GetLength() ? -1 : tArgs.m_iTag;
 
 	if ( pResult->m_pProfile )
@@ -15070,7 +15095,7 @@ bool CSphIndex_VLN::MultiScan ( const CSphQuery * pQuery, CSphQueryResult * pRes
 	// run full scan with block and row filtering for everything else
 	if ( pQuery->m_dFilters.GetLength()==1
 		&& pQuery->m_dFilters[0].m_eType==SPH_FILTER_VALUES
-		&& pQuery->m_dFilters[0].m_bExclude==false
+		&& !pQuery->m_dFilters[0].m_bExclude
 		&& pQuery->m_dFilters[0].m_sAttrName=="@id"
 		&& tArgs.m_dKillList.GetLength()==0
 		&& pQuery->m_dFilterTree.GetLength()==0 )
@@ -16580,7 +16605,8 @@ bool CSphQueryContext::SetupCalc ( CSphQueryResult * pResult, const ISphSchema &
 				CalcItem_t tCalc;
 				tCalc.m_eType = tIn.m_eAttrType;
 				tCalc.m_tLoc = tIn.m_tLocator;
-				tCalc.m_pExpr = pExpr;
+				tCalc.m_pExpr = pExpr; // is not owned, so stink but seems to be ok for now
+				SafeAddRef ( pExpr );
 				PoolPtrs_t tMva;
 				tMva.m_pMva = pMvaPool;
 				tMva.m_bArenaProhibit = bArenaProhibit;
@@ -18612,6 +18638,39 @@ public:
 			digest[i] = ( BYTE ) ( ( state[i >> 2] >> ( ( 3 - ( i & 3 ) ) * 8 ) ) & 255 );
 	}
 };
+
+
+CSphString BinToHex ( const CSphVector<BYTE>& dHash )
+{
+	const char * sDigits = "0123456789abcdef";
+	if ( dHash.IsEmpty() )
+		return "";
+
+	CSphString sRes;
+	auto iLen = 2*dHash.GetLength()*2;
+	sRes.Reserve ( iLen );
+	auto sHash = const_cast<char *> (sRes.cstr ());
+
+	ARRAY_FOREACH ( i, dHash )
+	{
+		sHash[i << 1] = sDigits[dHash[i] >> 4];
+		sHash[1 + ( i << 1 )] = sDigits[dHash[i] & 0x0f];
+	}
+	sHash[iLen] = '\0';
+	return sRes;
+}
+
+CSphString CalcSHA1 ( const void * pData, int iLen )
+{
+	CSphVector<BYTE> dHashValue (HASH20_SIZE);
+	SHA1_c dHasher;
+	dHasher.Init();
+	dHasher.Update ( (const BYTE*) pData, iLen );
+	dHasher.Final ( dHashValue.begin() );
+	return BinToHex ( dHashValue );
+}
+
+
 
 //////////////////////////////////////////////////////////////////////////
 // WriterWithHash_c - CSphWriter which also calc SHA1 on-the-fly
@@ -28830,10 +28889,7 @@ void CSphSource_XMLPipe2::StartElement ( const char * szName, const char ** pAtt
 			return;
 		}
 
-		for ( int i = 0; i < m_tSchema.GetFieldsCount() && m_iCurField==-1; i++ )
-			if ( !strcmp ( m_tSchema.GetFieldName(i), szName ) )
-				m_iCurField = i;
-
+		m_iCurField = m_tSchema.GetFieldIndex ( szName );
 		m_iCurAttr = m_tSchema.GetAttrIndex ( szName );
 
 		if ( m_iCurAttr!=-1 || m_iCurField!=-1 )
@@ -28990,8 +29046,12 @@ void CSphSource_XMLPipe2::Characters ( const char * pCharacters, int iLen )
 	} else
 	{
 		const char * szName = nullptr;
-		if ( m_iCurAttr!=-1 )
-			szName = ( m_iCurField!=-1 ) ? m_tSchema.GetFieldName(m_iCurField) : m_tSchema.GetAttr(m_iCurAttr).m_sName.cstr();
+		if ( m_iCurField!=-1 )
+			szName = m_tSchema.GetFieldName ( m_iCurField );
+		else if ( m_iCurAttr!=-1 )
+			szName = m_tSchema.GetAttr(m_iCurAttr).m_sName.cstr();
+
+		assert ( szName );
 
 		bool bWarned = false;
 		for ( int i = 0; i < m_dWarned.GetLength () && !bWarned; i++ )
@@ -33038,4 +33098,10 @@ volatile bool& sphGetShutdown ()
 {
 	static bool bShutdown = false;
 	return bShutdown;
+}
+
+volatile int &sphGetTFO ()
+{
+	static int iTFO = 0;
+	return iTFO;
 }

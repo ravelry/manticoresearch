@@ -1,7 +1,7 @@
 //
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -18,6 +18,9 @@
 
 #include <ctype.h>
 #include <stdarg.h>
+
+#include "sphinxstd.h"
+#include "sphinx.h"
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -183,6 +186,8 @@ enum ESphLogLevel
 	SPH_LOG_VERY_VERBOSE_DEBUG = 5,
 	SPH_LOG_MAX = SPH_LOG_VERY_VERBOSE_DEBUG
 };
+
+extern ESphLogLevel g_eLogLevel;		// current log level, can be changed on the fly
 
 typedef void ( *SphLogger_fn )( ESphLogLevel, const char *, va_list );
 void sphSetLogger ( SphLogger_fn fnLog );

@@ -1,7 +1,7 @@
 //
+// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -1479,7 +1479,7 @@ struct CSphColumnInfo
 	CSphString		m_sQuery;		///< query to retrieve values (for multi-valued attrs only)
 	CSphString		m_sQueryRange;	///< query to retrieve range (for multi-valued attrs only)
 
-	CSphRefcountedPtr<ISphExpr>		m_pExpr { nullptr };///< evaluator for expression items
+	CSphRefcountedPtr<ISphExpr>		m_pExpr;///< evaluator for expression items
 	ESphAggrFunc	m_eAggrFunc { SPH_AGGR_NONE };	///< aggregate function on top of expression (for GROUP BY)
 	ESphEvalStage	m_eStage { SPH_EVAL_STATIC };///< column evaluation stage (who and how computes this column)
 	bool			m_bPayload = false;
@@ -1565,8 +1565,9 @@ public:
 class CSphSchemaHelper : public ISphSchema
 {
 public:
-	virtual void	FreeDataPtrs ( CSphMatch * pMatch ) const;
-	virtual void	CloneMatch ( CSphMatch * pDst, const CSphMatch & rhs ) const;
+	void	FreeDataPtrs ( CSphMatch * pMatch ) const final;
+	void	CloneMatch ( CSphMatch * pDst, const CSphMatch & rhs ) const final;
+	void 	DiscardPtr ( int iAttr );
 
 protected:
 	CSphVector<int>	m_dDataPtrAttrs;				// rowitems of pointers to data that are stored inside matches
@@ -1593,11 +1594,10 @@ public:
 	/// ctor
 	explicit				CSphSchema ( const char * sName="(nameless)" );
 							CSphSchema ( const CSphSchema & rhs );
-							~CSphSchema(){}
 
 	CSphSchema &			operator = ( const ISphSchema & rhs );
 	CSphSchema &			operator = ( const CSphSchema & rhs );
-	CSphSchema &			operator = ( CSphSchema && rhs );
+	CSphSchema &			operator = ( CSphSchema && rhs ) noexcept;
 
 	/// visitor-style uber-virtual assignment implementation
 	virtual void			AssignTo ( CSphRsetSchema & lhs ) const;
@@ -1718,6 +1718,10 @@ private:
 
 public:
 								CSphRsetSchema();
+								~CSphRsetSchema() override
+	{
+		assert (true);
+	};
 	CSphRsetSchema &			operator = ( const ISphSchema & rhs );
 	CSphRsetSchema &			operator = ( const CSphSchema & rhs );
 
@@ -3007,24 +3011,26 @@ struct CSphMatchComparatorState
 	ESphAttr			m_tSubType[MAX_ATTRS];		///< sort-by expression type
 	int					m_dAttrs[MAX_ATTRS];		///< sort-by attr index
 
-	DWORD				m_uAttrDesc;				///< sort order mask (if i-th bit is set, i-th attr order is DESC)
-	DWORD				m_iNow;						///< timestamp (for timesegments sorting mode)
-	SphStringCmp_fn		m_fnStrCmp;					///< string comparator
+	DWORD				m_uAttrDesc = 0;			///< sort order mask (if i-th bit is set, i-th attr order is DESC)
+	DWORD				m_iNow = 0;					///< timestamp (for timesegments sorting mode)
+	SphStringCmp_fn		m_fnStrCmp = nullptr;		///< string comparator
 
 
 	/// create default empty state
 	CSphMatchComparatorState ()
-		: m_uAttrDesc ( 0 )
-		, m_iNow ( 0 )
-		, m_fnStrCmp ( nullptr )
 	{
-		for ( int i=0; i<MAX_ATTRS; i++ )
+		for ( int i=0; i<MAX_ATTRS; ++i )
 		{
 			m_eKeypart[i] = SPH_KEYPART_ID;
 			m_tSubExpr[i] = nullptr;
 			m_tSubType[i] = SPH_ATTR_NONE;
 			m_dAttrs[i] = -1;
 		}
+	}
+
+	~CSphMatchComparatorState ()
+	{
+		for ( ISphExpr *&pExpr :  m_tSubExpr ) SafeRelease( pExpr );
 	}
 
 	/// check if any of my attrs are bitfields
@@ -3558,6 +3564,11 @@ extern CSphString g_sLemmatizerBase;
 // Get global shutdown flag
 volatile bool& sphGetShutdown();
 
+// Access to global TFO settings
+volatile int& sphGetTFO();
+#define TFO_CONNECT 1
+#define TFO_LISTEN 2
+#define TFO_ABSENT (-1)
 /////////////////////////////////////////////////////////////////////////////
 
 // workaround to suppress C4511/C4512 warnings (copy ctor and assignment operator) in VS 2003
