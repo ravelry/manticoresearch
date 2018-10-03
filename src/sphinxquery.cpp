@@ -218,7 +218,9 @@ void XQParseHelper_c::Setup ( const CSphSchema * pSchema, ISphTokenizer * pToken
 {
 	m_pSchema = pSchema;
 	m_pTokenizer = pTokenizer;
+	SafeAddRef ( pTokenizer );
 	m_pDict = pDict;
+	SafeAddRef ( pDict );
 	m_pParsed = pXQQuery;
 	m_iAtomPos = 0;
 	m_bEmptyStopword = ( tSettings.m_iStopwordStep==0 );
@@ -1731,11 +1733,12 @@ void XQParser_t::PhraseShiftQpos ( XQNode_t * pNode )
 }
 
 
-bool XQParser_t::Parse ( XQQuery_t & tParsed, const char * sQuery, const CSphQuery * pQuery, const ISphTokenizer * pTokenizer,
-	const CSphSchema * pSchema, CSphDict * pDict, const CSphIndexSettings & tSettings )
+bool XQParser_t::Parse ( XQQuery_t & tParsed, const char * sQuery, const CSphQuery * pQuery,
+	const ISphTokenizer * pTokenizer, const CSphSchema * pSchema, CSphDict * pDict,
+	const CSphIndexSettings & tSettings )
 {
 	// FIXME? might wanna verify somehow that pTokenizer has all the specials etc from sphSetupQueryTokenizer
-	CSphScopedPtr<ISphTokenizer> pMyTokenizer ( pTokenizer->Clone ( SPH_CLONE_QUERY_LIGHTWEIGHT ) );
+	ISphTokenizerRefPtr_c pMyTokenizer { pTokenizer->Clone ( SPH_CLONE_QUERY_LIGHTWEIGHT ) };
 	CSphTightVector<char> dRlpBuf;
 
 	// most outcomes are errors
@@ -1775,12 +1778,9 @@ bool XQParser_t::Parse ( XQQuery_t & tParsed, const char * sQuery, const CSphQue
 	}
 
 	// setup parser
-	CSphDict * pMyDict = pDict;
-	CSphScopedPtr<CSphDict> tDictCloned ( NULL );
-	if ( pDict->HasState() )
-		tDictCloned = pMyDict = pDict->Clone();
+	CSphDictRefPtr_c pMyDict { GetStatelessDict ( pDict ) };
 
-	Setup ( pSchema, pMyTokenizer.Ptr(), pMyDict, &tParsed, tSettings );
+	Setup ( pSchema, pMyTokenizer, pMyDict, &tParsed, tSettings );
 	m_sQuery = (BYTE*) sQuery;
 	m_iQueryLen = sQuery ? strlen(sQuery) : 0;
 	m_iPendingNulls = 0;
@@ -1979,8 +1979,9 @@ CSphString sphReconstructNode ( const XQNode_t * pNode, const CSphSchema * pSche
 }
 
 
-bool sphParseExtendedQuery ( XQQuery_t & tParsed, const char * sQuery, const CSphQuery * pQuery, const ISphTokenizer * pTokenizer,
-	const CSphSchema * pSchema, CSphDict * pDict, const CSphIndexSettings & tSettings )
+bool sphParseExtendedQuery ( XQQuery_t & tParsed, const char * sQuery, const CSphQuery * pQuery,
+	const ISphTokenizer * pTokenizer, const CSphSchema * pSchema, CSphDict * pDict,
+	const CSphIndexSettings & tSettings )
 {
 	XQParser_t qp;
 	bool bRes = qp.Parse ( tParsed, sQuery, pQuery, pTokenizer, pSchema, pDict, tSettings );
@@ -4466,7 +4467,9 @@ class QueryParserPlain_c : public QueryParser_i
 public:
 	virtual bool IsFullscan ( const CSphQuery & tQuery ) const;
 	virtual bool IsFullscan ( const XQQuery_t & tQuery ) const;
-	virtual bool ParseQuery ( XQQuery_t & tParsed, const char * sQuery, const CSphQuery * pQuery, const ISphTokenizer * pQueryTokenizer, const ISphTokenizer * pQueryTokenizerJson, const CSphSchema * pSchema, CSphDict * pDict, const CSphIndexSettings & tSettings ) const;
+	virtual bool ParseQuery ( XQQuery_t & tParsed, const char * sQuery, const CSphQuery * pQuery,
+		const ISphTokenizer * pQueryTokenizer, const ISphTokenizer * pQueryTokenizerJson,
+		const CSphSchema * pSchema, CSphDict * pDict, const CSphIndexSettings & tSettings ) const;
 };
 
 
@@ -4482,7 +4485,9 @@ bool QueryParserPlain_c::IsFullscan ( const XQQuery_t & /*tQuery*/ ) const
 }
 
 
-bool QueryParserPlain_c::ParseQuery ( XQQuery_t & tParsed, const char * sQuery, const CSphQuery * pQuery, const ISphTokenizer * pQueryTokenizer, const ISphTokenizer *, const CSphSchema * pSchema, CSphDict * pDict, const CSphIndexSettings & tSettings ) const
+bool QueryParserPlain_c::ParseQuery ( XQQuery_t & tParsed, const char * sQuery, const CSphQuery * pQuery,
+	const ISphTokenizer * pQueryTokenizer, const ISphTokenizer *, const CSphSchema * pSchema,
+	CSphDict * pDict, const CSphIndexSettings & tSettings ) const
 {
 	return sphParseExtendedQuery ( tParsed, sQuery, pQuery, pQueryTokenizer, pSchema, pDict, tSettings );
 }

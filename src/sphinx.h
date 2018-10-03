@@ -82,6 +82,7 @@ typedef uint64_t		SphWordID_t;
 typedef uint64_t		SphDocID_t;
 
 #define DOCID_MAX		U64C(0xffffffffffffffff)
+#define WORDID_MAX		U64C(0xffffffffffffffff)
 #define DOCID_FMT		UINT64_FMT
 #define DOCINFO_IDSIZE	2
 
@@ -121,7 +122,7 @@ template<> inline DWORD DOCINFO2ID_T ( const DWORD * pDocinfo )
 template<> inline uint64_t DOCINFO2ID_T ( const DWORD * pDocinfo )
 {
 #if USE_LITTLE_ENDIAN
-	return uint64_t(pDocinfo[0]) + (uint64_t(pDocinfo[1])<<32);
+	return *(uint64_t *) pDocinfo;
 #else
 	return uint64_t(pDocinfo[1]) + (uint64_t(pDocinfo[0])<<32);
 #endif
@@ -135,8 +136,7 @@ inline void DOCINFOSETID ( DWORD * pDocinfo, DWORD uValue )
 inline void DOCINFOSETID ( DWORD * pDocinfo, uint64_t uValue )
 {
 #if USE_LITTLE_ENDIAN
-	pDocinfo[0] = (DWORD)uValue;
-	pDocinfo[1] = (DWORD)(uValue>>32);
+	*( uint64_t * ) pDocinfo = uValue;
 #else
 	pDocinfo[0] = (DWORD)(uValue>>32);
 	pDocinfo[1] = (DWORD)uValue;
@@ -434,52 +434,50 @@ protected:
 };
 
 /////////////////////////////////////////////////////////////////////////////
+enum
+{
+	// where was TOKENIZER_SBCS=1 once
+	TOKENIZER_UTF8 = 2,
+	TOKENIZER_NGRAM = 3
+};
 
 struct CSphSavedFile
 {
 	CSphString			m_sFilename;
-	SphOffset_t			m_uSize;
-	SphOffset_t			m_uCTime;
-	SphOffset_t			m_uMTime;
-	DWORD				m_uCRC32;
-
-						CSphSavedFile ();
+	SphOffset_t			m_uSize = 0;
+	SphOffset_t			m_uCTime = 0;
+	SphOffset_t			m_uMTime = 0;
+	DWORD				m_uCRC32 = 0;
 };
 
 
 struct CSphEmbeddedFiles
 {
-	bool						m_bEmbeddedSynonyms;
-	bool						m_bEmbeddedStopwords;
-	bool						m_bEmbeddedWordforms;
+	bool						m_bEmbeddedSynonyms = false;
+	bool						m_bEmbeddedStopwords = false;
+	bool						m_bEmbeddedWordforms = false;
 	CSphSavedFile				m_tSynonymFile;
 	StrVec_t					m_dSynonyms;
 	CSphVector<CSphSavedFile>	m_dStopwordFiles;
 	CSphVector<SphWordID_t>		m_dStopwords;
 	StrVec_t					m_dWordforms;
 	CSphVector<CSphSavedFile>	m_dWordformFiles;
-
-								CSphEmbeddedFiles ();
-
 	void						Reset();
 };
 
 
 struct CSphTokenizerSettings
 {
-	int					m_iType;
+	int					m_iType { TOKENIZER_UTF8 };
 	CSphString			m_sCaseFolding;
-	int					m_iMinWordLen;
+	int					m_iMinWordLen = 1;
 	CSphString			m_sSynonymsFile;
 	CSphString			m_sBoundary;
 	CSphString			m_sIgnoreChars;
-	int					m_iNgramLen;
+	int					m_iNgramLen = 0;
 	CSphString			m_sNgramChars;
 	CSphString			m_sBlendChars;
 	CSphString			m_sBlendMode;
-	CSphString			m_sIndexingPlugin;	///< this tokenizer wants an external plugin to process its raw output
-
-						CSphTokenizerSettings ();
 };
 
 
@@ -512,12 +510,11 @@ struct CSphMultiformContainer;
 class CSphWriter;
 
 /// generic tokenizer
-class ISphTokenizer
+class ISphTokenizer : public ISphRefcountedMT
 {
-public:
-	/// trivial dtor
-	virtual							~ISphTokenizer () {}
-
+	/// trivial dtor - inherited from Refcounted
+protected:
+	~ISphTokenizer() override {};
 public:
 	/// set new translation table
 	/// returns true on success, false on failure
@@ -705,6 +702,8 @@ public:
 	bool							m_bPhrase = false;
 };
 
+using ISphTokenizerRefPtr_c = CSphRefcountedPtr<ISphTokenizer>;
+
 /// parse charset table
 bool					sphParseCharset ( const char * sCharset, CSphVector<CSphRemapRange> & dRemaps );
 
@@ -784,17 +783,18 @@ struct CSphWordforms
 struct CSphWordHit;
 class CSphAutofile;
 struct DictHeader_t;
-class CSphDict
+class CSphDict : public ISphRefcountedMT
 {
+protected:
+	/// virtualizing dtor. Protected to follow refcounted rules.
+	virtual                ~CSphDict () {}
+
 public:
 	static const int	ST_OK = 0;
 	static const int	ST_ERROR = 1;
 	static const int	ST_WARNING = 2;
 
 public:
-	/// virtualizing dtor
-	virtual				~CSphDict () {}
-
 	/// Get word ID by word, "text" version
 	/// may apply stemming and modify word inplace
 	/// modified word may become bigger than the original one, so make sure you have enough space in buffer which is pointer by pWord
@@ -910,7 +910,7 @@ public:
 	virtual bool			HasState () const { return false; }
 
 	/// make a clone
-	virtual CSphDict *		Clone () const { return NULL; }
+	virtual CSphDict *		Clone () const { return nullptr; }
 
 	/// get settings hash
 	virtual uint64_t		GetSettingsFNV () const = 0;
@@ -919,6 +919,10 @@ protected:
 	CSphString				m_sMorphFingerprint;
 };
 
+using CSphDictRefPtr_c = CSphRefcountedPtr<CSphDict>;
+
+/// returns pDict, if stateless. Or it's clone, if not
+CSphDict * GetStatelessDict ( CSphDict * pDict );
 
 /// traits dictionary factory (no storage, only tokenizing, lemmatizing, etc.)
 CSphDict * sphCreateDictionaryTemplate ( const CSphDictSettings & tSettings, const CSphEmbeddedFiles * pFiles, const ISphTokenizer * pTokenizer, const char * sIndex, CSphString & sError );
@@ -1103,9 +1107,9 @@ struct FieldMask_t
 /// hit info
 struct CSphWordHit
 {
-	SphDocID_t		m_uDocID;		///< document ID
-	SphWordID_t		m_uWordID;		///< word ID in current dictionary
-	Hitpos_t		m_uWordPos;		///< word position in current document
+	SphDocID_t		m_uDocID = DOCID_MAX;		///< document ID
+	SphWordID_t		m_uWordID = WORDID_MAX;		///< word ID in current dictionary
+	Hitpos_t		m_uWordPos = EMPTY_HIT;		///< word position in current document
 };
 
 
@@ -1259,19 +1263,8 @@ public:
 	int						m_iTag = 0;			///< my index tag
 
 public:
-	/// ctor. clears everything
 	CSphMatch () = default;
 
-private:
-	/// copy ctor. just in case
-	CSphMatch ( const CSphMatch & rhs )
-		: m_pStatic ( nullptr )
-		, m_pDynamic ( nullptr )
-	{
-		*this = rhs;
-	}
-
-public:
 	/// dtor. frees everything
 	~CSphMatch ()
 	{
@@ -1387,13 +1380,9 @@ public:
 	/// MVA getter
 	const DWORD * GetAttrMVA ( const CSphAttrLocator & tLoc, const DWORD * pPool, bool bArenaProhibit ) const;
 
-private:
 	/// "manually" prevent copying
-	const CSphMatch & operator = ( const CSphMatch & )
-	{
-		assert ( 0 && "internal error (CSphMatch::operator= called)" );
-		return *this;
-	}
+	CSphMatch & operator = ( const CSphMatch & ) = delete;
+	CSphMatch ( const CSphMatch &) = delete;
 };
 
 /// specialized swapper
@@ -1567,16 +1556,30 @@ class CSphSchemaHelper : public ISphSchema
 public:
 	void	FreeDataPtrs ( CSphMatch * pMatch ) const final;
 	void	CloneMatch ( CSphMatch * pDst, const CSphMatch & rhs ) const final;
-	void 	DiscardPtr ( int iAttr );
+
+	/// clone all raw attrs and only specified ptrs
+	void	CloneMatchSpecial ( CSphMatch * pDst, const CSphMatch &rhs, const CSphVector<int> &dSpecials ) const;
+
+	/// exclude vec of rowitems from dataPtrAttrs and return diff back
+	CSphVector<int> SubsetPtrs ( CSphVector<int> &dSpecials ) const ;
+
+	/// get dynamic row part size
+	int GetDynamicSize () const final { return m_dDynamicUsed.GetLength (); }
 
 protected:
-	CSphVector<int>	m_dDataPtrAttrs;				// rowitems of pointers to data that are stored inside matches
+	CSphVector<int>	m_dDataPtrAttrs;		///< rowitems of pointers to data that are stored inside matches
+	CSphVector<int> m_dDynamicUsed;			///< dynamic row part map
 
 	/// generic InsertAttr() implementation that tracks data ptr attributes
 	void			InsertAttr ( CSphVector<CSphColumnInfo> & dAttrs, CSphVector<int> & dUsed, int iPos, const CSphColumnInfo & tCol, bool bDynamic );
 	void			Reset();
 
 	void			CopyPtrs ( CSphMatch * pDst, const CSphMatch & rhs ) const;
+
+public:
+	// free/copy by specified vec of rowitems, assumed to be from SubsetPtrs() call.
+	static void FreeDataSpecial ( CSphMatch * pMatch, const CSphVector<int> &dSpecials );
+	static void	CopyPtrsSpecial ( CSphMatch * pDst, const void* pSrc, const CSphVector<int> &dSpecials );
 };
 
 
@@ -1625,13 +1628,10 @@ public:
 	void					Reset ();
 
 	/// get row size (static+dynamic combined)
-	virtual int				GetRowSize () const				{ return m_dStaticUsed.GetLength() + m_dDynamicUsed.GetLength(); }
+	virtual int				GetRowSize () const				{ return GetStaticSize () + GetDynamicSize(); }
 
 	/// get static row part size
 	virtual int				GetStaticSize () const			{ return m_dStaticUsed.GetLength(); }
-
-	/// get dynamic row part size
-	virtual int				GetDynamicSize () const			{ return m_dDynamicUsed.GetLength(); }
 
 	virtual int				GetAttrsCount () const			{ return m_dAttrs.GetLength(); }
 	virtual int				GetFieldsCount() const			{ return m_dFields.GetLength(); }
@@ -1685,7 +1685,6 @@ protected:
 	CSphVector<CSphColumnInfo>	m_dFields;		///< my fulltext-searchable fields
 	CSphVector<CSphColumnInfo>	m_dAttrs;		///< all my attributes
 	CSphVector<int>				m_dStaticUsed;	///< static row part map (amount of used bits in each rowitem)
-	CSphVector<int>				m_dDynamicUsed;	///< dynamic row part map
 
 
 	/// returns 0xffff if bucket list is empty and position otherwise
@@ -1708,20 +1707,16 @@ protected:
 class CSphRsetSchema : public CSphSchemaHelper
 {
 protected:
-	const CSphSchema *			m_pIndexSchema;		///< original index schema, for the static part
+	const CSphSchema *			m_pIndexSchema = nullptr;		///< original index schema, for the static part
 	CSphVector<CSphColumnInfo>	m_dExtraAttrs;		///< additional dynamic attributes, for the dynamic one
-	CSphVector<int>				m_dDynamicUsed;		///< dynamic row part map
 	CSphVector<int>				m_dRemoved;			///< original indexes that are suppressed from the index schema by RemoveStaticAttr()
 
 private:
 	int							ActualLen() const;	///< len of m_pIndexSchema accounting removed stuff
 
 public:
-								CSphRsetSchema();
-								~CSphRsetSchema() override
-	{
-		assert (true);
-	};
+								~CSphRsetSchema() override {}
+
 	CSphRsetSchema &			operator = ( const ISphSchema & rhs );
 	CSphRsetSchema &			operator = ( const CSphSchema & rhs );
 
@@ -1732,7 +1727,6 @@ public:
 public:
 	virtual int					GetRowSize() const;
 	virtual int					GetStaticSize() const;
-	virtual int					GetDynamicSize() const;
 	virtual int					GetAttrsCount() const;
 	virtual int					GetFieldsCount() const;
 	virtual int					GetAttrIndex ( const char * sName ) const;
@@ -1885,11 +1879,12 @@ struct CSphFieldFilterSettings
 };
 
 /// field filter
-class ISphFieldFilter
+class ISphFieldFilter : public ISphRefcountedMT
 {
+protected:
+	virtual                     ~ISphFieldFilter ();
 public:
 								ISphFieldFilter();
-	virtual						~ISphFieldFilter();
 
 	virtual	int					Apply ( const BYTE * sField, int iLength, CSphVector<BYTE> & dStorage, bool bQuery ) = 0;
 	virtual	void				GetSettings ( CSphFieldFilterSettings & tSettings ) const = 0;
@@ -1900,6 +1895,9 @@ public:
 protected:
 	ISphFieldFilter *		m_pParent;
 };
+
+using ISphFieldFilterRefPtr_c = CSphRefcountedPtr<ISphFieldFilter>;
+
 
 /// create a regexp field filter
 ISphFieldFilter * sphCreateRegexpFilter ( const CSphFieldFilterSettings & tFilterSettings, CSphString & sError );
@@ -2022,9 +2020,9 @@ public:
 	virtual void						PostIndex () {}
 
 protected:
-	ISphTokenizer *						m_pTokenizer = nullptr;	///< my tokenizer
-	CSphDict *							m_pDict = nullptr;		///< my dict
-	ISphFieldFilter	*					m_pFieldFilter = nullptr;	///< my field filter
+	ISphTokenizerRefPtr_c				m_pTokenizer;	///< my tokenizer
+	CSphDictRefPtr_c					m_pDict;		///< my dict
+	ISphFieldFilterRefPtr_c				m_pFieldFilter;	///< my field filter
 
 	CSphSourceStats						m_tStats;		///< my stats
 	CSphSchema 							m_tSchema;		///< my schema
@@ -3417,10 +3415,10 @@ public:
 	virtual void				GetFieldFilterSettings ( CSphFieldFilterSettings & tSettings );
 
 public:
-	int64_t						m_iTID;					///< last committed transaction id
+	int64_t						m_iTID = 0;				///< last committed transaction id
 
-	int							m_iExpandKeywords;		///< enable automatic query-time keyword expansion (to "( word | =word | *word* )")
-	int							m_iExpansionLimit;
+	int							m_iExpandKeywords = KWE_DISABLED;	///< enable automatic query-time keyword expansion (to "( word | =word | *word* )")
+	int							m_iExpansionLimit = 0;
 
 protected:
 	static CSphAtomic			m_tIdGenerator;
@@ -3431,28 +3429,28 @@ protected:
 	CSphString					m_sLastError;
 	CSphString					m_sLastWarning;
 
-	bool						m_bInplaceSettings;
-	int							m_iHitGap;
-	int							m_iDocinfoGap;
-	float						m_fRelocFactor;
-	float						m_fWriteFactor;
+	bool						m_bInplaceSettings = false;
+	int							m_iHitGap = 0;
+	int							m_iDocinfoGap = 0;
+	float						m_fRelocFactor { 0.0f };
+	float						m_fWriteFactor { 0.0f };
 
-	bool						m_bKeepFilesOpen;		///< keep files open to avoid race on seamless rotation
-	bool						m_bBinlog;
+	bool						m_bKeepFilesOpen = false;	///< keep files open to avoid race on seamless rotation
+	bool						m_bBinlog = true;
 
-	bool						m_bStripperInited;		///< was stripper initialized (old index version (<9) handling)
+	bool						m_bStripperInited = true;	///< was stripper initialized (old index version (<9) handling)
 
 protected:
 	CSphIndexSettings			m_tSettings;
 
-	ISphFieldFilter *			m_pFieldFilter;
-	ISphTokenizer *				m_pTokenizer;
-	ISphTokenizer *				m_pQueryTokenizer;
-	ISphTokenizer *				m_pQueryTokenizerJson {nullptr};
-	CSphDict *					m_pDict;
+	ISphFieldFilterRefPtr_c		m_pFieldFilter;
+	ISphTokenizerRefPtr_c		m_pTokenizer;
+	ISphTokenizerRefPtr_c		m_pQueryTokenizer;
+	ISphTokenizerRefPtr_c		m_pQueryTokenizerJson;
+	CSphDictRefPtr_c			m_pDict;
 
-	int							m_iMaxCachedDocs;
-	int							m_iMaxCachedHits;
+	int							m_iMaxCachedDocs = 0;
+	int							m_iMaxCachedHits = 0;
 	CSphString					m_sIndexName;			///< index ID in binlogging; otherwise used only in messages.
 	CSphString					m_sFilename;
 
@@ -3570,7 +3568,6 @@ volatile int& sphGetTFO();
 #define TFO_LISTEN 2
 #define TFO_ABSENT (-1)
 /////////////////////////////////////////////////////////////////////////////
-
 // workaround to suppress C4511/C4512 warnings (copy ctor and assignment operator) in VS 2003
 #if _MSC_VER>=1300 && _MSC_VER<1400
 #pragma warning(disable:4511)

@@ -297,7 +297,7 @@ static PluginLib_c * LoadPluginLibrary ( const char * sLibName, CSphString & sEr
 	if ( bLinuxReload )
 	{
 		sTmpfile.SetSprintf ( "%s/%s.%u", g_sPluginDir.cstr(), sLibName, sphRand() );
-		if ( ::rename ( sLibfile.cstr(), sTmpfile.cstr() ) )
+		if ( sph::rename ( sLibfile.cstr(), sTmpfile.cstr() ) )
 		{
 			sError.SetSprintf ( "failed to rename file (src=%s, dst=%s, errno=%d, error=%s)", sLibfile.cstr(), sTmpfile.cstr(), errno, strerrorm(errno) );
 			return nullptr;
@@ -316,7 +316,7 @@ static PluginLib_c * LoadPluginLibrary ( const char * sLibName, CSphString & sEr
 	// rename file back to the original name
 	if ( bLinuxReload )
 	{
-		if ( ::rename ( sTmpfile.cstr(), sLibfile.cstr() ) )
+		if ( sph::rename ( sTmpfile.cstr(), sLibfile.cstr() ) )
 		{
 			sError.SetSprintf ( "failed to rename file (src=%s, dst=%s, errno=%d, error=%s)", sTmpfile.cstr(), sLibfile.cstr(), errno, strerrorm(errno) );
 			dlclose ( pHandle );
@@ -592,7 +592,7 @@ bool sphPluginReload ( const char * sName, CSphString & sError )
 
 PluginDesc_c * sphPluginAcquire ( const char * szLib, PluginType_e eType, const char * szName, CSphString & sError )
 {
-	PluginDesc_c * pDesc = sphPluginGet ( eType, szName );
+	CSphRefcountedPtr<PluginDesc_c> pDesc { sphPluginGet ( eType, szName ) };
 	if ( !pDesc )
 	{
 		if ( !sphPluginCreate ( szLib, eType, szName, SPH_ATTR_NONE, sError ) )
@@ -603,11 +603,10 @@ PluginDesc_c * sphPluginAcquire ( const char * szLib, PluginType_e eType, const 
 	CSphString sLib ( szLib );
 	sLib.ToLower();
 	if ( pDesc->GetLibName()==sLib )
-		return pDesc;
+		return pDesc.Leak();
 
 	sError.SetSprintf ( "unable to load plugin '%s' from '%s': it has already been loaded from library '%s'",
 		szName, sLib.cstr(), pDesc->GetLibName().cstr() );
-	pDesc->Release();
 	return nullptr;
 }
 

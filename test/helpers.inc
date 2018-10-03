@@ -361,22 +361,57 @@ function CheckSearchdLog ( $error_file, &$retval )
 	return $error;
 }
 
+function UseValgrind ()
+{
+	global $g_locals;
+	if ( isset ( $g_locals['valgrindsearchd'] ) )
+		return  $g_locals['valgrindsearchd'];
+	else
+		return false;
+}
+
+function ActionRetries ()
+{
+	global $action_retries, $valgrind_action_retries;
+	if (!UseValgrind() )
+		return $action_retries;
+
+	return $action_retries + $valgrind_action_retries;
+}
+
+function GetSearchd ( &$searchd, &$error )
+{
+	global $g_locals;
+
+	if ( UseValgrind() ) {
+		$searchd = "valgrind --leak-check=full ";
+		if ( file_exists("valgrind.supp" ) )
+			$searchd .= "--suppressions=" . getcwd() . "/valgrind.supp ";
+		$searchd .= $g_locals['searchd'];
+	}
+	else
+	{
+		$searchd = $g_locals['searchd'];
+		if ( !is_executable($searchd) )
+		{
+			$error = "$searchd: searchd not found";
+			return false;
+		}
+	}
+	return true;
+}
 
 function StartSearchd ( $config_file, $error_file, $pidfile, &$error, $use_watchdog = false, $addr=false, $port=false )
 {
-	global $g_locals, $windows, $action_retries, $action_wait_timeout, $sd_address, $sd_port;
+	global $g_locals, $windows, $action_wait_timeout, $sd_address, $sd_port;
 
 
 	$abs_config_file = testdir($config_file);
 	$abs_error_file = testdir($error_file);
 	$abs_pidfile = testdir($pidfile);
 
-	$path = $g_locals['searchd'];
-	if ( !is_executable($path) )
-	{
-		$error = "$path: searchd not found";
+	if (!GetSearchd ($path, $error))
 		return 1;
-	}
 
 	if ( !@touch($abs_error_file) )
 	{
@@ -416,6 +451,8 @@ function StartSearchd ( $config_file, $error_file, $pidfile, &$error, $use_watch
 
 	if ($cd)
 		chdir($backdir);
+
+	$action_retries = ActionRetries();
 
 	// wait until pid appears
 	for ( $i=0; $i<$action_retries && !file_exists($abs_pidfile); $i++ )
@@ -493,14 +530,14 @@ function StartSearchd ( $config_file, $error_file, $pidfile, &$error, $use_watch
 
 function StopSearchd ( $config, $pidfile )
 {
-	global $g_locals, $action_retries, $action_wait_timeout;
+	global $action_wait_timeout;
 	$ret = 0;
 	$abs_config = testdir($config);
 	$abs_pidfile = testdir($pidfile);
-
+	$action_retries = ActionRetries();
 	if ( file_exists($abs_pidfile) && count(file($abs_pidfile)) )
 	{
-		$path = $g_locals['searchd'];
+		GetSearchd ($path, $error);
 		$dummy = array();
 		exec ( "$path --config $abs_config --stopwait", $dummy, $ret );
 
@@ -517,20 +554,22 @@ function StopSearchd ( $config, $pidfile )
 function StopWaitSearchd ( $config, $pidfile )
 {
 	return StopSearchd ( $config, $pidfile );
-	global $g_locals;
-	$ret = 0;
+}
 
-	$abs_config = testdir($config);
-	$abs_pidfile = testdir($pidfile);
+function RestartDaemon ()
+{
+	$stop = StopWaitSearchd ('config.conf', 'searchd.pid');
+	$status = 'stop=' . ( $stop==0 ? 'ok' : 'error' ) . ', return code=' . $stop;
 
-
-	if ( file_exists($abs_pidfile) && count(file($abs_pidfile)) )
+	$start = StartSearchd ( 'config.conf', 'error.txt', 'searchd.pid', $error, false );
+	if ( $start == 0 || $start == 2 )
 	{
-		$path = $g_locals['searchd'];
-		$dummy = array();
-		exec ( "$path --config $abs_config --stopwait", $dummy, $ret );
+		$status .= "; start=ok" . ', return code=' . $start;
+	} else
+	{
+		$status .=  "; start=failed, return code=" . $start . ", error=" . $error;
 	}
-	return $ret;
+	return $status;
 }
 
 function KillSearchd ( $config, $pidfile, $signal, $unlinkpid=True )
@@ -563,6 +602,14 @@ function IsModelGenMode ()
 	return $g_model;
 }
 
+function RandomWords ( $n, $seed )
+{
+	srand ( $seed );
+	$words = [];
+	for ( $k=0; $k<$n; $k++ )
+		$words[] = substr ( str_shuffle ( 'abcdefghijklmnopqrstuvwxyz' ), 0, 5 );
+	return join ( $words, " " );
+}
 
 function RoundFloatValues ( &$values, $roundoff )
 {
@@ -780,12 +827,22 @@ class QLClient
 {
 	private $_conn = false;
 
-	function Reconnect()
+	function Disconnect()
 	{
 		if ($this->_conn!==false)
 			@mysqli_close($this->_conn);
+	}
+
+	function Connect()
+	{
 		$this->_conn = ConnectQL();
 		return $this->_conn!==false;
+	}
+
+	function Reconnect()
+	{
+		$this->Disconnect();
+		return $this->Connect();
 	}
 
 	function Query($q)
@@ -1734,22 +1791,12 @@ class SphinxConfig
 				$status = '';
 				if ( $system_cmd=="restart-daemon" )
 				{
-					$stop = StopWaitSearchd ('config.conf', 'searchd.pid');
-					$status = 'stop=' . ( $stop==0 ? 'ok' : 'error' ) . ', return code=' . $stop;
-					
-					$start = StartSearchd ( 'config.conf', 'error.txt', 'searchd.pid', $error, false );
-					if ( $start == 0 || $start == 2 )
-					{
-						$status .= "; start=ok" . ', return code=' . $start;
-					} else
-					{
-						$status .=  "; start=failed, return code=" . $start . ", error=" . $error;
-					}
 					mysqli_close($connection);
+					$status = RestartDaemon ($status);
 					$connection = ConnectSpecificQL($use_agent);
 				} else 
 				{
-					$status = "unsupported command " . $command;
+					$status = "unsupported command " . $system_cmd;
 				}
 				$r = array("sphinxql"=>$system_cmd . " => " . $status);
 				$this->_results[] = $r;

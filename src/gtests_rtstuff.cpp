@@ -191,7 +191,6 @@ protected:
 
 	virtual void TearDown ()
 	{
-		SafeDelete ( pTok );
 		sphRTDone ();
 		DeleteIndexFiles ( RT_INDEX_FILE_NAME );
 	}
@@ -200,7 +199,7 @@ protected:
 	CSphSchema tSrcSchema;
 	CSphString sError, sWarning;
 
-	ISphTokenizer * pTok = nullptr;
+	ISphTokenizerRefPtr_c pTok;
 
 	CSphDictSettings tDictSettings;
 };
@@ -211,7 +210,7 @@ class RTN : public RT, public ::testing::WithParamInterface<DWORD>
 TEST_P ( RTN, WeightBoundary )
 {
 	using namespace testing;
-	auto pDict = sphCreateDictionaryCRC ( tDictSettings, NULL, pTok, "weight", sError );
+	CSphDictRefPtr_c pDict { sphCreateDictionaryCRC ( tDictSettings, NULL, pTok, "weight", sError ) };
 
 	tCol.m_sName = "channel_id";
 	tCol.m_eAttrType = SPH_ATTR_INTEGER;
@@ -290,7 +289,6 @@ TEST_P ( RTN, WeightBoundary )
 	SafeDelete ( pSorter );
 	SafeDelete ( tQuery.m_pQueryParser );
 	SafeDelete ( pIndex );
-	SafeDelete ( pDict );
 	SafeDelete ( pSrc );
 }
 

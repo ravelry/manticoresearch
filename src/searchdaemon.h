@@ -1112,6 +1112,7 @@ struct AggrResult_t : CSphQueryResult
 	StrVec_t						m_dZeroCount;
 
 	void ClampMatches ( int iLimit, bool bCommonSchema );
+	void FreeMatchesPtrs ( int iLimit, bool bCommonSchema );
 };
 
 
@@ -1138,7 +1139,7 @@ public:
 	ISphRtIndex * GetIndex ();
 
 private:
-	ISphRtAccum *		m_pAcc;
+	ISphRtAccum *		m_pAcc = nullptr;
 	bool				m_bManage;
 };
 
@@ -1150,7 +1151,8 @@ enum MysqlErrors_e
 	MYSQL_ERR_SERVER_SHUTDOWN			= 1053,
 	MYSQL_ERR_PARSE_ERROR				= 1064,
 	MYSQL_ERR_FIELD_SPECIFIED_TWICE		= 1110,
-	MYSQL_ERR_NO_SUCH_TABLE				= 1146
+	MYSQL_ERR_NO_SUCH_TABLE				= 1146,
+	MYSQL_ERR_TOO_MANY_USER_CONNECTIONS	= 1203
 };
 
 class SqlRowBuffer_c;

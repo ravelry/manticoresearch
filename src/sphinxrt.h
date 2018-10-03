@@ -33,7 +33,9 @@ public:
 
 	/// insert/update document in current txn
 	/// fails in case of two open txns to different indexes
-	virtual bool AddDocument ( ISphTokenizer * pTokenizer, int iFields, const char ** ppFields, const CSphMatch & tDoc, bool bReplace, const CSphString & sTokenFilterOptions, const char ** ppStr, const CSphVector<DWORD> & dMvas, CSphString & sError, CSphString & sWarning, ISphRtAccum * pAccExt ) = 0;
+	virtual bool AddDocument ( ISphTokenizer * pTokenizer, int iFields, const char ** ppFields, const CSphMatch & tDoc,
+		bool bReplace, const CSphString & sTokenFilterOptions, const char ** ppStr, const CSphVector<DWORD> & dMvas,
+		CSphString & sError, CSphString & sWarning, ISphRtAccum * pAccExt ) = 0;
 
 	/// delete document in current txn
 	/// fails in case of two open txns to different indexes
@@ -79,6 +81,11 @@ public:
 
 	// instead of cloning for each AddDocument() call we could just call this method and improve batch inserts speed
 	virtual ISphTokenizer * CloneIndexingTokenizer() const = 0;
+
+	/// acquire thread-local indexing accumulator
+	/// returns NULL if another index already uses it in an open txn
+	ISphRtAccum * AcquireAccum ( CSphDict * pDict, ISphRtAccum * pAccExt=nullptr,
+		bool bWordDict=true, bool bSetTLS = true, CSphString * sError=nullptr );
 };
 
 /// initialize subsystem
@@ -126,6 +133,7 @@ struct PercolateMatchResult_t
 	CSphFixedVector<PercolateQueryDesc> m_dQueryDesc;
 	CSphFixedVector<int> m_dDocs;
 	int m_iQueriesMatched;
+	int m_iQueriesFailed = 0;
 	int m_iDocsMatched;
 	int64_t m_tmTotal;
 

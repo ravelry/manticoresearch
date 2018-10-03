@@ -2192,7 +2192,7 @@ void AgentConn_t::StartRemoteLoopTry ()
 		m_tOutput.Reset ();
 		InitReplyBuf ();
 		m_bConnectHandshake = true;
-		m_bSuccess = false;
+		m_bSuccess = 0;
 		m_iStartQuery = 0;
 		m_pPollerTask = nullptr;
 
@@ -2507,12 +2507,12 @@ bool AgentConn_t::CommitResult ()
 		return BadResult ();
 
 	Finish();
-	m_bSuccess = true;
 
 	if ( !bWarnings )
 		bWarnings = m_dResults.FindFirst ( [] ( const CSphQueryResult &dRes ) { return !dRes.m_sWarning.IsEmpty(); } );
 
 	agent_stats_inc ( *this, bWarnings ? eNetworkCritical : eNetworkNonCritical );
+	m_bSuccess = 1;
 	return true;
 }
 
@@ -3254,7 +3254,8 @@ private:
 			sphLogDebugL ( "L EPOLL_CTL_DEL(%d), %d+%d events", pTask->m_ifd, m_iEvents, iEvents );
 		} else
 		{
-			tEv.events = ( bRead ? EPOLLIN : 0 ) | ( bWrite ? EPOLLOUT : 0 );
+			tEv.events = ( bRead ? EPOLLIN : 0 ) | ( bWrite ? EPOLLOUT : 0 ) | ( ( pTask==&m_dSignalerTask ) ? 0 : EPOLLET );
+
 			if ( !pTask->m_uIOActive )
 			{
 				iOp = EPOLL_CTL_ADD;
@@ -4135,8 +4136,6 @@ public:
 		m_dReady.Resize ( m_tWork.GetLength () );
 		// need positive timeout for communicate threads back and shutdown
 		m_iReady = epoll_wait ( m_iEFD, m_dReady.Begin (), m_dReady.GetLength (), timeoutMs );
-
-		sphLogDebugv ( "%d epoll wait returned %d events (timeout %d)", m_iEFD, m_iReady, timeoutMs );
 
 		if ( m_iReady<0 )
 		{

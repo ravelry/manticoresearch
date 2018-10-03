@@ -171,8 +171,8 @@ arglist:
 	;
 
 constlist:
-	TOK_CONST_INT						{ $$ = pParser->AddNodeConstlist ( $1 ); }
-	| '-' TOK_CONST_INT					{ $$ = pParser->AddNodeConstlist ( -$2 );}
+	TOK_CONST_INT						{ $$ = pParser->AddNodeConstlist ( $1, false ); }
+	| '-' TOK_CONST_INT					{ $$ = pParser->AddNodeConstlist ( -$2, false );}
 	| TOK_CONST_FLOAT					{ $$ = pParser->AddNodeConstlist ( $1 ); }
 	| '-' TOK_CONST_FLOAT				{ $$ = pParser->AddNodeConstlist ( -$2 );}
 	| constlist ',' TOK_CONST_INT		{ pParser->AppendToConstlist ( $$, $3 ); }
@@ -182,7 +182,7 @@ constlist:
 	;
 
 stringlist:
-	TOK_CONST_STRING					{ $$ = pParser->AddNodeConstlist ( $1 ); }
+	TOK_CONST_STRING					{ $$ = pParser->AddNodeConstlist ( $1, true ); }
 	| stringlist ',' TOK_CONST_STRING	{ pParser->AppendToConstlist ( $$, $3 ); }
 	;
 
@@ -203,6 +203,7 @@ function:
 	| TOK_UDF '(' arglist ')'		{ $$ = pParser->AddNodeUdf ( $1, $3 ); if ( $$<0 ) YYERROR; }
 	| TOK_UDF '(' ')'				{ $$ = pParser->AddNodeUdf ( $1, -1 ); if ( $$<0 ) YYERROR; }
 	| TOK_FUNC_IN '(' arg ',' constlist_or_uservar ')'{ $$ = pParser->AddNodeIn ( $3, $5 ); }
+	| json_field TOK_FUNC_IN '(' constlist_or_uservar ')'{ $$ = pParser->AddNodeIn ( $1, $4 ); }
 	| TOK_HOOK_FUNC '(' arglist ')' { $$ = pParser->AddNodeHookFunc ( $1, $3 ); if ( $$<0 ) YYERROR; }
 	| TOK_FUNC_JA '(' expr for_loop ')' { $$ = pParser->AddNodeFor ( $1, $3, $4 ); }
 	| TOK_FUNC_REMAP '(' expr ',' expr ',' '(' constlist ')' ',' '(' constlist ')' ')' { $$ = pParser->AddNodeRemap ( $3, $5, $8, $12 ); }

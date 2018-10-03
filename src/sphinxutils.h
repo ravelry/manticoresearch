@@ -30,6 +30,21 @@ inline int sphIsAlpha ( int c )
 	return ( c>='0' && c<='9' ) || ( c>='a' && c<='z' ) || ( c>='A' && c<='Z' ) || c=='-' || c=='_';
 }
 
+/// symbols allowed in numbers (like 1.84E-20)
+inline bool sphIsDigital ( char c )
+{
+	return ( c>='0' && c<='9' ) || c=='.' || c=='E' || c=='e' || c=='+' || c=='-';
+}
+
+/// pointer to the last number in the buf, touching it's end
+inline const char * sphFindLastNumeric ( const char * pBuf, int iLen )
+{
+	for ( auto pLast = pBuf + iLen - 1; pLast>=pBuf; --pLast )
+		if ( !sphIsDigital ( *pLast ) )
+			return pLast + 1;
+
+	return pBuf;
+}
 
 /// my own isspace
 inline bool sphIsSpace ( int iCode )
@@ -146,13 +161,6 @@ protected:
 bool TryToExec ( char * pBuffer, const char * szFilename, CSphVector<char> & dResult, char * sError, int iErrorLen );
 
 /////////////////////////////////////////////////////////////////////////////
-
-enum
-{
-	// where was TOKENIZER_SBCS=1 once
-	TOKENIZER_UTF8		= 2,
-	TOKENIZER_NGRAM	= 3
-};
 
 /// load config file
 const char *	sphLoadConfig ( const char * sOptConfig, bool bQuiet, CSphConfigParser & cp );

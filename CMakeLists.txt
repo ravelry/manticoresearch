@@ -1,6 +1,6 @@
 cmake_minimum_required ( VERSION 2.8 )
 
-FOREACH ( policy CMP0012 CMP0013 CMP0014 )
+FOREACH ( policy CMP0012 CMP0013 CMP0014 CMP0048 )
 	IF ( POLICY ${policy} )
 		CMAKE_POLICY ( SET ${policy} NEW )
 	ENDIF ()
@@ -234,7 +234,7 @@ else ( WIN32 )
 		if ( JEMALLOC_FOUND )
 			list ( APPEND EXTRA_LIBRARIES ${JEMALLOC_LIBRARIES} )
 		else()
-			message (STATUS "USE_JEMALLOC requested, but no jemalloc found -- Ignore")
+			message (FATAL_ERROR "USE_JEMALLOC requested, but no jemalloc found -- Ignore")
 		endif()
 	endif ()
 
@@ -262,7 +262,8 @@ else ( WIN32 )
 	include ( mincore_test )
 
 	message ( STATUS "Checking for specific headers" )
-	ac_check_headers ( "execinfo.h;syslog.h;sys/eventfd.h" )
+	ac_check_headers ( "execinfo.h;syslog.h;sys/eventfd.h;malloc.h" )
+	ac_check_headers ( "sys/prctl.h" )
 
 	# mb use something better. The code below is copy-pasted from automake script
 	message ( STATUS "Checking for library functions" )
@@ -295,6 +296,12 @@ else ( WIN32 )
 
 	message ( STATUS "Checking for SO_REUSEPORT flag" )
 	include ( check_so_reuseport_availability )
+
+	message ( STATUS "Checking for malloc_trim availability" )
+	include ( check_malloc_trim_availability )
+
+	message ( STATUS "Checking for malloc_stats availability" )
+	include ( check_malloc_stats_availability )
 
 	message ( STATUS "Checking for PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP flag" )
 	include ( check_rwlock_prefer_writer )
@@ -433,6 +440,14 @@ else ( WIN32 )
 	endif ( WITH_PGSQL )
 
 endif ( WIN32 )
+
+
+option ( USE_SMALLALLOC "Use 'small allocator' derived from loki lib. Bench! Glibc allocator now is fast enough!" )
+if ( USE_SMALLALLOC )
+	SET ( USE_SMALLALLOC 1 )
+	cfginfo ( "USE_SMALLALLOC=ON" )
+endif ( USE_SMALLALLOC )
+mark_as_advanced ( USE_SMALLALLOC )
 
 INCLUDE ( GNUInstallDirs )
 

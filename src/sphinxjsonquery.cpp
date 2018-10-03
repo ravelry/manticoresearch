@@ -272,7 +272,9 @@ class QueryParserJson_c : public QueryParser_i
 public:
 	virtual bool	IsFullscan ( const CSphQuery & tQuery ) const;
 	virtual bool	IsFullscan ( const XQQuery_t & tQuery ) const;
-	virtual bool	ParseQuery ( XQQuery_t & tParsed, const char * sQuery, const CSphQuery * pQuery, const ISphTokenizer * pQueryTokenizer, const ISphTokenizer * pQueryTokenizerJson, const CSphSchema * pSchema, CSphDict * pDict, const CSphIndexSettings & tSettings ) const;
+	virtual bool	ParseQuery ( XQQuery_t & tParsed, const char * sQuery, const CSphQuery * pQuery,
+		const ISphTokenizer * pQueryTokenizer, const ISphTokenizer * pQueryTokenizerJson,
+		const CSphSchema * pSchema, CSphDict * pDict, const CSphIndexSettings & tSettings ) const;
 
 private:
 	XQNode_t *		ConstructMatchNode ( XQNode_t * pParent, const cJSON * pJson, bool bPhrase, QueryTreeBuilder_c & tBuilder ) const;
@@ -299,7 +301,9 @@ bool QueryParserJson_c::IsFullscan ( const XQQuery_t & tQuery ) const
 }
 
 
-bool QueryParserJson_c::ParseQuery ( XQQuery_t & tParsed, const char * szQuery, const CSphQuery * /*pQuery*/, const ISphTokenizer *, const ISphTokenizer * pQueryTokenizerJson, const CSphSchema * pSchema, CSphDict * pDict, const CSphIndexSettings & tSettings ) const
+bool QueryParserJson_c::ParseQuery ( XQQuery_t & tParsed, const char * szQuery, const CSphQuery * /*pQuery*/,
+	const ISphTokenizer *, const ISphTokenizer * pQueryTokenizerJson, const CSphSchema * pSchema, CSphDict * pDict,
+	const CSphIndexSettings & tSettings ) const
 {
 	CJsonScopedPtr_c pJsonRoot ( cJSON_Parse ( szQuery ) );
 	assert ( pJsonRoot.Ptr() );
@@ -312,15 +316,11 @@ bool QueryParserJson_c::ParseQuery ( XQQuery_t & tParsed, const char * szQuery, 
 		return false;
 	}
 
-	CSphScopedPtr<ISphTokenizer> pMyTokenizer ( pQueryTokenizerJson->Clone ( SPH_CLONE_QUERY_LIGHTWEIGHT ) );
-
-	CSphDict * pMyDict = pDict;
-	CSphScopedPtr<CSphDict> tDictCloned ( NULL );
-	if ( pDict->HasState() )
-		tDictCloned = pMyDict = pDict->Clone();
+	ISphTokenizerRefPtr_c pMyTokenizer { pQueryTokenizerJson->Clone ( SPH_CLONE_QUERY_LIGHTWEIGHT ) };
+	CSphDictRefPtr_c pMyDict { GetStatelessDict ( pDict ) };
 
 	QueryTreeBuilder_c tBuilder;
-	tBuilder.Setup ( pSchema, pMyTokenizer.Ptr(), pMyDict, &tParsed, tSettings );
+	tBuilder.Setup ( pSchema, pMyTokenizer, pMyDict, &tParsed, tSettings );
 
 	tParsed.m_pRoot = ConstructNode ( NULL, cJSON_GetArrayItem ( pJsonRoot.Ptr(), 0 ), tBuilder );
 	if ( tBuilder.IsError() )
@@ -1938,14 +1938,12 @@ CSphString sphEncodeResultJson ( const AggrResult_t & tRes, const CSphQuery & tQ
 
 	if ( pProfile )
 	{
-		cJSON * pProfileMeta = cJSON_CreateObject();
-		assert ( pProfileMeta );
-
 		cJSON * pProfileResult = pProfile->LeakResultAsJson();
-
 		// FIXME: result can be empty if we run a fullscan
 		if ( pProfileResult )
 		{
+			cJSON * pProfileMeta = cJSON_CreateObject ();
+			assert ( pProfileMeta );
 			assert ( cJSON_IsObject ( pProfileResult ) );
 			cJSON_AddItemToObject ( pProfileMeta, "query", pProfileResult );
 			cJSON_AddItemToObject ( pRoot, "profile", pProfileMeta );

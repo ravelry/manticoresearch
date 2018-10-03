@@ -44,6 +44,10 @@ extern "C"
 #include "searchdaemon.h"
 #include "searchdha.h"
 
+#if HAVE_MALLOC_H
+#include <malloc.h>
+#endif
+
 #define SEARCHD_BACKLOG			5
 #define SPHINXAPI_PORT			9312
 #define SPHINXQL_PORT			9306
@@ -1053,7 +1057,6 @@ void sphLogEntry ( ESphLogLevel , char * sBuf, char * sTtyBuf )
 			sphWrite ( STDOUT_FILENO, sTtyBuf, strlen(sTtyBuf) );
 	}
 }
-
 
 /// log entry (with log levels, dupe catching, etc)
 /// call with NULL format for dupe flushing
@@ -3613,11 +3616,11 @@ bool MinimizeSchema ( CSphSchema & tDst, const ISphSchema & tSrc )
 
 		tDst.Reset();
 
-		ARRAY_FOREACH ( i, dDst )
-			tDst.AddAttr ( dDst[i], true );
+		for ( auto& dAttr : dDst )
+			tDst.AddAttr ( dAttr, true );
 
-		ARRAY_FOREACH ( i, dFields )
-			tDst.AddField( dFields[i] );
+		for ( auto& dField: dFields )
+			tDst.AddField ( dField );
 
 	} else
 		tDst.SwapAttrs ( dDst );
@@ -5167,14 +5170,14 @@ void SendResult ( int iVer, ISphOutputBuffer & tOut, const CSphQueryResult * pRe
 
 /////////////////////////////////////////////////////////////////////////////
 
-void AggrResult_t::ClampMatches ( int iLimit, bool bCommonSchema )
+void AggrResult_t::FreeMatchesPtrs ( int iLimit, bool bCommonSchema )
 {
-	if ( m_dMatches.GetLength()<=iLimit )
+	if ( m_dMatches.GetLength ()<=iLimit )
 		return;
 
 	if ( bCommonSchema )
 	{
-		for ( int i = iLimit; i < m_dMatches.GetLength(); ++i )
+		for ( int i = iLimit; i<m_dMatches.GetLength (); ++i )
 			m_tSchema.FreeDataPtrs ( &m_dMatches[i] );
 	} else
 	{
@@ -5183,15 +5186,21 @@ void AggrResult_t::ClampMatches ( int iLimit, bool bCommonSchema )
 		{
 			nMatches += m_dMatchCounts[i];
 
-			if ( iLimit < nMatches )
+			if ( iLimit<nMatches )
 			{
-				int iFrom = Max ( iLimit, nMatches-m_dMatchCounts[i] );
-				for ( int j=iFrom; j<nMatches; ++j )
+				int iFrom = Max ( iLimit, nMatches - m_dMatchCounts[i] );
+				for ( int j = iFrom; j<nMatches; ++j )
 					m_dSchemas[i].FreeDataPtrs ( &m_dMatches[j] );
 			}
 		}
 	}
+}
 
+void AggrResult_t::ClampMatches ( int iLimit, bool bCommonSchema )
+{
+	FreeMatchesPtrs ( iLimit, bCommonSchema );
+	if ( m_dMatches.GetLength()<=iLimit )
+		return;
 	m_dMatches.Resize ( iLimit );
 }
 
@@ -5225,25 +5234,30 @@ void RemapResult ( const ISphSchema * pTarget, AggrResult_t * pRes )
 {
 	int iCur = 0;
 	CSphVector<int> dMapFrom ( pTarget->GetAttrsCount() );
+	CSphVector<int> dRowItems ( pTarget->GetAttrsCount () );
+	static const int SIZE_OF_ROW = 8 * sizeof ( CSphRowitem );
 
 	ARRAY_FOREACH ( iSchema, pRes->m_dSchemas )
 	{
 		dMapFrom.Resize ( 0 );
+		dRowItems.Resize ( 0 );
 		CSphSchema & dSchema = pRes->m_dSchemas[iSchema];
 		for ( int i=0; i<pTarget->GetAttrsCount(); i++ )
 		{
 			auto iSrcCol = dSchema.GetAttrIndex ( pTarget->GetAttr ( i ).m_sName.cstr () );
 			const CSphColumnInfo &tSrcCol = dSchema.GetAttr ( iSrcCol );
 			dMapFrom.Add ( iSrcCol );
+			dRowItems.Add ( tSrcCol.m_tLocator.m_iBitOffset / SIZE_OF_ROW );
 			assert ( dMapFrom[i]>=0
 				|| pTarget->GetAttr(i).m_tLocator.IsID()
 				|| sphIsSortStringInternal ( pTarget->GetAttr(i).m_sName.cstr() )
 				|| pTarget->GetAttr(i).m_sName=="@groupbystr"
 				);
-			int iOffset = tSrcCol.m_tLocator.m_iBitOffset / ( 8 * sizeof ( CSphRowitem ) );
-			dSchema.DiscardPtr ( iOffset );
 		}
 		int iLimit = Min ( iCur + pRes->m_dMatchCounts[iSchema], pRes->m_dMatches.GetLength() );
+
+		// inverse dRowItems - we'll free only those NOT enumerated yet
+		dRowItems = dSchema.SubsetPtrs ( dRowItems );
 		for ( int i=iCur; i<iLimit; i++ )
 		{
 			CSphMatch & tMatch = pRes->m_dMatches[i];
@@ -5279,7 +5293,7 @@ void RemapResult ( const ISphSchema * pTarget, AggrResult_t * pRes )
 			}
 			// swap out old (most likely wrong sized) match
 			Swap ( tMatch, tRow );
-			dSchema.FreeDataPtrs ( &tRow );
+			dSchema.FreeDataSpecial ( &tRow, dRowItems );
 		}
 
 		iCur = iLimit;
@@ -5640,7 +5654,10 @@ bool MinimizeAggrResult ( AggrResult_t & tRes, CSphQuery & tQuery, int iLocals, 
 	// api + index without attributes + select * case
 	// can not skip aggregate filtering
 	if ( bQueryFromAPI && !tItems.GetLength() && !pAggrFilter && !bHaveExprs )
+	{
+		tRes.FreeMatchesPtrs ( 0, bAllEqual );
 		return true;
+	}
 
 	// build the final schemas!
 	// ???
@@ -6270,7 +6287,7 @@ struct Expr_Snippet_c : public ISphStringExpr
 			int iResultLength = m_tHighlight.m_dRes.GetLength();
 			*ppStr = m_tHighlight.m_dRes.LeakData();
 			// skip trailing zero
-			return iResultLength-1;
+			return ( iResultLength ? iResultLength-1 : 0 );
 		} else
 			return PackSnippets ( m_tHighlight.m_dRes, m_tHighlight.m_dSeparators, m_tHighlight.m_sChunkSeparator.Length(), ppStr );
 	}
@@ -12314,6 +12331,45 @@ bool PercolateParseFilters ( const char * sFilters, ESphCollation eCollation, co
 		dFilterTree.SwapData ( tQuery.m_dFilterTree );
 	}
 
+	// maybe its better to create real filter instead of just checking column name
+	if ( iRes==0 && dFilters.GetLength() )
+	{
+		ARRAY_FOREACH ( i, dFilters )
+		{
+			const CSphFilterSettings & tFilter = dFilters[i];
+			if ( tFilter.m_sAttrName.IsEmpty() )
+			{
+				sError.SetSprintf ( "bad filter %d name", i );
+				return false;
+			}
+
+			if ( tFilter.m_sAttrName.Begins ( "@" ) )
+			{
+				sError.SetSprintf ( "unsupported filter column '%s'", tFilter.m_sAttrName.cstr() );
+				return false;
+			}
+	
+			const char * sAttrName = tFilter.m_sAttrName.cstr();
+			
+			// might be a JSON.field
+			CSphString sJsonField;
+			const char * sJsonDot = strchr ( sAttrName, '.' );
+			if ( sJsonDot )
+			{
+				assert ( sJsonDot>sAttrName );
+				sJsonField.SetBinary ( sAttrName, sJsonDot - sAttrName );
+				sAttrName = sJsonField.cstr();
+			}
+
+			int iCol = tSchema.GetAttrIndex ( sAttrName );
+			if ( iCol==-1 )
+			{
+				sError.SetSprintf ( "no such filter attribute '%s'", sAttrName );
+				return false;
+			}
+		}
+	}
+
 	// TODO: change way of filter -> expression create: produce single error, share parser code
 	// try expression
 	if ( iRes!=0 && !dFilters.GetLength() && sError.Begins ( "percolate filters: syntax error" ) )
@@ -12329,7 +12385,7 @@ bool PercolateParseFilters ( const char * sFilters, ESphCollation eCollation, co
 			tExpr.m_sAttrName = sFilters;
 		} else
 		{
-			iRes = 1;
+			return false;
 		}
 	}
 
@@ -13060,6 +13116,8 @@ static void PercolateMatchDocuments ( const StrVec_t & dDocs, const PercolateOpt
 
 	if ( iDocsNoIdCount )
 		sWarning.SetSprintf ( "skipped %d documents without id field '%s'", iDocsNoIdCount, sIdAlias.cstr() );
+	if ( tRes.m_iQueriesFailed )
+		sWarning.SetSprintf ( "%d queries failed", tRes.m_iQueriesFailed );
 
 	SendPercolateReply ( tRes, sWarning, sError, dDocids, tOut );
 	tMeta.Swap ( tRes );
@@ -13172,6 +13230,7 @@ void HandleMysqlPercolateMeta ( const PercolateMatchResult_t & tMeta, const CSph
 		tOut.DataTuplet ( "Setup", sTmp.cstr() );
 	}
 	tOut.DataTuplet ( "Queries matched", tMeta.m_iQueriesMatched );
+	tOut.DataTuplet ( "Queries failed", tMeta.m_iQueriesFailed );
 	tOut.DataTuplet ( "Document matches", tMeta.m_iDocsMatched );
 	tOut.DataTuplet ( "Total queries stored", tMeta.m_iTotalQueries );
 	tOut.DataTuplet ( "Term only queries", tMeta.m_iOnlyTerms );
@@ -13182,7 +13241,7 @@ void HandleMysqlPercolateMeta ( const PercolateMatchResult_t & tMeta, const CSph
 		uint64_t tmMatched = 0;
 		const char * sDelimiter = "";
 		sTmp.Clear();
-		assert ( tMeta.m_dQueryDesc.GetLength()==tMeta.m_dQueryDT.GetLength() );
+		assert ( tMeta.m_iQueriesMatched==tMeta.m_dQueryDT.GetLength() );
 		ARRAY_FOREACH ( i, tMeta.m_dQueryDT )
 		{
 			int tmQuery = tMeta.m_dQueryDT[i];
@@ -13774,6 +13833,7 @@ struct KeywordsReplyParser_t : public IReplyParser_t
 };
 
 static void MergeKeywords ( CSphVector<CSphKeywordInfo> & dKeywords );
+static void SortKeywords ( const GetKeywordsSettings_t & tSettings, CSphVector<CSphKeywordInfo> & dKeywords );
 
 void HandleMysqlCallKeywords ( SqlRowBuffer_c & tOut, SqlStmt_t & tStmt, CSphString & sWarning )
 {
@@ -13798,6 +13858,7 @@ void HandleMysqlCallKeywords ( SqlRowBuffer_c & tOut, SqlStmt_t & tStmt, CSphStr
 		CSphString & sOpt = tStmt.m_dCallOptNames[i];
 		sOpt.ToLower ();
 		bool bEnabled = ( tStmt.m_dCallOptValues[i].m_iVal!=0 );
+		bool bOptInt = true;
 
 		if ( sOpt=="stats" )
 			tSettings.m_bStats = bEnabled;
@@ -13809,7 +13870,20 @@ void HandleMysqlCallKeywords ( SqlRowBuffer_c & tOut, SqlStmt_t & tStmt, CSphStr
 			tSettings.m_bFoldWildcards = bEnabled;
 		else if ( sOpt=="expansion_limit" )
 			tSettings.m_iExpansionLimit = int ( tStmt.m_dCallOptValues[i].m_iVal );
-		else
+		else if ( sOpt=="sort_mode" )
+		{
+			// FIXME!!! add more sorting modes
+			if ( tStmt.m_dCallOptValues[i].m_sVal!="docs" && tStmt.m_dCallOptValues[i].m_sVal!="hits" )
+			{
+				sError.SetSprintf ( "unknown option %s mode '%s'", sOpt.cstr(), tStmt.m_dCallOptValues[i].m_sVal.cstr() );
+				tOut.Error ( tStmt.m_sStmt, sError.cstr() );
+				return;
+			}
+			tSettings.m_bSortByDocs = ( tStmt.m_dCallOptValues[i].m_sVal=="docs" );
+			tSettings.m_bSortByHits = ( tStmt.m_dCallOptValues[i].m_sVal=="hits" );
+			bOptInt = false;
+						
+		} else
 		{
 			sError.SetSprintf ( "unknown option %s", sOpt.cstr () );
 			tOut.Error ( tStmt.m_sStmt, sError.cstr() );
@@ -13817,7 +13891,7 @@ void HandleMysqlCallKeywords ( SqlRowBuffer_c & tOut, SqlStmt_t & tStmt, CSphStr
 		}
 
 		// post-conf type check
-		if ( tStmt.m_dCallOptValues[i].m_iType!=TOK_CONST_INT )
+		if ( bOptInt && tStmt.m_dCallOptValues[i].m_iType!=TOK_CONST_INT )
 		{
 			sError.SetSprintf ( "unexpected option %s type", sOpt.cstr () );
 			tOut.Error ( tStmt.m_sStmt, sError.cstr () );
@@ -13899,6 +13973,8 @@ void HandleMysqlCallKeywords ( SqlRowBuffer_c & tOut, SqlStmt_t & tStmt, CSphStr
 		if ( dLocals.GetLength() + iAgentsReply>1 )
 			MergeKeywords ( dKeywords );
 	}
+
+	SortKeywords ( tSettings, dKeywords );
 
 	// result set header packet
 	tOut.HeadBegin ( tSettings.m_bStats ? 5 : 3 );
@@ -14033,6 +14109,28 @@ void MergeKeywords ( CSphVector<CSphKeywordInfo> & dSrc )
 	}
 
 	sphSort ( dSrc.Begin(), dSrc.GetLength(), KeywordSorter_fn() );
+}
+
+struct KeywordSorterDocs_fn
+{
+	bool IsLess ( const CSphKeywordInfo & a, const CSphKeywordInfo & b ) const
+	{
+		return ( ( a.m_iQpos<b.m_iQpos )
+			|| ( a.m_iQpos==b.m_iQpos && a.m_iDocs>b.m_iDocs )
+			|| ( a.m_iQpos==b.m_iQpos && a.m_iDocs==b.m_iDocs && a.m_sNormalized<b.m_sNormalized ) );
+	}
+};
+
+
+void SortKeywords ( const GetKeywordsSettings_t & tSettings, CSphVector<CSphKeywordInfo> & dKeywords )
+{
+	if ( !tSettings.m_bSortByDocs && !tSettings.m_bSortByHits )
+		return;
+
+	if ( tSettings.m_bSortByHits )
+		dKeywords.Sort ( KeywordSorter_fn() );
+	else
+		dKeywords.Sort ( KeywordSorterDocs_fn() );
 }
 
 // sort by distance asc, document count desc, ABC asc
@@ -16183,6 +16281,14 @@ inline static CSphString strSHA1 ( const CSphString& sLine )
 	return CalcSHA1 ( sLine.cstr(), sLine.Length() );
 }
 
+int GetLogFD ()
+{
+	if ( g_bLogStdout && g_iLogFile!=STDOUT_FILENO )
+		return STDOUT_FILENO;
+	return g_iLogFile;
+}
+
+
 void HandleMysqlDebug ( SqlRowBuffer_c &tOut, const SqlStmt_t &tStmt, bool bVipConn )
 {
 	CSphString sCommand = tStmt.m_sIndex;
@@ -16191,10 +16297,11 @@ void HandleMysqlDebug ( SqlRowBuffer_c &tOut, const SqlStmt_t &tStmt, bool bVipC
 	sCommand.Trim ();
 	sParam.Trim ();
 
-	if ( bVipConn && sCommand=="shutdown" )
+	if ( bVipConn && ( sCommand=="shutdown" || sCommand=="crash" ) )
 	{
 		if ( g_sShutdownToken.IsEmpty () )
 		{
+
 			tOut.HeadTuplet ("command","error");
 			tOut.DataTuplet ("debug shutdown", "shutdown_token is empty. Provide it in searchd config section.");
 		}
@@ -16202,8 +16309,16 @@ void HandleMysqlDebug ( SqlRowBuffer_c &tOut, const SqlStmt_t &tStmt, bool bVipC
 			if ( strSHA1(sParam) == g_sShutdownToken )
 			{
 				tOut.HeadTuplet ( "command", "result" );
-				tOut.DataTuplet ( "debug shutdown <password>", "SUCCESS" );
-				sigterm(1);
+				if ( sCommand=="shutdown" )
+				{
+					tOut.DataTuplet ( "debug shutdown <password>", "SUCCESS" );
+					sigterm(1);
+				} else if ( sCommand=="crash")
+				{
+					tOut.DataTuplet ( "debug crash <password>", "SUCCESS" );
+					BYTE * pSegv = ( BYTE * ) ( 0 );
+					*pSegv = 'a';
+				}
 			} else
 				{
 					tOut.HeadTuplet ( "command", "result" );
@@ -16216,6 +16331,39 @@ void HandleMysqlDebug ( SqlRowBuffer_c &tOut, const SqlStmt_t &tStmt, bool bVipC
 		auto sSha = strSHA1(sParam);
 		tOut.HeadTuplet ( "command", "result" );
 		tOut.DataTuplet ( "debug token", sSha.cstr() );
+	}
+#if HAVE_MALLOC_STATS
+	else if ( sCommand=="malloc_stats" )
+	{
+		tOut.HeadTuplet ( "command", "result" );
+		// check where is stderr...
+		int iOldErr = ::dup ( STDERR_FILENO );
+		::dup2 ( GetLogFD (), STDERR_FILENO );
+		malloc_stats();
+		::dup2 ( iOldErr, STDERR_FILENO );
+		::close ( iOldErr );
+		tOut.DataTuplet ( "malloc_stats", g_sLogFile.cstr());
+	}
+#endif
+#if HAVE_MALLOC_TRIM
+	else if ( sCommand=="malloc_trim" )
+	{
+		tOut.HeadTuplet ( "command", "result" );
+		CSphString sResult;
+		sResult.SetSprintf ( "%d", malloc_trim (0));
+		tOut.DataTuplet ( "malloc_trim", sResult.cstr () );
+	}
+#endif
+	else if ( sCommand=="sleep" )
+	{
+		int64_t tmStart = sphMicroTimer();
+		sphSleepMsec ( Max ( tStmt.m_iIntParam, 1 )*1000 );
+		int64_t tmDelta = sphMicroTimer() - tmStart;
+
+		tOut.HeadTuplet ( "command", "result" );
+		CSphString sResult;
+		sResult.SetSprintf ( "%.3f", (float)tmDelta/1000000.0f );
+		tOut.DataTuplet ( "sleep", sResult.cstr () );
 	} else
 	{
 		// no known command; provide short help.
@@ -16223,10 +16371,18 @@ void HandleMysqlDebug ( SqlRowBuffer_c &tOut, const SqlStmt_t &tStmt, bool bVipC
 		if ( bVipConn )
 		{
 			tOut.DataTuplet ( "debug shutdown <password>", "emulate TERM signal");
+			tOut.DataTuplet ( "debug crash <password>", "crash daemon (make SIGSEGV action)" );
 			tOut.DataTuplet ( "debug token <password>", "calculate token for password" );
 		}
 		tOut.DataTuplet ( "flush logs", "emulate USR1 signal" );
 		tOut.DataTuplet ( "reload indexes", "emulate HUP signal" );
+#if HAVE_MALLOC_STATS
+		tOut.DataTuplet ( "malloc_stats", "perform 'malloc_stats', result in searchd.log" );
+#endif
+#if HAVE_MALLOC_TRIM
+		tOut.DataTuplet ( "malloc_trim", "pefrorm 'malloc_trim' call" );
+#endif
+		tOut.DataTuplet ( "sleep Nsec", "sleep for N seconds" );
 	}
 	// done
 	tOut.Eof ();
@@ -17128,8 +17284,7 @@ static void HandleMysqlReloadIndex ( SqlRowBuffer_c & tOut, const SqlStmt_t & tS
 //////////////////////////////////////////////////////////////////////////
 
 CSphSessionAccum::CSphSessionAccum ( bool bManage )
-	: m_pAcc ( NULL )
-	, m_bManage ( bManage )
+	: m_bManage ( bManage )
 { }
 
 CSphSessionAccum::~CSphSessionAccum()
@@ -17140,7 +17295,7 @@ CSphSessionAccum::~CSphSessionAccum()
 ISphRtAccum * CSphSessionAccum::GetAcc ( ISphRtIndex * pIndex, CSphString & sError )
 {
 	if ( !m_bManage )
-		return NULL;
+		return nullptr;
 
 	assert ( pIndex );
 	if ( m_pAcc )
@@ -17167,8 +17322,8 @@ private:
 	CSphQueryResultMeta m_tLastMeta;
 	CSphSessionAccum	m_tAcc;
 	PercolateMatchResult_t m_tPercolateMeta;
-	SqlStmt_e			m_eLastStmt;
-	bool				m_bFederatedUser;
+	SqlStmt_e			m_eLastStmt { STMT_DUMMY };
+	bool				m_bFederatedUser = false;
 	CSphString			m_sFederatedQuery;
 
 public:
@@ -17179,8 +17334,6 @@ public:
 public:
 	explicit CSphinxqlSession ( bool bManage )
 		: m_tAcc ( bManage )
-		, m_eLastStmt ( STMT_DUMMY )
-		, m_bFederatedUser ( false )
 	{}
 
 	// just execute one sphinxql statement
@@ -18074,8 +18227,8 @@ bool RotateIndexGreedy ( const ServedIndex_c * pIndex, ServedDesc_t &tWlockedInd
 	}
 
 	// try to use new index
-	CSphScopedPtr<ISphTokenizer> pTokenizer ( tWlockedIndex.m_pIndex->LeakTokenizer () ); // FIXME! disable support of that old indexes and remove this bullshit
-	CSphScopedPtr<CSphDict> pDictionary ( tWlockedIndex.m_pIndex->LeakDictionary () );
+	ISphTokenizerRefPtr_c	pTokenizer { tWlockedIndex.m_pIndex->LeakTokenizer () }; // FIXME! disable support of that old indexes and remove this bullshit
+	CSphDictRefPtr_c		pDictionary { tWlockedIndex.m_pIndex->LeakDictionary () };
 
 //	bool bRolledBack = false;
 	bool bPreallocSuccess = tWlockedIndex.m_pIndex->Prealloc ( g_bStripPath );
@@ -18104,10 +18257,10 @@ bool RotateIndexGreedy ( const ServedIndex_c * pIndex, ServedDesc_t &tWlockedInd
 		sphWarning ( "rotating index '%s': %s", sIndex, tWlockedIndex.m_pIndex->GetLastWarning().cstr() );
 
 	if ( !tWlockedIndex.m_pIndex->GetTokenizer () )
-		tWlockedIndex.m_pIndex->SetTokenizer ( pTokenizer.LeakPtr () );
+		tWlockedIndex.m_pIndex->SetTokenizer ( pTokenizer );
 
 	if ( !tWlockedIndex.m_pIndex->GetDictionary () )
-		tWlockedIndex.m_pIndex->SetDictionary ( pDictionary.LeakPtr () );
+		tWlockedIndex.m_pIndex->SetDictionary ( pDictionary );
 
 //	if ( bRolledBack )
 //		return bPreallocSuccess;
@@ -18665,7 +18818,7 @@ static void SphinxqlStateThreadFunc ( void * )
 		/////////////////////////////////
 
 		tWriter.CloseFile();
-		if ( ::rename ( sNewState.cstr(), g_sSphinxqlState.cstr() )==0 )
+		if ( sph::rename ( sNewState.cstr(), g_sSphinxqlState.cstr() )==0 )
 		{
 			::unlink ( sNewState.cstr() );
 		} else
@@ -21909,8 +22062,7 @@ NetEvent_e NetReceiveDataAPI_t::Tick ( DWORD uGotEvents, CSphVector<ISphNetActio
 			m_tState->m_iLeft = NetBufGetInt ( m_tState->m_dBuf.Begin() + 4 );
 			bool bBadCommand = ( m_eCommand>=SEARCHD_COMMAND_WRONG );
 			bool bBadLength = ( m_tState->m_iLeft<0 || m_tState->m_iLeft>g_iMaxPacketSize );
-			bool bMaxedOut = ( g_iThdQueueMax && !m_tState->m_bVIP && g_pThdPool->GetQueueLength()>=g_iThdQueueMax );
-			if ( bBadCommand || bBadLength || bMaxedOut )
+			if ( bBadCommand || bBadLength )
 			{
 				m_tState->m_bKeepSocket = false;
 
@@ -21920,26 +22072,11 @@ NetEvent_e NetReceiveDataAPI_t::Tick ( DWORD uGotEvents, CSphVector<ISphNetActio
 				// if command is insane, low level comm is broken, so we bail out
 				if ( bBadCommand )
 					sphWarning ( "ill-formed client request (command=%d, SEARCHD_COMMAND_TOTAL=%d)", m_eCommand, SEARCHD_COMMAND_TOTAL );
-				// warning on thread pool work maxed out
-				if ( bMaxedOut )
-					sphWarning ( "%s", g_sMaxedOutMessage );
 
 				m_tState->m_dBuf.Resize ( 0 );
 				ISphOutputBuffer tOut;
 				tOut.SwapData ( m_tState->m_dBuf );
-				if ( !bMaxedOut )
-				{
-					SendErrorReply ( tOut, "invalid command (code=%d, len=%d)", m_eCommand, m_tState->m_iLeft );
-				} else
-				{
-					int iRespLen = 4 + strlen(g_sMaxedOutMessage);
-
-					tOut.SendInt ( SPHINX_CLIENT_VERSION );
-					tOut.SendWord ( (WORD)SEARCHD_RETRY );
-					tOut.SendWord ( 0 ); // version doesn't matter
-					tOut.SendInt ( iRespLen );
-					tOut.SendString ( g_sMaxedOutMessage );
-				}
+				SendErrorReply ( tOut, "invalid command (code=%d, len=%d)", m_eCommand, m_tState->m_iLeft );
 
 				tOut.SwapData ( m_tState->m_dBuf );
 				NetSendData_t * pSend = new NetSendData_t ( m_tState.LeakPtr(), PROTO_SPHINX );
@@ -21958,6 +22095,8 @@ NetEvent_e NetReceiveDataAPI_t::Tick ( DWORD uGotEvents, CSphVector<ISphNetActio
 
 		case AAPI_BODY:
 		{
+			const bool bMaxedOut = ( g_iThdQueueMax && !m_tState->m_bVIP && g_pThdPool->GetQueueLength()>=g_iThdQueueMax );
+
 			if ( m_eCommand==SEARCHD_COMMAND_PING )
 			{
 				bool bGotError = false;
@@ -21991,6 +22130,27 @@ NetEvent_e NetReceiveDataAPI_t::Tick ( DWORD uGotEvents, CSphVector<ISphNetActio
 				tOut.SwapData ( m_tState->m_dBuf );
 				NetSendData_t * pSend = new NetSendData_t ( m_tState.LeakPtr (), PROTO_SPHINX );
 				dNextTick.Add ( pSend );
+
+			} else if ( bMaxedOut )
+			{
+				m_tState->m_bKeepSocket = false;
+				sphWarning ( "%s", g_sMaxedOutMessage );
+
+				m_tState->m_dBuf.Resize ( 0 );
+				ISphOutputBuffer tOut;
+				tOut.SwapData ( m_tState->m_dBuf );
+
+				int iRespLen = 4 + strlen(g_sMaxedOutMessage);
+
+				tOut.SendWord ( (WORD)SEARCHD_RETRY );
+				tOut.SendWord ( 0 ); // version doesn't matter
+				tOut.SendInt ( iRespLen );
+				tOut.SendString ( g_sMaxedOutMessage );
+
+				tOut.SwapData ( m_tState->m_dBuf );
+				NetSendData_t * pSend = new NetSendData_t ( m_tState.LeakPtr(), PROTO_SPHINX );
+				dNextTick.Add ( pSend );
+
 			} else
 			{
 				AddJobAPI ( pLoop );
@@ -22195,8 +22355,7 @@ NetEvent_e NetReceiveDataQL_t::Tick ( DWORD uGotEvents, CSphVector<ISphNetAction
 						SendMysqlErrorPacket ( tOut, m_tState->m_uPacketID, "", "unknown command with size 0", m_tState->m_iConnID, MYSQL_ERR_UNKNOWN_COM_ERROR );
 					} else
 					{
-						LogSphinxqlError ( "", g_sMaxedOutMessage, m_tState->m_iConnID );
-						tOut.SendBytes ( g_dSphinxQLMaxedOutPacket, g_iSphinxQLMaxedOutLen );
+						SendMysqlErrorPacket ( tOut, m_tState->m_uPacketID, "", "Too many connections", m_tState->m_iConnID, MYSQL_ERR_TOO_MANY_USER_CONNECTIONS );
 					}
 
 					tOut.SwapData ( dBuf );

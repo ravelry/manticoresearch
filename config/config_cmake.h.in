@@ -64,6 +64,12 @@
 /* Define if your system supports flag SO_REUSEPORT */
 #cmakedefine01 HAVE_SO_REUSEPORT
 
+/* Define if your system libc has malloc_trim() */
+#cmakedefine01 HAVE_MALLOC_TRIM
+
+/* Define if your system libc has malloc_stats() */
+#cmakedefine01 HAVE_MALLOC_STATS
+
 /* Define if your system supports flag PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP */
 #cmakedefine01 HAVE_RWLOCK_PREFER_WRITER
 
@@ -81,6 +87,9 @@
 
 /* Define to 1 if you have the 'mremap' function */
 #cmakedefine HAVE_MREMAP ${HAVE_MREMAP}
+
+/* Define to 1 if you have the 'malloc.h' header */
+#cmakedefine HAVE_MALLOC_H ${HAVE_MALLOC_H}
 
 /* Define to 1 if you have the 'nanosleep' function */
 #cmakedefine HAVE_NANOSLEEP ${HAVE_NANOSLEEP}
@@ -105,6 +114,9 @@
 
 /* Define to 1 if you have the <sys/types.h> header file. */
 #cmakedefine HAVE_SYS_TYPES_H ${HAVE_SYS_TYPES_H}
+
+/* Define to 1 if you have the <sys/prctl.h> header file. */
+#cmakedefine HAVE_SYS_PRCTL_H ${HAVE_SYS_PRCTL_H}
 
 /* whether 2nd arg to iconv() is const ptr */
 #cmakedefine ICONV_INBUF_CONST ${ICONV_INBUF_CONST}
@@ -145,6 +157,9 @@
 /* RLP library support */
 #cmakedefine USE_RLP ${USE_RLP}
 #cmakedefine RLP_ROOT "${RLP_ROOT}"
+
+/* define to use Alexandresku's loki small obj allocator for movable attrs */
+#cmakedefine USE_SMALLALLOC ${USE_SMALLALLOC}
 
 /* define to use POSIX Syslog for logging */
 #cmakedefine USE_SYSLOG ${USE_SYSLOG}

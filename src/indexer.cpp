@@ -192,6 +192,8 @@ inline bool operator < ( const Word_t & a, const Word_t & b)
 
 class CSphStopwordBuilderDict : public CSphDict
 {
+protected:
+	~CSphStopwordBuilderDict() override {}
 public:
 						CSphStopwordBuilderDict () {}
 	void				Save ( const char * sOutput, int iTop, bool bFreqs );
@@ -932,7 +934,7 @@ bool DoIndex ( const CSphConfigSection & hIndex, const char * sIndexName,
 	CSphDictSettings tDictSettings;
 	sphConfDictionary ( hIndex, tDictSettings );
 
-	ISphTokenizer * pTokenizer = ISphTokenizer::Create ( tTokSettings, NULL, sError );
+	ISphTokenizerRefPtr_c pTokenizer { ISphTokenizer::Create ( tTokSettings, NULL, sError ) };
 	if ( !pTokenizer )
 		sphDie ( "index '%s': %s", sIndexName, sError.cstr() );
 
@@ -947,7 +949,7 @@ bool DoIndex ( const CSphConfigSection & hIndex, const char * sIndexName,
 		if ( !pTokenizer->EnableZoneIndexing ( sError ) )
 			sphDie ( "index '%s': %s", sIndexName, sError.cstr() );
 
-	CSphDict * pDict = NULL;
+	CSphDictRefPtr_c pDict;
 
 	// setup tokenization filters
 	if ( !g_sBuildStops )
@@ -993,16 +995,13 @@ bool DoIndex ( const CSphConfigSection & hIndex, const char * sIndexName,
 			pTokenizer = sphAotCreateFilter ( pTokenizer, pDict, tSettings.m_bIndexExactWords, tSettings.m_uAotFilterMask );
 	}
 
-	ISphFieldFilter * pFieldFilter = NULL;
+	ISphFieldFilterRefPtr_c pFieldFilter;
 	CSphFieldFilterSettings tFilterSettings;
 	if ( sphConfFieldFilter ( hIndex, tFilterSettings, sError ) )
 		pFieldFilter = sphCreateRegexpFilter ( tFilterSettings, sError );
 
 	if ( !sphSpawnRLPFilter ( pFieldFilter, tSettings, tTokSettings, sIndexName, sError ) )
-	{
-		SafeDelete ( pFieldFilter );
 		sphDie ( "%s", sError.cstr() );
-	}
 
 	if ( !sError.IsEmpty () )
 		fprintf ( stdout, "WARNING: index '%s': %s\n", sIndexName, sError.cstr() );
@@ -1100,8 +1099,6 @@ bool DoIndex ( const CSphConfigSection & hIndex, const char * sIndexName,
 	if ( bSpawnFailed )
 	{
 		fprintf ( stdout, "ERROR: index '%s': failed to configure some of the sources, will not index.\n", sIndexName );
-		SafeDelete ( pDict );
-		SafeDelete ( pTokenizer );
 		return false;
 	}
 
@@ -1130,10 +1127,10 @@ bool DoIndex ( const CSphConfigSection & hIndex, const char * sIndexName,
 			fflush ( stdout );
 		}
 
-		CSphStopwordBuilderDict tDict;
+		CSphRefcountedPtr<CSphStopwordBuilderDict> tDict { new CSphStopwordBuilderDict };
 		ARRAY_FOREACH ( i, dSources )
 		{
-			dSources[i]->SetDict ( &tDict );
+			dSources[i]->SetDict ( tDict );
 			if ( !dSources[i]->Connect ( sError ) || !dSources[i]->IterateStart ( sError ) )
 			{
 				if ( !sError.IsEmpty() )
@@ -1154,11 +1151,7 @@ bool DoIndex ( const CSphConfigSection & hIndex, const char * sIndexName,
 			if ( !sError.IsEmpty() )
 				fprintf ( stdout, "ERROR: index '%s': %s\n", sIndexName, sError.cstr() );
 		}
-		tDict.Save ( g_sBuildStops, g_iTopStops, g_bBuildFreqs );
-
-		SafeDelete ( pFieldFilter );
-		SafeDelete ( pTokenizer );
-
+		tDict->Save ( g_sBuildStops, g_iTopStops, g_bBuildFreqs );
 		bOK = true;
 
 	} else

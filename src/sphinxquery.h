@@ -301,7 +301,9 @@ public:
 	virtual ~QueryParser_i () {}
 	virtual bool IsFullscan ( const CSphQuery & tQuery ) const = 0;
 	virtual bool IsFullscan ( const XQQuery_t & tQuery ) const = 0;
-	virtual bool ParseQuery ( XQQuery_t & tParsed, const char * sQuery, const CSphQuery * pQuery, const ISphTokenizer * pQueryTokenizer, const ISphTokenizer * pQueryTokenizerJson, const CSphSchema * pSchema, CSphDict * pDict, const CSphIndexSettings & tSettings ) const = 0;
+	virtual bool ParseQuery ( XQQuery_t & tParsed, const char * sQuery, const CSphQuery * pQuery,
+		const ISphTokenizer * pQueryTokenizer, const ISphTokenizer * pQueryTokenizerJson,
+		const CSphSchema * pSchema, CSphDict * pDict, const CSphIndexSettings & tSettings ) const = 0;
 };
 
 class PluginQueryTokenFilter_c;
@@ -333,8 +335,8 @@ protected:
 	static const int MAX_TOKEN_BYTES = 3*SPH_MAX_WORD_LEN + 16;
 
 	const CSphSchema *		m_pSchema {nullptr};
-	ISphTokenizer *			m_pTokenizer {nullptr};
-	CSphDict *				m_pDict {nullptr};
+	ISphTokenizerRefPtr_c	m_pTokenizer;
+	CSphDictRefPtr_c		m_pDict;
 	bool					m_bStopOnInvalid {true};
 	XQQuery_t *				m_pParsed {nullptr};
 	bool					m_bError {false};

@@ -959,6 +959,7 @@ expr:
 function:
 	TOK_IDENT '(' arglist ')'		{ TRACK_BOUNDS ( $$, $1, $4 ); }
 	| TOK_IN '(' arglist ')'		{ TRACK_BOUNDS ( $$, $1, $4 ); } // handle exception from 'ident' rule
+	| json_field TOK_IN '(' arglist ')' { TRACK_BOUNDS ( $$, $1, $5 ); } // handle exception from 'ident' rule
 	| TOK_INTEGER '(' arglist ')'	{ TRACK_BOUNDS ( $$, $1, $4 ); }
 	| TOK_BIGINT '(' arglist ')'	{ TRACK_BOUNDS ( $$, $1, $4 ); }
 	| TOK_FLOAT '(' arglist ')'		{ TRACK_BOUNDS ( $$, $1, $4 ); }
@@ -1822,6 +1823,11 @@ opt_par:
 		{
 			pParser->ToString ( pParser->m_pStmt->m_sIndex, $1 );
 			pParser->ToString ( pParser->m_pStmt->m_sStringParam, $2 );
+		}
+	| ident TOK_CONST_INT
+		{
+			pParser->ToString ( pParser->m_pStmt->m_sIndex, $1 );
+			pParser->m_pStmt->m_iIntParam = $2.m_iValue;
 		}
 %%
 

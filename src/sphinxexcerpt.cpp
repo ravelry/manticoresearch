@@ -653,18 +653,18 @@ public:
 	mutable CSphVector<BYTE>	m_dResult;
 
 	SnippetsDocIndex_c &	m_tContainer;
-	ISphTokenizer *			m_pTokenizer;
-	CSphDict *				m_pDict;
+	ISphTokenizerRefPtr_c	m_pTokenizer;
+	CSphDictRefPtr_c		m_pDict;
 	const char *			m_szDocBuffer;
-	const char *			m_pDoc;
-	const char *			m_pDocMax;
+	const char *			m_pDoc = nullptr;
+	const char *			m_pDocMax = nullptr;
 
 	int		m_iBoundaryStep;
 	int		m_iStopwordStep;
 	bool	m_bIndexExactWords;
 	int		m_iDocLen;
-	int		m_iMatchesCount;
-	bool	m_bCollectExtraZoneInfo;
+	int		m_iMatchesCount = 0;
+	bool	m_bCollectExtraZoneInfo = false;
 	int		m_iSeparatorLen;
 
 	explicit TokenFunctorTraits_c ( SnippetsDocIndex_c & tContainer, ISphTokenizer * pTokenizer,
@@ -674,15 +674,13 @@ public:
 		, m_pTokenizer ( pTokenizer )
 		, m_pDict ( pDict )
 		, m_szDocBuffer ( sDoc )
-		, m_pDoc ( NULL )
-		, m_pDocMax ( NULL )
 		, m_iBoundaryStep ( tSettingsIndex.m_iBoundaryStep )
 		, m_iStopwordStep ( tSettingsIndex.m_iStopwordStep )
 		, m_bIndexExactWords ( tSettingsIndex.m_bIndexExactWords )
 		, m_iDocLen ( iDocLen )
-		, m_iMatchesCount ( 0 )
-		, m_bCollectExtraZoneInfo ( false )
 	{
+		SafeAddRef ( pTokenizer );
+		SafeAddRef ( pDict );
 		assert ( m_pTokenizer && m_pDict );
 		ExcerptQuery_t::operator = ( tQuery );
 		m_pTokenizer->SetBuffer ( (BYTE*)sDoc, m_iDocLen );
@@ -2988,8 +2986,8 @@ static void CopyString ( BYTE * sDst, const BYTE * sSrc, int iLen )
 template < typename T >
 static void TokenizeDocument ( T & tFunctor, const CSphHTMLStripper * pStripper, DWORD iSPZ )
 {
-	ISphTokenizer * pTokenizer = tFunctor.m_pTokenizer;
-	CSphDict * pDict = tFunctor.m_pDict;
+	ISphTokenizerRefPtr_c pTokenizer { tFunctor.m_pTokenizer };
+	CSphDictRefPtr_c& pDict = tFunctor.m_pDict;
 
 	const char * pStartPtr = pTokenizer->GetBufferPtr ();
 	const char * pLastTokenEnd = pStartPtr;
@@ -3366,14 +3364,12 @@ public:
 		m_pHiglighter = pHiglighter;
 	}
 
-	virtual ~SnippetsFastQwordSetup_c () {}
-
-	virtual ISphQword * QwordSpawn ( const XQKeyword_t & tWord ) const
+	ISphQword * QwordSpawn ( const XQKeyword_t & tWord ) const final
 	{
 		return new SnippetsFastQword_c ( m_pHiglighter->GetHitlist ( tWord ) );
 	}
 
-	virtual bool QwordSetup ( ISphQword * pQword ) const
+	bool QwordSetup ( ISphQword * pQword ) const final
 	{
 		SnippetsFastQword_c * pWord = (SnippetsFastQword_c *)pQword;
 		pWord->Setup ( m_pHiglighter->m_tContainer.m_uLastPos );
@@ -3629,7 +3625,7 @@ static void DoHighlighting ( ExcerptQuery_t & tQuerySettings,
 		SnippetZoneChecker_c tZoneChecker ( tHitCollector.m_dZones, tHitCollector.m_tZoneInfo.m_hZones, tContainer.m_tQuery.m_dZones );
 
 		SnippetsFastQwordSetup_c tQwordSetup ( &tHitCollector );
-		tQwordSetup.m_pDict = pDict;
+		tQwordSetup.SetDict ( pDict );
 		tQwordSetup.m_eDocinfo = SPH_DOCINFO_EXTERN;
 		tQwordSetup.m_pWarning = &sError;
 		tQwordSetup.m_pZoneChecker = &tZoneChecker;
@@ -3770,8 +3766,6 @@ CSphString g_sSnippetsFilePrefix { "" };
 void SnippetContext_t::BuildExcerpt ( ExcerptQuery_t & tOptions, const CSphIndex * pIndex ) const
 {
 	auto pStripper = m_tStripper.Ptr ();
-	auto pDocTokenizer = m_tTokenizer.Ptr ();
-	auto pQueryTokenizer = m_pQueryTokenizer.Ptr ();
 	CSphString &sError = tOptions.m_sError;
 
 	tOptions.m_dSeparators.Resize ( 0 );
@@ -3828,8 +3822,8 @@ void SnippetContext_t::BuildExcerpt ( ExcerptQuery_t & tOptions, const CSphIndex
 	// FIXME!!! check on real data (~100 Mb) as stripper changes len
 	int iDataLen = pData ? strlen ( pData ) : 0;
 
-	DoHighlighting ( tOptions, pIndex->GetSettings(), m_tExtQuery, m_eExtQuerySPZ, pData, iDataLen, m_pDict, pDocTokenizer, pStripper,
-		pQueryTokenizer, tOptions.m_dRes, tOptions.m_dSeparators );
+	DoHighlighting ( tOptions, pIndex->GetSettings(), m_tExtQuery, m_eExtQuerySPZ, pData, iDataLen, m_pDict,
+		m_pTokenizer, pStripper, m_pQueryTokenizer, tOptions.m_dRes, tOptions.m_dSeparators );
 }
 
 
@@ -3897,10 +3891,7 @@ static bool SetupStripperSPZ ( const CSphIndexSettings &tSettings, const Excerpt
 bool SnippetContext_t::Setup ( const CSphIndex * pIndex, const ExcerptQuery_t &tSettings, CSphString &sError )
 {
 	assert ( pIndex );
-	CSphScopedPtr<CSphDict> tDictCloned ( nullptr );
-	m_pDict = pIndex->GetDictionary ();
-	if ( m_pDict->HasState () )
-		m_tDictKeeper = m_pDict = m_pDict->Clone ();
+	m_pDict = GetStatelessDict ( pIndex->GetDictionary () );
 
 	// AOT tokenizer works only with query mode
 	if ( pIndex->GetSettings ().m_uAotFilterMask &&
@@ -3915,11 +3906,11 @@ bool SnippetContext_t::Setup ( const CSphIndex * pIndex, const ExcerptQuery_t &t
 
 	// OPTIMIZE! do a lightweight indexing clone here
 	if ( tSettings.m_bHighlightQuery && pIndex->GetSettings ().m_uAotFilterMask )
-		m_tTokenizer = sphAotCreateFilter ( pIndex->GetTokenizer ()->Clone ( SPH_CLONE_INDEX ), m_pDict
-											, pIndex->GetSettings ().m_bIndexExactWords
-											, pIndex->GetSettings ().m_uAotFilterMask );
+		m_pTokenizer = sphAotCreateFilter ( ISphTokenizerRefPtr_c ( pIndex->GetTokenizer ()->Clone ( SPH_CLONE_INDEX ) ),
+											m_pDict, pIndex->GetSettings ().m_bIndexExactWords,
+											pIndex->GetSettings ().m_uAotFilterMask );
 	else
-		m_tTokenizer = pIndex->GetTokenizer ()->Clone ( SPH_CLONE_INDEX );
+		m_pTokenizer = pIndex->GetTokenizer ()->Clone ( SPH_CLONE_INDEX );
 
 	m_pQueryTokenizer = nullptr;
 	if ( tSettings.m_bHighlightQuery || tSettings.m_bExactPhrase )
@@ -3941,14 +3932,11 @@ bool SnippetContext_t::Setup ( const CSphIndex * pIndex, const ExcerptQuery_t &t
 
 	// setup exact dictionary if needed
 	if ( pIndex->GetSettings ().m_bIndexExactWords )
-	{
-		m_tExactDictKeeper = new CSphDictExact ( m_pDict );
-		m_pDict = m_tExactDictKeeper.Ptr();
-	}
+		m_pDict = new CSphDictExact ( m_pDict );
 
 	if ( tSettings.m_bHighlightQuery )
 	{
-		CSphScopedPtr<ISphTokenizer> tTokenizerJson ( nullptr );
+		ISphTokenizerRefPtr_c tTokenizerJson;
 		CSphScopedPtr<QueryParser_i> tParser ( nullptr );
 		if ( !tSettings.m_bJsonQuery )
 		{
@@ -3956,14 +3944,14 @@ bool SnippetContext_t::Setup ( const CSphIndex * pIndex, const ExcerptQuery_t &t
 		} else
 		{
 			tTokenizerJson = pIndex->GetQueryTokenizer ()->Clone ( SPH_CLONE_QUERY_LIGHTWEIGHT );
-			sphSetupQueryTokenizer ( tTokenizerJson.Ptr (), pIndex->IsStarDict ()
-									 , pIndex->GetSettings ().m_bIndexExactWords, true );
+			sphSetupQueryTokenizer ( tTokenizerJson, pIndex->IsStarDict (),
+									 pIndex->GetSettings ().m_bIndexExactWords, true );
 			tParser = sphCreateJsonQueryParser ();
 		}
 		// OPTIMIZE? double lightweight clone here? but then again it's lightweight
-		if ( !tParser->ParseQuery ( m_tExtQuery, tSettings.m_sWords.cstr (), nullptr, m_pQueryTokenizer.Ptr ()
-									, tTokenizerJson.Ptr (), &pIndex->GetMatchSchema (), m_pDict
-									, pIndex->GetSettings () ) )
+		if ( !tParser->ParseQuery ( m_tExtQuery, tSettings.m_sWords.cstr (), nullptr, m_pQueryTokenizer,
+									tTokenizerJson, &pIndex->GetMatchSchema (), m_pDict,
+									pIndex->GetSettings () ) )
 		{
 			sError = m_tExtQuery.m_sParseError;
 			return false;
@@ -3983,7 +3971,7 @@ bool SnippetContext_t::Setup ( const CSphIndex * pIndex, const ExcerptQuery_t &t
 	bool bSetupSPZ = ( tSettings.m_ePassageSPZ!=SPH_SPZ_NONE || m_eExtQuerySPZ!=SPH_SPZ_NONE ||
 		( tSettings.m_sStripMode=="retain" && tSettings.m_bHighlightQuery ) );
 
-	return SetupStripperSPZ ( pIndex->GetSettings (), tSettings, bSetupSPZ, m_tStripper, m_tTokenizer.Ptr (), sError );
+	return SetupStripperSPZ ( pIndex->GetSettings (), tSettings, bSetupSPZ, m_tStripper, m_pTokenizer, sError );
 }
 
 //

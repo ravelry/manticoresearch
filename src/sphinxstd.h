@@ -438,9 +438,9 @@ template <typename T, typename U> T Max ( T a, U b )
 /// swap
 template < typename T > inline void Swap ( T & v1, T & v2 )
 {
-	T temp = v1;
-	v1 = v2;
-	v2 = temp;
+	T temp = std::move ( v1 );
+	v1 = std::move ( v2 );
+	v2 = std::move ( temp );
 }
 
 /// prevent copy
@@ -1378,6 +1378,7 @@ public:
 /// swap-vector
 template < typename T >
 using CSphSwapVector = CSphVector < T, CSphSwapVectorPolicy<T> >;
+
 
 /// tight-vector
 template < typename T >
@@ -2361,8 +2362,8 @@ struct CSphStrHashFunc
 };
 
 /// small hash with string keys
-template < typename T >
-using SmallStringHash_T = CSphOrderedHash < T, CSphString, CSphStrHashFunc, 256 >;
+template < typename T, int LENGTH = 256 >
+using SmallStringHash_T = CSphOrderedHash < T, CSphString, CSphStrHashFunc, LENGTH >;
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -2444,8 +2445,7 @@ public:
 	/// assignment of a raw pointer, takes over ownership!
 	CSphRefcountedPtr<T> & operator = ( T * pPtr )
 	{
-		if ( m_pPtr!=pPtr )
-			SafeRelease ( m_pPtr );
+		SafeRelease ( m_pPtr );
 		m_pPtr = pPtr;
 		return *this;
 	}
@@ -2453,8 +2453,7 @@ public:
 	/// wrapper assignment, does automated reference tracking
 	CSphRefcountedPtr & operator = ( const CSphRefcountedPtr & rhs )
 	{
-		if ( rhs.m_pPtr )
-			rhs.m_pPtr->AddRef();
+		SafeAddRef ( rhs.m_pPtr );
 		SafeRelease ( m_pPtr );
 		m_pPtr = rhs.m_pPtr;
 		return *this;
@@ -3524,7 +3523,7 @@ public:
 typedef CSphAtomic_T<long> CSphAtomic;
 typedef CSphAtomic_T<int64_t> CSphAtomicL;
 
-/// MT-aware refcounted base (might be a mutex protected and slow)
+/// MT-aware refcounted base (uses atomics that sometimes m.b. slow because of inter-cpu sync)
 struct ISphRefcountedMT : public ISphNoncopyable
 {
 protected:
@@ -4166,5 +4165,22 @@ inline int sphZipToPtr ( T tValue, BYTE * pData )
 	return nBytes;
 }
 
+/// Allocation for small objects (namely - for movable dynamic attributes).
+/// internals based on Alexandresku's 'loki' implementation - 'Allocator for small objects'
+static const int MAX_SMALL_OBJECT_SIZE = 64;
+
+#ifdef USE_SMALLALLOC
+BYTE * sphAllocateSmall ( int iBytes );
+void sphDeallocateSmall ( BYTE * pBlob, int iBytes );
+size_t sphGetSmallAllocatedSize ();	// how many allocated right now
+size_t sphGetSmallReservedSize ();	// how many pooled from the sys right now
+#else
+inline BYTE * sphAllocateSmall(int iBytes) {return new BYTE[iBytes];};
+inline void sphDeallocateSmall(BYTE * pBlob, int) {delete[]pBlob;};
+inline size_t sphGetSmallAllocatedSize() {return 0;};    // how many allocated right now
+inline size_t sphGetSmallReservedSize() {return 0;};    // how many pooled from the sys right now
+#endif // USE_SMALLALLOC
+
+void sphDeallocatePacked ( BYTE * pBlob );
 
 #endif // _sphinxstd_

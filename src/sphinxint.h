@@ -222,7 +222,6 @@ public:
 class CSphWriter : ISphNoncopyable
 {
 public:
-					CSphWriter ();
 	virtual			~CSphWriter ();
 
 	void			SetBufferSize ( int iBufferSize );	///< tune write cache size; must be called before OpenFile() or SetFile()
@@ -251,19 +250,19 @@ public:
 
 protected:
 	CSphString		m_sName;
-	SphOffset_t		m_iPos;
-	SphOffset_t		m_iWritten;
+	SphOffset_t		m_iPos = -1;
+	SphOffset_t		m_iWritten = 0;
 
-	int				m_iFD;
-	int				m_iPoolUsed;
-	BYTE *			m_pBuffer;
-	BYTE *			m_pPool;
-	bool			m_bOwnFile;
-	SphOffset_t	*	m_pSharedOffset;
-	int				m_iBufferSize;
+	int				m_iFD = -1;
+	int				m_iPoolUsed = 0;
+	BYTE *			m_pBuffer = nullptr;
+	BYTE *			m_pPool = nullptr;
+	bool			m_bOwnFile = false;
+	SphOffset_t	*	m_pSharedOffset = nullptr;
+	int				m_iBufferSize = 262144;
 
-	bool			m_bError;
-	CSphString *	m_pError;
+	bool			m_bError = false;
+	CSphString *	m_pError = nullptr;
 
 	virtual void	Flush ();
 };
@@ -380,6 +379,11 @@ public:
 	int			GetFD () { return m_iFD; }
 };
 
+
+namespace sph
+{
+	int rename ( const char * sOld, const char * sNew );
+}
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -582,8 +586,12 @@ struct MemTracker_c : ISphNoncopyable
 
 inline int64_t MVA_UPSIZE ( const DWORD * pMva )
 {
+#if USE_LITTLE_ENDIAN
+	return *(int64_t*)pMva;
+#else
 	int64_t iMva = (int64_t)( (uint64_t)pMva[0] | ( ( (uint64_t)pMva[1] )<<32 ) );
 	return iMva;
+#endif
 }
 
 
@@ -1570,7 +1578,7 @@ struct LocatorPair_t
 class CSphDictTraits : public CSphDict
 {
 public:
-	explicit			CSphDictTraits ( CSphDict * pDict ) : m_pDict ( pDict ) { assert ( m_pDict ); }
+	explicit			CSphDictTraits ( CSphDict * pDict ) : m_pDict { pDict } { SafeAddRef ( pDict ); }
 
 	virtual void		LoadStopwords ( const char * sFiles, const ISphTokenizer * pTokenizer ) { m_pDict->LoadStopwords ( sFiles, pTokenizer ); }
 	virtual void		LoadStopwords ( const CSphVector<SphWordID_t> & dStopwords ) { m_pDict->LoadStopwords ( dStopwords ); }
@@ -1594,7 +1602,7 @@ public:
 	virtual uint64_t	GetSettingsFNV () const { return m_pDict->GetSettingsFNV(); }
 
 protected:
-	CSphDict *			m_pDict;
+	CSphDictRefPtr_c	m_pDict;
 };
 
 
@@ -1602,23 +1610,21 @@ protected:
 class CSphDictStar : public CSphDictTraits
 {
 public:
-	explicit			CSphDictStar ( CSphDict * pDict ) : CSphDictTraits ( pDict ) {}
+	explicit	CSphDictStar ( CSphDict * pDict ) : CSphDictTraits ( pDict ) {}
 
-	virtual SphWordID_t	GetWordID ( BYTE * pWord );
-	virtual SphWordID_t	GetWordIDNonStemmed ( BYTE * pWord );
+	SphWordID_t	GetWordID ( BYTE * pWord ) override;
+	SphWordID_t	GetWordIDNonStemmed ( BYTE * pWord ) override;
 };
 
 
 /// star dict for index v.8+
 class CSphDictStarV8 : public CSphDictStar
 {
+	bool m_bInfixes;
 public:
-	CSphDictStarV8 ( CSphDict * pDict, bool bPrefixes, bool bInfixes );
-
-	virtual SphWordID_t	GetWordID ( BYTE * pWord );
-
-private:
-	bool				m_bInfixes;
+	CSphDictStarV8 ( CSphDict * pDict, bool bInfixes ) : CSphDictStar ( pDict ), m_bInfixes ( bInfixes )
+	{}
+	SphWordID_t	GetWordID ( BYTE * pWord ) final;
 };
 
 
@@ -1627,8 +1633,8 @@ class CSphDictExact : public CSphDictTraits
 {
 public:
 	explicit CSphDictExact ( CSphDict * pDict ) : CSphDictTraits ( pDict ) {}
-	virtual SphWordID_t	GetWordID ( BYTE * pWord );
-	virtual SphWordID_t GetWordIDNonStemmed ( BYTE * pWord ) { return m_pDict->GetWordIDNonStemmed ( pWord ); }
+	SphWordID_t	GetWordID ( BYTE * pWord ) final;
+	SphWordID_t GetWordIDNonStemmed ( BYTE * pWord ) final { return m_pDict->GetWordIDNonStemmed ( pWord ); }
 };
 
 //////////////////////////////////////////////////////////////////////////
@@ -1639,11 +1645,11 @@ public:
 class CSphTokenFilter : public ISphTokenizer
 {
 protected:
-	ISphTokenizer *		m_pTokenizer;
+	ISphTokenizerRefPtr_c		m_pTokenizer;
 
 public:
-	explicit						CSphTokenFilter ( ISphTokenizer * pTokenizer )					: m_pTokenizer ( pTokenizer ) {}
-									~CSphTokenFilter()												{ SafeDelete ( m_pTokenizer ); }
+	explicit						CSphTokenFilter ( ISphTokenizer * pTokenizer )					: m_pTokenizer ( pTokenizer ) {	SafeAddRef ( pTokenizer ); }
+
 
 	virtual bool					SetCaseFolding ( const char * sConfig, CSphString & sError )	{ return m_pTokenizer->SetCaseFolding ( sConfig, sError ); }
 	virtual void					AddPlainChar ( char c )											{ m_pTokenizer->AddPlainChar ( c ); }
@@ -1690,14 +1696,11 @@ struct CSphReconfigureSettings
 
 struct CSphReconfigureSetup
 {
-	ISphTokenizer *		m_pTokenizer;
-	CSphDict *			m_pDict;
-	CSphIndexSettings	m_tIndex;
-	ISphFieldFilter *	m_pFieldFilter;
+	ISphTokenizerRefPtr_c	m_pTokenizer;
+	CSphDictRefPtr_c		m_pDict;
+	CSphIndexSettings		m_tIndex;
+	ISphFieldFilterRefPtr_c	m_pFieldFilter;
 	CSphSchema			m_tSchema;
-
-	CSphReconfigureSetup ();
-	~CSphReconfigureSetup ();
 };
 
 uint64_t sphGetSettingsFNV ( const CSphIndexSettings & tSettings );
@@ -1947,6 +1950,8 @@ int sphCollateBinary ( const BYTE * pStr1, const BYTE * pStr2, StringSource_e eS
 
 class ISphRtDictWraper : public CSphDict
 {
+protected:
+	~ISphRtDictWraper() override {}
 public:
 	virtual const BYTE *	GetPackedKeywords () = 0;
 	virtual int				GetPackedLen () = 0;
@@ -1956,6 +1961,8 @@ public:
 	virtual const char *	GetLastWarning() const = 0;
 	virtual void			ResetWarning() = 0;
 };
+
+using ISphRtDictWraperRefPtr_c = CSphRefcountedPtr<ISphRtDictWraper>;
 
 ISphRtDictWraper * sphCreateRtKeywordsDictionaryWrapper ( CSphDict * pBase );
 
@@ -2137,24 +2144,23 @@ struct ExpansionContext_t
 
 struct GetKeywordsSettings_t
 {
-	bool	m_bStats;
-	bool	m_bFoldLemmas;
-	bool	m_bFoldBlended;
-	bool	m_bFoldWildcards;
-	int		m_iExpansionLimit;
-
-	GetKeywordsSettings_t ();
+	bool	m_bStats = true;
+	bool	m_bFoldLemmas = false;
+	bool	m_bFoldBlended = false;
+	bool	m_bFoldWildcards = false;
+	int		m_iExpansionLimit = 0;
+	bool	m_bSortByDocs = false;
+	bool	m_bSortByHits = false;
 };
 
 struct ISphQueryFilter
 {
-	ISphTokenizer *				m_pTokenizer;
-	CSphDict *					m_pDict;
-	const CSphIndexSettings *	m_pSettings;
+	ISphTokenizerRefPtr_c		m_pTokenizer;
+	CSphDict *					m_pDict = nullptr;
+	const CSphIndexSettings *	m_pSettings = nullptr;
 	GetKeywordsSettings_t		m_tFoldSettings;
 
-	ISphQueryFilter ();
-	virtual ~ISphQueryFilter ();
+	virtual ~ISphQueryFilter () {}
 
 	void GetKeywords ( CSphVector <CSphKeywordInfo> & dKeywords, const ExpansionContext_t & tCtx );
 	virtual void AddKeywordStats ( BYTE * sWord, const BYTE * sTokenized, int iQpos, CSphVector <CSphKeywordInfo> & dKeywords ) = 0;
