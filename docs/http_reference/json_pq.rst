@@ -7,7 +7,7 @@ Percolate are accepted at ``/json/pq`` endpoint. Here is an example:
 
 ::
 
-    curl -X POST 'http://manticoresearch:9308//json/pq/index_name/search' 
+    curl -X POST 'http://manticoresearch:9308/json/pq/index_name/search' 
 	-d '{}'
 
 to list of stored queries at ``"index_name"`` percolate index. 
@@ -28,8 +28,8 @@ with ``refresh=1`` argument, such as ``json/pq/index_pq_1/doc/2?refresh=1``
 
 There is 2 formats of full-text queries that might be stored into index:
 
--   query in ``json\search`` compartible format, described at  :ref:`json/search <http_json_search>`
--   query in ``SphinxQL`` compartible format, described at :ref:`extended query syntax <extended_query_syntax>`
+-   query in ``json\search`` compatible format, described at  :ref:`json/search <http_json_search>`
+-   query in ``SphinxQL`` compatible format, described at :ref:`extended query syntax <extended_query_syntax>`
 
 ``tags`` and ``filters`` also might be stored along with query, for details refer to :ref:`Tags <percolate_query_tags>`
 However there is no way to mix ``json\search`` native filters with ``filters`` field, only one type of filter might be
@@ -149,7 +149,7 @@ Example of single document matching:
 		}
 	}
 
-The responce:
+The response:
 
 .. code-block:: rest
 
@@ -211,7 +211,7 @@ Example of multiple documents matching:
 		}
 	}
 
-The responce:
+The response:
 
 .. code-block:: rest
 
@@ -257,12 +257,12 @@ Example:
 
 .. code-block:: rest
 
-	POST /json/pq/idx_pq_1/search
+	POST /json/pq/idx_pq_1/_search
 	{
 	}
 
 	
-The responce:
+The response:
 
 .. code-block:: rest
    
@@ -342,8 +342,8 @@ The responce:
 
 
 There ``hits`` contains queries stored at percolate index with query ``ID`` at ``_id`` field and ``_source`` field
-is full text query in ``SphinxQL`` compartible format, described at :ref:`extended query syntax <extended_query_syntax>`
-or ``json\search`` compartible format, described at  :ref:`json\search <http_json_search>`
+is full text query in ``SphinxQL`` compatible format, described at :ref:`extended query syntax <extended_query_syntax>`
+or ``json\search`` compatible format, described at  :ref:`json\search <http_json_search>`
 	
 .. _http_percolate_query_delete:
 

@@ -1,6 +1,98 @@
 Release notes
 =============
 
+Version 2.8.0 GA, 28 January 2019
+---------------------------------
+
+Improvements
+~~~~~~~~~~~~
+* Distributed indexes for percolate indexes
+* CALL PQ new options and changes:
+
+  - skip_bad_json
+  - mode (sparsed/sharded)
+  - json documents can be passed as a json array
+  - shift
+  - Column names ‘UID’, ‘Documents’, ‘Query’, ‘Tags’, ‘Filters’ were renamed to ‘id’, ‘documents’, ‘query’, ‘tags’, ‘filters’
+
+* DESCRIBE pq TABLE
+* SELECT FROM pq WHERE UID is not possible any more, use ‘id’ instead
+* SELECT over pq indexes is on par with regular indexes (e.g. you can filter rules via REGEX())
+* ANY/ALL can be used on PQ tags
+* expressions have auto-conversion for JSON fields, not requiring explicit casting
+* built-in 'non_cjk' charset_table and 'cjk' ngram_chars
+* built-in stopwords collections for 50 languages
+* multiple files in a stopwords declaration can also be separated by comma
+* CALL PQ can accept JSON array of documents
+
+
+Bugfixes
+~~~~~~~~
+
+* `a4e19af <https://github.com/manticoresoftware/manticoresearch/commit/a4e19afee54dafdc04b0da53372dafd8c0d332d6>`__ fixed csjon-related leak
+* `28d8627 <https://github.com/manticoresoftware/manticoresearch/commit/28d862774874891a03e361da1b0347ebe8066ce0>`__ fixed crash because of missed value in json
+* `bf4e9ea <https://github.com/manticoresoftware/manticoresearch/commit/bf4e9ea27c349cdc9ae4e54e960a4a17b90e38fa>`__ fixed save of empty meta for RT index
+* `33b4573 <https://github.com/manticoresoftware/manticoresearch/commit/33b4573529e7c7c7bce19bf9d54054866f30d99a>`__ fixed lost form flag (exact) for sequence of lemmatizer
+* `6b95d48 <https://github.com/manticoresoftware/manticoresearch/commit/6b95d48240d3b5520afade19c249d79e020a5e88>`__ fixed string attrs >4M use saturate instead of overflow
+* `621418b <https://github.com/manticoresoftware/manticoresearch/commit/621418b829e70af36aaa322a2f51ece3f86bc499>`__ fixed crash of daemon on SIGHUP with disabled index
+* `3f7e35d <https://github.com/manticoresoftware/manticoresearch/commit/3f7e35d1482966cc45d5abbcb2de5de3508d66b0>`__ fixed daemon crash on simultaneous API session status commands
+* `cd9e4f1 <https://github.com/manticoresoftware/manticoresearch/commit/cd9e4f1709a48ddafc128c450c2d882bc11ba50e>`__ fixed crash of daemon at delete query to RT index with field filters
+* `9376470 <https://github.com/manticoresoftware/manticoresearch/commit/9376470d455fcd256c6abff79c431a6919dfa7ac>`__ fixed crash of daemon at CALL PQ to distributed index with empty document
+* `8868b20 <https://github.com/manticoresoftware/manticoresearch/commit/8868b207644f4f8cc1ab0c270adb35493fed22e1>`__ fixed cut SphinxQL error message larger 512 chars
+* `de9deda <https://github.com/manticoresoftware/manticoresearch/commit/de9deda9c142823d6dbf529423417b5c670fae94>`__ fixed crash on save percolate index without binlog
+* `2b219e1 <https://github.com/manticoresoftware/manticoresearch/commit/2b219e1a32791e7740bb210b7d408f96abc6374f>`__ fixed http interface is not working in OSX
+* `e92c602 <https://github.com/manticoresoftware/manticoresearch/commit/e92c60240f8f9e1756bfa14fba0bbb402586a389>`__ fixed indextool false error message on check of MVA
+* `238bdea <https://github.com/manticoresoftware/manticoresearch/commit/238bdea59bad89f097403f1c978658ce45f16c70>`__ fixed write lock at FLUSH RTINDEX to not write lock whole index during save and on regular flush from rt_flush_period
+* `c26a236 <https://github.com/manticoresoftware/manticoresearch/commit/c26a236bd42b7082db079a51a84172066d337d64>`__ fixed ALTER percolate index stuck waiting search load
+* `9ee5703 <https://github.com/manticoresoftware/manticoresearch/commit/9ee5703f6c28f57cd5bff5e705966d93fe30d267>`__ fixed max_children to use default amount of thread_pool workers for value of 0
+* `5138fc0 <https://github.com/manticoresoftware/manticoresearch/commit/5138fc048a1bd146b271ce6a72fe954344281f69>`__ fixed error on indexing of data into index with index_token_filter plugin along with stopwords and stopword_step=0
+* `2add3d3 <https://github.com/manticoresoftware/manticoresearch/commit/2add3d319ac62fe450bf60e89033100853dc2ecf>`__ fixed crash with absent lemmatizer_base when still using aot lemmatizers in index definitions
+
+
+
+Version 2.7.5 GA, 4 December 2018
+---------------------------------
+
+Improvements
+~~~~~~~~~~~~
+
+* REGEX function 
+* limit/offset for json API search
+* profiler points for qcache
+
+Bugfixes
+~~~~~~~~
+
+* `eb3c768 <https://github.com/manticoresoftware/manticoresearch/commit/eb3c7683b9740cff4cc4cadd2ab9f990b9f7d173>`__ fixed crash of daemon on FACET with multiple attribute wide types
+* `d915cf6 <https://github.com/manticoresoftware/manticoresearch/commit/d915cf6696514f4be365ffb5981bccaa15983e65>`__ fixed implicit group by at main select list of FACET query
+* `5c25dc2 <https://github.com/manticoresoftware/manticoresearch/commit/5c25dc271a8c11a1c82ca3c88e518acbc6a8c164>`__ fixed crash on query with GROUP N BY
+* `85d30a2 <https://github.com/manticoresoftware/manticoresearch/commit/85d30a232d4ffd89916b673a9b2db946d272a945>`__ fixed deadlock on handling crash at memory operations
+* `85166b5 <https://github.com/manticoresoftware/manticoresearch/commit/85166b5ef2be38061d62f2b20f15acaa0311258a>`__ fixed indextool memory consumption during check
+* `58fb031 <https://github.com/manticoresoftware/manticoresearch/commit/58fb03166830d8b23e7ab9ce56309db7ddac22f4>`__ fixed gmock include not needed anymore as upstream resolve itself
+
+
+Version 2.7.4 GA, 1 November 2018
+---------------------------------
+
+Improvements
+~~~~~~~~~~~~
+
+* SHOW THREADS in case of remote distributed indexes prints the original query instead of API call
+* SHOW THREADS new option `format=sphinxql` prints all queries in SphinxQL format
+* SHOW PROFILE prints additional `clone_attrs` stage
+
+Bugfixes
+~~~~~~~~
+
+* `4f15571 <https://github.com/manticoresoftware/manticoresearch/commit/4f155712a0bccc1bd01cc191647bc8cff814888e>`__ fixed failed to build with libc without malloc_stats, malloc_trim
+* `f974f20 <https://github.com/manticoresoftware/manticoresearch/commit/f974f20bda3214a56877c393a192be1a77150958>`__ fixed special symbols inside words for CALL KEYWORDS result set
+* `0920832 <https://github.com/manticoresoftware/manticoresearch/commit/092083282ea8ae0b2e72fb6989c57ccec81e74ac>`__ fixed broken CALL KEYWORDS to distributed index via API or to remote agent
+* `fd686bf <https://github.com/manticoresoftware/manticoresearch/commit/fd686bfe88b720ffd7642e36897ba45161cbd7d2>`__ fixed distributed index agent_query_timeout propagate to agents as max_query_time
+* `4ffa623 <https://github.com/manticoresoftware/manticoresearch/commit/4ffa623e9d357a3b0b441615089e211f92f8de32>`__ fixed total documents counter at disk chunk got affected by OPTIMIZE command and breaks weight calculation
+* `dcaf4e0 <https://github.com/manticoresoftware/manticoresearch/commit/dcaf4e0e3c8e9b0fbec47bbf3307feddec0936a6>`__ fixed multiple tail hits at RT index from blended
+* `eee3817 <https://github.com/manticoresoftware/manticoresearch/commit/eee381754e902a43a8f499e1c950198a2a3e6ee0>`__ fixed deadlock at rotation
+
+
 Version 2.7.3 GA, 26 September 2018
 -----------------------------------
 

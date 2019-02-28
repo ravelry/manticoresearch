@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2019, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -370,7 +370,7 @@ extern int g_iAgentRetryDelay;
 
 struct IReporter_t : ISphRefcountedMT
 {
-	virtual void SetTotal ( int iTasks ) = 0;
+	virtual void Add ( int iTasks ) = 0;
 	virtual void Report ( bool bSuccess ) = 0;
 	virtual bool IsDone () const = 0;
 protected:
@@ -457,6 +457,13 @@ public:
 #endif
 };
 
+struct iQueryResult
+{
+	virtual ~iQueryResult() {}
+	virtual void Reset() = 0;
+	virtual bool HasWarnings() const = 0;
+};
+
 /// remote agent connection (local per-query state)
 struct AgentConn_t : public ISphRefcountedMT
 {
@@ -474,7 +481,7 @@ public:
 	int64_t			m_iWaited = 0;		///< statistics of waited
 
 	// some external stuff
-	CSphVector<CSphQueryResult> m_dResults;	///< multi-query results
+	CSphScopedPtr<iQueryResult> m_pResult { nullptr };	///< multi-query results
 	CSphString		m_sFailure;				///< failure message (both network and logical)
 	mutable int		m_iStoreTag = -1;	///< cookie, m.b. used to 'glue' to concrete connection
 	int				m_iWeight = -1;		///< weight of the index, will be send with query to remote host
@@ -823,12 +830,12 @@ public:
 
 inline bool NetEventsIterator_t::IsReadable () const
 {
-	return bool ( m_uEvents & ISphNetEvents::SPH_POLL_RD );
+	return !! ( m_uEvents & ISphNetEvents::SPH_POLL_RD );
 }
 
 inline bool NetEventsIterator_t::IsWritable () const
 {
-	return bool ( m_uEvents & ISphNetEvents::SPH_POLL_WR );
+	return !! ( m_uEvents & ISphNetEvents::SPH_POLL_WR );
 }
 
 // all fresh codeflows use version with poll/epoll/kqueue.

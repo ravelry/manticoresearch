@@ -104,6 +104,8 @@ for quick access.
 
 -  :ref:`RAND() <expr-func-rand>`
 
+-  :ref:`REGEX() <expr-func-regex>`
+
 -  :ref:`REMAP() <expr-func-remap>`
 
 -  :ref:`SECOND() <expr-func-second>`
@@ -113,6 +115,8 @@ for quick access.
 -  :ref:`SINT() <expr-func-sint>`
 
 -  :ref:`SQRT() <expr-func-sqrt>`
+
+-  :ref:`SUBSTRING_INDEX() <expr-func-substring-index>`
 
 -  :ref:`TO_STRING() <expr-func-to-string>`
 
@@ -463,9 +467,9 @@ Comparison functions
 
 -  IF()
 
-   ``IF()`` behavior is slightly different that that of its MySQL
-   counterpart. It takes 3 arguments, check whether the 1st argument is
-   equal to 0.0, returns the 2nd argument if it is not zero, or the 3rd
+   ``IF()`` behavior is slightly different than its MySQL
+   counterpart. It takes 3 arguments, checks whether the 1st argument is
+   equal to 0.0, returns the 2nd argument if it is not zero or the 3rd
    one when it is. Note that unlike comparison operators, ``IF()`` does
    **not** use a threshold! Therefore, it's safe to use comparison
    results as its 1st argument, but arithmetic operators might produce
@@ -473,13 +477,13 @@ Comparison functions
    produce *different* results even though they are logically
    equivalent:
 
-.. code-block:: none
+   .. code-block:: none
+
 
        IF ( sqrt(3)*sqrt(3)-3<>0, a, b )
        IF ( sqrt(3)*sqrt(3)-3, a, b )
   
 
-  
    In the first case, the comparison operator <> will return 0.0 (false)
    because of a threshold, and ``IF()`` will always return ‘**’ as a
    result. In the second one, the same ``sqrt(3)*sqrt(3)-3`` expression
@@ -543,9 +547,28 @@ Miscellaneous functions
 
    .. code-block:: mysql
 
-
        SELECT * FROM test WHERE ALL(mymva)>10;
-  
+
+
+   ALL(string list) is a special operation for filtering string tags.
+
+   .. code-block:: mysql
+
+
+       SELECT * FROM test WHERE tags ALL('foo', 'bar', 'fake');
+       SELECT * FROM test WHERE tags NOT ALL('true', 'text', 'tag');
+
+   Here assumed that index 'test' has string attribute 'tags' with set of words (tags), separated by whitespace.
+   If all of the words enumerated as arguments of `ALL()`' present in the attribute, filter matches. Optional 'NOT'
+   inverses the logic.
+   For example, attr containing 'buy iphone cheap' will be matched by ``ALL('cheap', 'iphone')``, but will not match ``ALL('iphone', '5s')``.
+
+   This filter internally uses doc-by-doc matching, so in case of full scan query it might be very slow. It is intended
+   originally for attributes which are not indexed, like calculated expressions or tags in pq indexes.
+
+   if you like such filtering and want to use it in production, consider the solution to put the 'tags' attribute as full-text
+   field, and then use FT operator 'match()' which will invoke full-text indexed search.
+
 
 .. _expr-func-any:
 
@@ -558,6 +581,16 @@ Miscellaneous functions
    ANY(mva) is a special constructor for multi value attributes. 
    When used in conjunction with comparison operators it returns 1 if any of the  values compared are found among the MVA values.
    ANY is used by default if no constructor is used, however a warning will be raised about missing constructor.
+
+   ANY(string list) is a special operation for filtering string tags. Works similar to :ref:`ALL() <expr-func-all>`, except
+   if condition is true for the case when any tag of tested expression match.
+
+   .. code-block:: mysql
+
+
+       SELECT * FROM test WHERE tags NOT ANY('true', 'text', 'tag');
+       SELECT TO_STRING(id*321) secret FROM test WHERE secret ANY('1000','3210');
+
    
 .. _expr-func-atan2:
 
@@ -853,7 +886,41 @@ Miscellaneous functions
    RAND(seed) function returns a random float between 0..1. Optional, an
    integer seed value can be specified.
 
+.. _expr-func-regex:
+
+-  REGEX()
+
+   REGEX(attr,expr) function returns 1 if regular expression matched to
+   string of attribute and 0 otherwise. It works with both string and JSON attributes.
    
+   We use the RE2 engine to implement regexps. So when building from the source,
+   the library must be installed in the system and Manticore must be
+   configured built with a --with-re2 switch. Binary packages should come with RE2 builtin.
+
+.. code-block:: mysql
+
+
+       SELECT REGEX(content, 'box?') FROM test;
+       SELECT REGEX(j.color, 'red | pink') FROM test;
+   
+.. _expr-func-substring-index:
+
+-  SUBSTRING_INDEX()
+
+   SUBSTRING_INDEX(string, delimiter, number) returns a substring of a string before a specified number of delimiter occurs
+   
+   - string - The original string. Can be a constant string or a string from a string/json attribute.
+   - delimiter - The delimiter to search for
+   - number - The number of times to search for the delimiter. Can be both a positive or negative number.
+   If it is a positive number, this function will return all to the left of the delimiter. 
+   If it is a negative number, this function will return all to the right of the delimiter.
+
+.. code-block:: mysql
+
+
+       SELECT SUBSTRING_INDEX('www.w3schools.com', '.', 2) FROM test;
+       SELECT SUBSTRING_INDEX(j.coord, ' ', 1) FROM test;
+
 .. _expr-func-weight:
 
 -  WEIGHT()

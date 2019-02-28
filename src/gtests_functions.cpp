@@ -1,10 +1,19 @@
 //
-// Created by alexey on 25.08.17.
+// Copyright (c) 2017-2019, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2001-2016, Andrew Aksyonoff
+// Copyright (c) 2008-2016, Sphinx Technologies Inc
+// All rights reserved
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License. You should have
+// received a copy of the GPL license along with this program; if you
+// did not, you can find it at http://www.gnu.org/
 //
 
 #include <gtest/gtest.h>
 
 #include "sphinxint.h"
+#include "sphinxutils.h"
 #include "json/cJSON.h"
 #include <math.h>
 
@@ -90,16 +99,229 @@ TEST ( Misc, SpanSearch )
 
 //////////////////////////////////////////////////////////////////////////
 
-TEST ( functions, stringbuilder )
+// test on usual +=, <<.
+TEST ( functions, stringbuilder_hello )
 {
 	StringBuilder_c builder;
 
+	// += of const char string
 	builder += "Hello";
 
-	ASSERT_STREQ ( builder.cstr (), "Hello" );
+	// << for const char*
+	builder << " " << "world!";
+	ASSERT_STREQ ( builder.cstr (), "Hello world!" );
+
+	// << for CSphString
+	CSphString s ("I am");
+	builder << s;
+	ASSERT_STREQ ( builder.cstr (), "Hello world!I am" );
+
+	// << for vec of chars
+	CSphVector<char> dText;
+	dText.Add('a'); dText.Add('b'); dText.Add('c');
+	builder << dText;
+	ASSERT_STREQ ( builder.cstr (), "Hello world!I amabc" );
+
+	// AppendChars of blob
+	const char* sText = "text";
+	builder.AppendChars ( sText, (int) strlen (sText) );
+	ASSERT_STREQ ( builder.cstr (), "Hello world!I amabctext" );
+
+	// AppendChars with quotation
+	builder.AppendChars ( sText, ( int ) strlen ( sText ), '`' );
+	ASSERT_STREQ ( builder.cstr (), "Hello world!I amabctext`text`" );
+
+	// AppendString
+	builder.AppendString (s);
+	ASSERT_STREQ ( builder.cstr (), "Hello world!I amabctext`text`I am" );
+
+	// AppendString quoted
+	builder.AppendString ( s, '_' );
+	ASSERT_STREQ ( builder.cstr (), "Hello world!I amabctext`text`I am_I am_" );
+}
+
+// test for scoped-comma modifier.
+// comma will automatically append '; ' between ops.
+TEST ( functions, stringbuilder_simplescoped )
+{
+	StringBuilder_c builder;
+	auto tComma = ScopedComma_c (builder,"; ");
+
+	builder += "one";
+	builder << "two" << "three";
+	builder.Appendf ("four: %d", 4);
+	builder << "five";
+	ASSERT_STREQ ( builder.cstr (), "one; two; three; four: 4; five" );
+}
+
+// scoped comma with prefix (will prepend prefix before first op)
+// nested comma (will use other behaviour in isolated scope)
+TEST ( functions, stringbuilder_scopedprefixed )
+{
+	StringBuilder_c builder;
+	auto tC = ScopedComma_c ( builder, "; ", "List: " );
+
+	builder += "one";
+	builder << "two" << "three";
+	ASSERT_STREQ ( builder.cstr (), "List: one; two; three" ) << "plain insert into managed";
+	{
+		auto tI = ScopedComma_c ( builder, ": ", "{", "}" );
+		builder << "first" << "second";
+		ASSERT_STREQ ( builder.cstr (), "List: one; two; three; {first: second" ) << "nested managed insert";
+	}
+	ASSERT_STREQ ( builder.cstr (), "List: one; two; three; {first: second}" ) << "nested managed insert terminated";
+	builder.Appendf ( "four: %d", 4 );
+	builder << "five";
+	ASSERT_STREQ ( builder.cstr (), "List: one; two; three; {first: second}; four: 4; five" );
+}
+
+// standalone comma. Not necesssary related to stringbuilder, but live alone.
+TEST ( functions, stringbuilder_standalone )
+{
+	StringBuilder_c builder;
+	Comma_c tComma; // default is ', '
+	builder << tComma << "one";
+	builder << tComma << "two";
+	builder << tComma << "three";
+	ASSERT_STREQ ( builder.cstr (), "one, two, three" );
+}
+
+// many nested scoped commas and 'StartBlock' modifier
+// (scoped comma is the same as pair 'StartBlock...FinishBlock')
+TEST ( functions, stringbuilder_nested )
+{
+	StringBuilder_c builder;
+	builder << "one, two, three";
+	ScopedComma_c lev0 ( builder );
+	{
+		ScopedComma_c lev1 ( builder, ", ", "[", "]" );
+		builder.StartBlock ( ": ", "(", ")" );
+		builder.StartBlock ( ";", "{", "}" );
+		ASSERT_STREQ ( builder.cstr (), "one, two, three" ) << "simple blocks do nothing";
+		builder << "first" << "second" << "third";
+		ASSERT_STREQ ( builder.cstr (), "one, two, three[({first;second;third" ) << "unclosed block";
+	}
+	// note that only 'lev1' is destroyed, we didn't explicitly finished two nested blocks.
+	// but they're finished implicitly
+	ASSERT_STREQ ( builder.cstr (), "one, two, three[({first;second;third})]" ) << "closed block";
+	builder << "four";
+
+	// note, we doesn't destroy outer comma lev0, but this is not necessary since it doesn't have a suffix.
+	ASSERT_STREQ ( builder.cstr (), "one, two, three[({first;second;third})], four" ) << "finished block with tail";
+}
+
+// pure StartBlock..FinishBlock test
+TEST ( functions, stringbuilder_autoclose )
+{
+	StringBuilder_c builder ( ": ", "[", "]" );
+	// note that there is no ': ' suffixed at the end (since comma only between blocks)
+	builder << "one" << "two";
+	ASSERT_STREQ ( builder.cstr (), "[one: two" ) << "simple pushed block";
+
+	// starting block doesn't mean any output yet, so content is the same
+	builder.StartBlock(",","(",")");
+	ASSERT_STREQ ( builder.cstr (), "[one: two" ) << "simple pushed block";
+
+	// note that now ': ' of outer block prepended to the suffix '(' of the current block.
+	builder << "abc" << "def";
+	ASSERT_STREQ ( builder.cstr (), "[one: two: (abc,def" ) << "simple pushed block 2";
+
+	// finishing block mean that suffix appended, if the state is different from initial
+	builder.FinishBlock ();
+	ASSERT_STREQ ( builder.cstr (), "[one: two: (abc,def)" ) << "simple pushed block 2";
+	builder.FinishBlock();
+	ASSERT_STREQ ( builder.cstr (), "[one: two: (abc,def)]" ) << "simple pushed block 3";
+}
+
+// pure StartBlock..FinishBlock test with one empty block (it outputs nothing)
+TEST ( functions, stringbuilder_close_of_empty )
+{
+	StringBuilder_c builder ( ": ", "[", "]" );
+
+	// note that there is no ': ' suffixed at the end (since comma only between blocks)
+	builder << "one" << "two";
+	ASSERT_STREQ ( builder.cstr (), "[one: two" ) << "simple pushed block";
+
+	// starting block doesn't output anything by itself, but modify future output
+	builder.StartBlock ( ",", "(", ")" );
+	ASSERT_STREQ ( builder.cstr (), "[one: two" ) << "started new block";
+
+	// finishing of empty block outputs also nothing
+	builder.FinishBlock ();
+	ASSERT_STREQ ( builder.cstr (), "[one: two" ) << "finished empty block";
+
+	// finishing non-empty block outputs suffix (and so, doesn't strictly necessary if no suffixes).
+	builder.FinishBlock ();
+	ASSERT_STREQ ( builder.cstr (), "[one: two]" ) << "final result";
+}
+
+// operation 'clear'. Not only wipe content, but also undo any comma state
+TEST ( functions, stringbuilder_clear )
+{
+	StringBuilder_c builder ( ": ", "[", "]" );
+	builder << "one" << "two";
+	builder.StartBlock ( ",", "(", ")" );
+	builder << "abc" << "def";
+	builder.Clear();
+	ASSERT_STREQ ( builder.cstr (), "" ) << "emtpy";
+	builder << "one" << "two";
+	ASSERT_STREQ ( builder.cstr (), "onetwo" ) << "nocommas";
+	builder.FinishBlocks();
+	ASSERT_STREQ ( builder.cstr (), "onetwo" ) << "nocommas";
+}
+
+// 'FinishBlocks()' - by default closes ALL opened blocks
+TEST ( functions, stringbuilder_twoopenoneclose )
+{
+	StringBuilder_c builder ( ": ", "[", "]" );
+	builder << "one" << "two";
+	builder.StartBlock ( ",", "(", ")" );
+	builder << "abc" << "def";
+	builder.FinishBlocks ();
+	ASSERT_STREQ ( builder.cstr (), "[one: two: (abc,def)]" ) << "simple pushed block 3";
 
 }
 
+// simple start/finish blocks manipulation - outputs nothing by alone
+TEST ( functions, stringbuilder_finishnoopen )
+{
+	StringBuilder_c builder ( ":", "[", "]" );
+	auto pLev = builder.StartBlock ( ";", "(", ")" );
+	builder.StartBlock ( ",", "{", "}" );
+	builder.FinishBlocks ( pLev );
+	ASSERT_STREQ ( builder.cstr (), "" ) << "nothing outputed";
+}
+
+// FinishBlocks() to stored state
+TEST ( functions, stringbuilder_ret_to_level )
+{
+	// outer block
+	StringBuilder_c builder ( ":", "[", "]" );
+	builder << "exone" << "extwo";
+
+	// middle block - we memorize this state
+	auto pLev = builder.StartBlock ( ";", "(", ")" );
+	builder << "one" << "two";
+
+	// internal block
+	builder.StartBlock ( ",", "{", "}" );
+	builder << "three" << "four";
+	ASSERT_STREQ ( builder.cstr (), "[exone:extwo:(one;two;{three,four" );
+
+	// finish memorized block and all blocks created after it
+	builder.FinishBlocks ( pLev );
+	ASSERT_STREQ ( builder.cstr (), "[exone:extwo:(one;two;{three,four})" );
+
+	// it will output into most outer block, since others finished
+	builder << "ex3";
+	ASSERT_STREQ ( builder.cstr (), "[exone:extwo:(one;two;{three,four}):ex3" );
+
+	// it will finish outer block (and close the bracket).
+	builder.FinishBlocks();
+	ASSERT_STREQ ( builder.cstr (), "[exone:extwo:(one;two;{three,four}):ex3]" ) << "test complete";
+}
+
+// simple test on Appendf
 TEST ( functions, strinbguilder_appendf )
 {
 	StringBuilder_c sRes;
@@ -114,12 +336,14 @@ TEST ( functions, strinbguilder_appendf )
 
 struct EscapeQuotation_t
 {
-	static bool IsEscapeChar ( char c )
+	static const char cQuote = '\'';
+
+	inline static bool IsEscapeChar ( char c )
 	{
 		return ( c=='\\' || c=='\'' );
 	}
 
-	static char GetEscapedChar ( char c )
+	inline static char GetEscapedChar ( char c )
 	{
 		return c;
 	}
@@ -131,23 +355,209 @@ TEST( functions, EscapedStringBuilder )
 {
 	QuotationEscapedBuilder tBuilder;
 	tBuilder.AppendEscaped ( "Hello" );
-	ASSERT_STREQ ( tBuilder.cstr (), "Hello" );
+	ASSERT_STREQ ( tBuilder.cstr (), "'Hello'" );
 
 	tBuilder.AppendEscaped ( " wo\\rl\'d" );
-	ASSERT_STREQ ( tBuilder.cstr (), "Hello wo\\\\rl\\'d" );
+	ASSERT_STREQ ( tBuilder.cstr (), "'Hello'' wo\\\\rl\\'d'" );
 
 	tBuilder.Clear ();
-	tBuilder.AppendEscaped ( "wo\\rl\'d", false );
+	tBuilder.AppendEscaped ( "wo\\rl\'d", EscBld::eFixupSpace );
 	ASSERT_STREQ ( tBuilder.cstr (), "wo\\rl\'d" );
 
+	// generic const char* with different escapes
 	tBuilder.Clear ();
-	tBuilder.AppendEscaped ( "space\t and\r tab\n here", false, false );
-	ASSERT_STREQ ( tBuilder.cstr (), "space\t and\r tab\n here" );
+	tBuilder.AppendEscaped ( "space\t and\r 'tab'\n here", EscBld::eNone);
+	ASSERT_STREQ ( tBuilder.cstr (), "space\t and\r 'tab'\n here" );
 
 	tBuilder.Clear ();
-	tBuilder.AppendEscaped ( "space\t and\r tab\n here" );
-	ASSERT_STREQ ( tBuilder.cstr (), "space  and  tab  here" );
+	tBuilder.AppendEscaped ( "space\t and\r 'tab'\n here", EscBld::eFixupSpace );
+	ASSERT_STREQ ( tBuilder.cstr (), "space  and  'tab'  here" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( "space\t and\r 'tab'\n here", EscBld::eEscape );
+	ASSERT_STREQ ( tBuilder.cstr (), "'space\t and\r \\'tab\\'\n here'" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( "space\t and\r 'tab'\n here" );
+	ASSERT_STREQ ( tBuilder.cstr (), "'space  and  \\'tab\\'  here'" );
+
+	// nullptr with different escapes
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( nullptr, EscBld::eNone );
+	ASSERT_STREQ ( tBuilder.cstr (), "" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( nullptr, EscBld::eFixupSpace );
+	ASSERT_STREQ ( tBuilder.cstr (), "" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( nullptr, EscBld::eEscape );
+	ASSERT_STREQ ( tBuilder.cstr (), "''" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( nullptr, EscBld::eAll );
+	ASSERT_STREQ ( tBuilder.cstr (), "''" );
+
+	// empty with different escapes
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( "", EscBld::eNone );
+	ASSERT_STREQ ( tBuilder.cstr (), "" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( "", EscBld::eFixupSpace );
+	ASSERT_STREQ ( tBuilder.cstr (), "" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( "", EscBld::eEscape );
+	ASSERT_STREQ ( tBuilder.cstr (), "''" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( "", EscBld::eAll );
+	ASSERT_STREQ ( tBuilder.cstr (), "''" );
+
+	// len-defined blob
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( "space\t and\r 'tab'\n here", EscBld::eNone, 10 );
+	ASSERT_STREQ ( tBuilder.cstr (), "space\t and" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( "space\t and\r 'tab'\n here", EscBld::eFixupSpace, 10 );
+	ASSERT_STREQ ( tBuilder.cstr (), "space  and" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( "space\t and\r 'tab'\n here", EscBld::eEscape, 10 );
+	ASSERT_STREQ ( tBuilder.cstr (), "'space\t and'" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( "space\t and\r 'tab'\n here", EscBld::eAll, 10 );
+	ASSERT_STREQ ( tBuilder.cstr (), "'space  and'" );
+
+	// zero-len blob
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( "space\t and\r 'tab'\n here", EscBld::eNone, 0 );
+	ASSERT_STREQ ( tBuilder.cstr (), "" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( "space\t and\r 'tab'\n here", EscBld::eFixupSpace, 0 );
+	ASSERT_STREQ ( tBuilder.cstr (), "" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( "space\t and\r 'tab'\n here", EscBld::eEscape, 0 );
+	ASSERT_STREQ ( tBuilder.cstr (), "''" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( "space\t and\r 'tab'\n here", EscBld::eAll, 0 );
+	ASSERT_STREQ ( tBuilder.cstr (), "''" );
+
+	// len-defined blob exactly of given len, non z-terminated.
+	// (valgrind would check nicely if it even try to touch a byte over allocated buf)
+	char * buf = new char[5];
+	memcpy (buf, "space", 5);
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( buf, EscBld::eNone, 5 );
+	ASSERT_STREQ ( tBuilder.cstr (), "space" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( buf, EscBld::eFixupSpace, 5 );
+	ASSERT_STREQ ( tBuilder.cstr (), "space" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( buf, EscBld::eEscape, 5 );
+	ASSERT_STREQ ( tBuilder.cstr (), "'space'" );
+
+	tBuilder.Clear ();
+	tBuilder.AppendEscaped ( buf, EscBld::eAll, 5 );
+	ASSERT_STREQ ( tBuilder.cstr (), "'space'" );
+
+	delete[] buf;
 }
+
+void esc_first_comma ( const char* sText, BYTE eKind, const char* sProof )
+{
+	QuotationEscapedBuilder tBuilder;
+	tBuilder.StartBlock ();
+	tBuilder << "first";
+	tBuilder.AppendEscaped ( sText, eKind );
+	ASSERT_STREQ ( tBuilder.cstr (), sProof );
+}
+
+TEST( functions, EscapedStringBuilderAndCommas )
+{
+	// generic const char* with different escapes
+	esc_first_comma ( "space\t and\r 'tab'\n here", EscBld::eNone, "first, space\t and\r 'tab'\n here" );
+	esc_first_comma ( "space\t and\r 'tab'\n here", EscBld::eFixupSpace, "first, space  and  'tab'  here" );
+	esc_first_comma ( "space\t and\r 'tab'\n here", EscBld::eEscape , "first, 'space\t and\r \\'tab\\'\n here'" );
+	esc_first_comma ( "space\t and\r 'tab'\n here", EscBld::eAll, "first, 'space  and  \\'tab\\'  here'" );
+
+	// null with different escapes
+	esc_first_comma ( nullptr, EscBld::eNone, "first" );
+	esc_first_comma ( nullptr, EscBld::eFixupSpace, "first" );
+	esc_first_comma ( nullptr, EscBld::eEscape, "first, ''" );
+	esc_first_comma ( nullptr, EscBld::eAll, "first, ''" );
+}
+
+TEST( functions, JsonNamedEssence )
+{
+	StringBuilder_c sRes (",","{","}");
+	sRes << "hello";
+	ASSERT_STREQ ( sRes.cstr (), "{hello" );
+	sRes << "world";
+	ASSERT_STREQ ( sRes.cstr (), "{hello,world" );
+	sRes.AppendName ("bla");
+	ASSERT_STREQ ( sRes.cstr (), "{hello,world,\"bla\":" );
+	sRes << "foo";
+	ASSERT_STREQ ( sRes.cstr (), "{hello,world,\"bla\":foo" );
+	sRes << "bar";
+	ASSERT_STREQ ( sRes.cstr (), "{hello,world,\"bla\":foo,bar" );
+	sRes.AppendName("bar").Sprintf("%d",1000);
+	ASSERT_STREQ ( sRes.cstr (), "{hello,world,\"bla\":foo,bar,\"bar\":1000" );
+	ScopedComma_c sOne (sRes, ";", "[", "]");
+	sRes.AppendName("foo") << "bar";
+	ASSERT_STREQ ( sRes.cstr (), "{hello,world,\"bla\":foo,bar,\"bar\":1000,[\"foo\":bar" );
+	sRes.SkipNextComma ();
+	sRes << "baz";
+	ASSERT_STREQ ( sRes.cstr (), "{hello,world,\"bla\":foo,bar,\"bar\":1000,[\"foo\":barbaz" );
+	sRes << "end";
+	ASSERT_STREQ ( sRes.cstr (), "{hello,world,\"bla\":foo,bar,\"bar\":1000,[\"foo\":barbaz;end" );
+	sRes.FinishBlock ();
+	ASSERT_STREQ ( sRes.cstr (), "{hello,world,\"bla\":foo,bar,\"bar\":1000,[\"foo\":barbaz;end]" );
+	sRes << "End";
+	ASSERT_STREQ ( sRes.cstr (), "{hello,world,\"bla\":foo,bar,\"bar\":1000,[\"foo\":barbaz;end],End" );
+	sRes.AppendName("arr");
+	ASSERT_STREQ ( sRes.cstr (), "{hello,world,\"bla\":foo,bar,\"bar\":1000,[\"foo\":barbaz;end],End,\"arr\":" );
+	sRes.StartBlock("|","[","]");
+	ASSERT_STREQ ( sRes.cstr (), "{hello,world,\"bla\":foo,bar,\"bar\":1000,[\"foo\":barbaz;end],End,\"arr\":" );
+	sRes.FinishBlock(false);
+	ASSERT_STREQ ( sRes.cstr (), "{hello,world,\"bla\":foo,bar,\"bar\":1000,[\"foo\":barbaz;end],End,\"arr\":[]" );
+	sRes.AppendName ( "a" ).StartBlock ( "|", "[", "]" );
+	sRes << "b";
+	sRes.FinishBlock();
+	ASSERT_STREQ ( sRes.cstr (), "{hello,world,\"bla\":foo,bar,\"bar\":1000,[\"foo\":barbaz;end],End,\"arr\":[],\"a\":[b]" );
+	sRes.FinishBlock();
+	ASSERT_STREQ ( sRes.cstr (), "{hello,world,\"bla\":foo,bar,\"bar\":1000,[\"foo\":barbaz;end],End,\"arr\":[],\"a\":[b]}" );
+}
+
+TEST( functions, EscapedStringBuilderAndSkipCommas )
+{
+	// generic const char* with different escapes, exclude comma
+	esc_first_comma ( "space\t and\r 'tab'\n here", EscBld::eNone | EscBld::eSkipComma
+					  , "firstspace\t and\r 'tab'\n here" );
+	esc_first_comma ( "space\t and\r 'tab'\n here", EscBld::eFixupSpace | EscBld::eSkipComma
+					  , "firstspace  and  'tab'  here" );
+	esc_first_comma ( "space\t and\r 'tab'\n here", EscBld::eEscape | EscBld::eSkipComma
+					  , "first'space\t and\r \\'tab\\'\n here'" );
+	esc_first_comma ( "space\t and\r 'tab'\n here", EscBld::eAll | EscBld::eSkipComma
+					  , "first'space  and  \\'tab\\'  here'" );
+
+	// null with different escapes, exclude comma
+	esc_first_comma ( nullptr, EscBld::eNone | EscBld::eSkipComma, "first" );
+	esc_first_comma ( nullptr, EscBld::eFixupSpace | EscBld::eSkipComma, "first" );
+	esc_first_comma ( nullptr, EscBld::eEscape | EscBld::eSkipComma, "first''" );
+	esc_first_comma ( nullptr, EscBld::eAll | EscBld::eSkipComma, "first''" );
+
+}
+
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -176,75 +586,7 @@ TEST( functions, TaggedHash20_t )
 
 }
 
-//////////////////////////////////////////////////////////////////////////
 
-TEST ( functions, CJson )
-{
-	struct MyIndex_t
-	{
-		CSphString m_sName;
-		CSphString m_sPath;
-	};
-
-	CSphString sResult;
-
-	CSphVector<MyIndex_t> dIndexes;
-	dIndexes.Add ( { "test1", "test1_path" } );
-	dIndexes.Add ( { "test2", "test2_path" } );
-	dIndexes.Add ( { "test3", "test3_path" } );
-
-	{
-		cJSON * pRoot = cJSON_CreateObject ();
-		ASSERT_TRUE ( pRoot );
-
-		cJSON * pIndexes = cJSON_CreateArray ();
-		ASSERT_TRUE ( pIndexes );
-		cJSON_AddItemToObject ( pRoot, "indexes", pIndexes );
-
-		for ( auto i : dIndexes )
-		{
-			cJSON * pIndex = cJSON_CreateObject ();
-			ASSERT_TRUE ( pIndex );
-			cJSON_AddItemToArray ( pIndexes, pIndex );
-			cJSON_AddStringToObject ( pIndex, "name", i.m_sName.cstr () );
-			cJSON_AddStringToObject ( pIndex, "path", i.m_sPath.cstr () );
-		}
-
-		char * szResult = cJSON_Print ( pRoot );
-		sResult.Adopt ( &szResult );
-		cJSON_Delete ( pRoot );
-	}
-
-	{
-		const char * dContents = sResult.cstr ();
-
-		cJSON * pRoot = cJSON_Parse ( dContents );
-		EXPECT_TRUE ( pRoot );
-
-		cJSON * pIndexes = cJSON_GetObjectItem ( pRoot, "indexes" );
-		EXPECT_TRUE ( pIndexes );
-
-		int iNumIndexes = cJSON_GetArraySize ( pIndexes );
-		ASSERT_EQ ( iNumIndexes, dIndexes.GetLength () );
-
-		int iItem = 0;
-		for ( auto i : dIndexes )
-		{
-			cJSON * pIndex = cJSON_GetArrayItem ( pIndexes, iItem++ );
-			EXPECT_TRUE ( pIndex );
-
-			cJSON * pJ;
-			pJ = cJSON_GetObjectItem ( pIndex, "name" );
-			EXPECT_TRUE ( pJ );
-			ASSERT_EQ ( i.m_sName, pJ->valuestring );
-
-			pJ = cJSON_GetObjectItem ( pIndex, "path" );
-			EXPECT_TRUE ( pJ );
-			ASSERT_EQ ( i.m_sPath, pJ->valuestring );
-		}
-		cJSON_Delete ( pRoot );
-	}
-}
 
 //////////////////////////////////////////////////////////////////////////
 unsigned int nlog2 ( uint64_t x )
@@ -818,31 +1160,31 @@ static void TestRebalance_fn ( tstcase * pData, int iLen, int iStride )
 TEST ( functions, Rebalance )
 {
 	//				  old weights, timers,	new weights
-	tstcase dData1[] = { {50.5669, 186751,	55.0625}, {49.4316, 228828, 44.9375},
-						 {55.6222, 207608,	51.2823}, {44.3763, 218537, 48.7177},
-						 {56.8841, 214800,	47.4951}, {43.1144, 194305, 52.5049},
-						 {54.4091, 207614,	47.7932}, {45.5894, 190062, 52.2068},
-						 {52.2103, 221708,	47.5706}, {47.7882, 201162, 52.4294},
-						 {49.7810, 247379,	43.8821}, {50.2174, 193441, 56.1179},
-						 {43.6667, 223202,	46.6167}, {56.3317, 194910, 53.3833},
-						 {40.3662, 361018,	38.7370}, {59.6323, 228274, 61.2630},
-						 {29.9718, 275050,	44.7756}, {70.0267, 223009, 55.2244},
-						 {25.7618, 279008,	42.3951}, {74.2367, 205340, 57.6049},
-						 {20.3433, 201466,	51.4136}, {79.6551, 213189, 48.5864},
-						 {21.2741, 197584,	51.5511}, {78.7243, 210235, 48.4489},
-						 {25.3498, 318349,	39.5014}, {74.6487, 207860, 60.4986},
-						 {18.1476, 487120,	29.5299}, {81.8509, 204124, 70.4701},
-						 {08.5008, 412733,	32.9526}, {91.4977, 202851, 67.0474} };
+	tstcase dData1[] = { {50.5669f, 186751,	55.0625f}, {49.4316f, 228828, 44.9375f},
+						 {55.6222f, 207608,	51.2823f}, {44.3763f, 218537, 48.7177f},
+						 {56.8841f, 214800,	47.4951f}, {43.1144f, 194305, 52.5049f},
+						 {54.4091f, 207614,	47.7932f}, {45.5894f, 190062, 52.2068f},
+						 {52.2103f, 221708,	47.5706f}, {47.7882f, 201162, 52.4294f},
+						 {49.7810f, 247379,	43.8821f}, {50.2174f, 193441, 56.1179f},
+						 {43.6667f, 223202,	46.6167f}, {56.3317f, 194910, 53.3833f},
+						 {40.3662f, 361018,	38.7370f}, {59.6323f, 228274, 61.2630f},
+						 {29.9718f, 275050,	44.7756f}, {70.0267f, 223009, 55.2244f},
+						 {25.7618f, 279008,	42.3951f}, {74.2367f, 205340, 57.6049f},
+						 {20.3433f, 201466,	51.4136f}, {79.6551f, 213189, 48.5864f},
+						 {21.2741f, 197584,	51.5511f}, {78.7243f, 210235, 48.4489f},
+						 {25.3498f, 318349,	39.5014f}, {74.6487f, 207860, 60.4986f},
+						 {18.1476f, 487120,	29.5299f}, {81.8509f, 204124, 70.4701f},
+						 {08.5008f, 412733,	32.9526f}, {91.4977f, 202851, 67.0474f} };
 	TestRebalance_fn ( dData1, sizeof(dData1) / sizeof( tstcase), 2 );
 
-	tstcase dData2[] = { { 0.000000, 0, 10.00000 }, { 00.0015, 18469, 90.0000 } };
+	tstcase dData2[] = { { 0.000000f, 0, 10.00000f }, { 00.0015f, 18469, 90.0000f } };
 	TestRebalance_fn ( dData2, sizeof(dData2) / sizeof( tstcase), 2 );
 
-	tstcase dData3[] = { { 0.000000, 0, 3.3333 }, { 0.0015, 0, 3.3333 }
-						 , { 0.0031, 0, 3.3333 }, { 0.0046, 18469, 90.0000 } };
+	tstcase dData3[] = { { 0.000000f, 0, 3.3333f }, { 0.0015f, 0, 3.3333f }
+						 , { 0.0031f, 0, 3.3333f }, { 0.0046f, 18469, 90.0000f } };
 	TestRebalance_fn ( dData3, sizeof ( dData3 ) / sizeof ( tstcase ), 4 );
 
-	tstcase dData4[] = { { 0.000000, 7100, 65.0088 }, { 0.0015, 0, 10.0 }, { .0031, 18469, 24.9912 } };
+	tstcase dData4[] = { { 0.000000f, 7100, 65.0088f }, { 0.0015f, 0, 10.0f }, { .0031f, 18469, 24.9912f } };
 	TestRebalance_fn ( dData4, sizeof ( dData4 ) / sizeof ( tstcase ), 3 );
 }
 
@@ -1172,6 +1514,33 @@ TEST ( functions, vector )
 	ASSERT_EQ (dVec.GetLength (),8);
 }
 
+TEST ( functions, vector_slice )
+{
+	CSphVector<int> dVec;
+	auto dSlice0 = dVec.Slice();
+	ASSERT_TRUE ( dSlice0.IsEmpty() );
+	dVec.Add ( 1 );
+	dVec.Add ( 2 );
+	dVec.Add ( 3 );
+	
+	auto dSlice1 = dVec.Slice(-1,20);
+	ASSERT_EQ ( dSlice1.begin(), dVec.begin());
+	ASSERT_EQ ( dSlice1.GetLength (), 3 );
+	
+	auto dSlice2 = dVec.Slice (10,10);
+	ASSERT_TRUE ( dSlice2.IsEmpty() );
+	
+	auto dSlice3 = dVec.Slice(1);
+	ASSERT_EQ ( dSlice3.GetLength(),2);
+	ASSERT_EQ ( dSlice3[0], 2);
+	ASSERT_EQ ( dSlice3[1], 3 );
+	ASSERT_EQ ( dSlice3.begin(), &dVec[1]);
+	
+	auto dSlice4 = dVec.Slice(1,1);
+	ASSERT_EQ ( dSlice4.GetLength(), 1);
+	ASSERT_EQ ( dSlice4.begin (), &dVec[1] );
+}
+
 TEST ( functions, sphSplit )
 {
 	StrVec_t dParts;
@@ -1207,7 +1576,7 @@ TEST ( functions, curledref )
 
 TEST ( functions, valgrind_use )
 {
-	BYTE* pLeak = new BYTE[100];
+	BYTE* VARIABLE_IS_NOT_USED pLeak = new BYTE[100];
 	ASSERT_TRUE (true) << "intended leak";
 }
 
@@ -1239,7 +1608,7 @@ TEST ( functions, FindLastNumeric )
 }
 const char* sPattern="DeadBeefDeadBeefDeadBeefDeadBeefDeadBeefDeadBeefDeadBeefDeadBeef";
 
-TEST ( functions, bench_allocator_linear )
+TEST ( functions, DISABLED_bench_allocator_linear )
 {
 	static const DWORD uTries = 10000000;
 
@@ -1269,7 +1638,7 @@ TEST ( functions, bench_allocator_linear )
 	ASSERT_EQ ( sphGetSmallAllocatedSize (), 0 );
 }
 
-TEST ( functions, bench_allocator_linear64 )
+TEST ( functions, DISABLED_bench_allocator_linear64 )
 {
 	static const DWORD uTries = 1000;
 
@@ -1300,7 +1669,7 @@ TEST ( functions, bench_allocator_linear64 )
 	ASSERT_EQ ( sphGetSmallAllocatedSize (), 0 );
 }
 
-TEST ( functions, bench_allocator_small )
+TEST ( functions, DISABLED_bench_allocator_small )
 {
 	static const DWORD uTries = 10000000;
 	static const DWORD uLoops = uTries/MAX_SMALL_OBJECT_SIZE;
@@ -1325,4 +1694,444 @@ TEST ( functions, bench_allocator_small )
 	auto uReserved = sphGetSmallReservedSize ();
 	std::cout << uLoops << " loops took " << iTimeSpan << " uSec, reserved " << uReserved << " bytes.\n";
 	ASSERT_EQ ( sphGetSmallAllocatedSize (), 0 );
+}
+
+TEST ( functions, UItoA_ItoA )
+{
+	using namespace sph;
+
+	char sBuf[50];
+	memset (sBuf, 255, 50);
+
+	int iLen = UItoA (sBuf, (DWORD)50);
+	sBuf[iLen]='\0';
+	ASSERT_STREQ ( "50", sBuf);
+
+	iLen = ItoA ( sBuf, 50, 10, 0, 4);
+	sBuf[iLen] = '\0';
+	ASSERT_STREQ ( "0050", sBuf );
+
+	iLen = ItoA ( sBuf, 50, 10, 4 );
+	sBuf[iLen] = '\0';
+	ASSERT_STREQ ( "  50", sBuf );
+
+	iLen = ItoA ( sBuf, 50, 10, 6, 3 );
+	sBuf[iLen] = '\0';
+	ASSERT_STREQ ( "   050", sBuf );
+
+	iLen = ItoA ( sBuf, 50, 10, 6, 3, '_' );
+	sBuf[iLen] = '\0';
+	ASSERT_STREQ ( "___050", sBuf );
+
+	iLen = ItoA<int64_t> ( sBuf, 0xFFFFFFFFFFFFFFFFll );
+	sBuf[iLen] = '\0';
+	ASSERT_STREQ ( "-1", sBuf );
+
+	iLen = ItoA<int64_t> ( sBuf, 0x8000000000000000ll );
+	sBuf[iLen] = '\0';
+	ASSERT_STREQ ( "-9223372036854775808", sBuf );
+
+	iLen = ItoA ( sBuf, 0x7FFFFFFFFFFFFFFFll );
+	sBuf[iLen] = '\0';
+	ASSERT_STREQ ( "9223372036854775807", sBuf );
+
+	iLen = ItoA ( sBuf, -9223372036854775807 );
+	sBuf[iLen] = '\0';
+	ASSERT_STREQ ( "-9223372036854775807", sBuf );
+
+	sBuf[ItoA ( sBuf, -9223372036854775807 )] = '\0';
+	ASSERT_STREQ ( "-9223372036854775807", sBuf );
+
+	iLen = ItoA ( sBuf, 9223372036854775807 );
+	sBuf[iLen] = '\0';
+	ASSERT_STREQ ( "9223372036854775807", sBuf );
+
+	iLen = ItoA<int64_t> ( sBuf, 0xFFFFFFFFFFFFFFFFll, 16 );
+	sBuf[iLen] = '\0';
+	ASSERT_STREQ ( "-1", sBuf );
+
+	iLen = ItoA<int64_t> ( sBuf, 0x8000000000000000ll, 16 );
+	sBuf[iLen] = '\0';
+	ASSERT_STREQ ( "-8000000000000000", sBuf );
+}
+
+TEST ( functions, IFtoA )
+{
+	using namespace sph;
+
+	char sBuf[50];
+	memset ( sBuf, 255, 50 );
+
+	int iLen = IFtoA ( sBuf, 50000, 3 );
+	sBuf[iLen] = '\0';
+	ASSERT_STREQ ( "50.000", sBuf );
+
+	iLen = IFtoA ( sBuf, -50000, 3 );
+	sBuf[iLen] = '\0';
+	ASSERT_STREQ ( "-50.000", sBuf );
+
+	iLen = IFtoA ( sBuf, -1, 3 );
+	sBuf[iLen] = '\0';
+	ASSERT_STREQ ( "-0.001", sBuf );
+
+	iLen = IFtoA ( sBuf, 1, 3 );
+	sBuf[iLen] = '\0';
+	ASSERT_STREQ ( "0.001", sBuf );
+}
+
+
+void test_mysprintf ( const char* sFmt, int64_t iNum, const char* sResult)
+{
+	using namespace sph;
+	char sBuf[50];
+	memset ( sBuf, 255, 50 );
+	sph::Sprintf ( sBuf, sFmt, iNum );
+	ASSERT_STREQ ( sBuf, sResult ) << " (on fmt " << sFmt << ")";
+}
+
+void test_sprintf ( const char * sFmt, int64_t iNum )
+{
+	char sBuf[50];
+	sprintf ( sBuf, sFmt, iNum );
+	test_mysprintf ( sFmt, iNum, sBuf );
+}
+
+void test_sphintf_for ( int64_t iNum )
+{
+	test_sprintf ( "%d", iNum );
+	test_sprintf ( "%0d", iNum );
+	test_sprintf ( "%4d", iNum );
+	test_sprintf ( "%04d", iNum );
+	test_sprintf ( "%.4d", iNum );
+	test_sprintf ( "%0.4d", iNum );
+	test_sprintf ( "%9.3d", iNum );
+	test_sprintf ( "%09.3d", iNum );
+}
+
+TEST ( functions, sph_Sprintf )
+{
+	test_sphintf_for ( 0 );
+	test_sphintf_for ( 50 );
+	test_sphintf_for ( -50 );
+	test_sphintf_for ( 10000 );
+	test_sphintf_for ( -10000 );
+
+	int iNum = -10000;
+	test_mysprintf ( "%l", iNum, "-10000" ); // %l is our specific for 64-bit signed
+	test_mysprintf ( "%0l", iNum, "-10000" );
+	test_mysprintf ( "%4l", iNum, "-10000" );
+	test_mysprintf ( "%04l", iNum, "-10000" );
+	test_mysprintf ( "%.4l", iNum, "-10000" );
+	test_mysprintf ( "%0.4l", iNum, "-10000" );
+	test_mysprintf ( "%9.3l", iNum, "   -10000" );
+	test_mysprintf ( "%09.3l", iNum, "   -10000" );
+
+
+	test_mysprintf ( "%l", -100000000000000, "-100000000000000" ); // %l is our specific for 64-bit signed
+
+	// my own fixed-point nums
+	test_mysprintf ( "%.3D", iNum, "-10.000");
+	test_mysprintf ( "%.9D", iNum, "-0.000010000" );
+
+	test_mysprintf ( "%.3F", iNum, "-10.000" );
+	test_mysprintf ( "%.5F", iNum, "-0.10000" );
+
+	iNum = 10000;
+	test_mysprintf ( "%U", iNum, "10000" ); // %U is our specific for 64-bit signed
+	test_mysprintf ( "%0U", iNum, "10000" );
+	test_mysprintf ( "%4U", iNum, "10000" );
+	test_mysprintf ( "%04U", iNum, "10000" );
+	test_mysprintf ( "%.4U", iNum, "10000" );
+	test_mysprintf ( "%0.4U", iNum, "10000" );
+	test_mysprintf ( "%9.3U", iNum, "    10000" );
+	test_mysprintf ( "%09.3U", iNum, "    10000" );
+
+	// fallback to stardard %f
+	using namespace sph;
+	char sBuf[50];
+	memset ( sBuf, 255, 50 );
+	sph::Sprintf ( sBuf, "%03.2f", 99.9911 );
+	ASSERT_STREQ ( sBuf, "99.99" );
+
+	// strings output
+	sph::Sprintf ( sBuf, "%s", "hello");
+	ASSERT_STREQ ( sBuf, "hello" );
+	sph::Sprintf ( sBuf, "%-s", "hello" );
+	ASSERT_STREQ ( sBuf, "hello" );
+	sph::Sprintf ( sBuf, "%10s", "hello" );
+	ASSERT_STREQ ( sBuf, "     hello" );
+	sph::Sprintf ( sBuf, "%-10s", "hello" );
+	ASSERT_STREQ ( sBuf, "hello     " );
+	sph::Sprintf ( sBuf, "%-10.3s", "hello" );
+	ASSERT_STREQ ( sBuf, "hel       " );
+	sph::Sprintf ( sBuf, "%10.3s", "hello" );
+	ASSERT_STREQ ( sBuf, "       hel" );
+
+	sph::Sprintf ( sBuf, "Hello %l, %d world!", -100000000000000, -2000000000 );
+	ASSERT_STREQ ( sBuf, "Hello -100000000000000, -2000000000 world!" );
+}
+
+// sph::Sprintf into StringBuilder_c
+TEST ( functions, sph_Sprintf_to_builder )
+{
+	using namespace sph;
+	StringBuilder_c sBuf;
+	Sprintf ( sBuf, "%-10s", "hello" );
+	EXPECT_STREQ ( sBuf.cstr(), "hello     " );
+	sBuf.Clear();
+
+	Sprintf ( sBuf, "%03.2f", 99.9911 );
+	EXPECT_STREQ ( sBuf.cstr(), "99.99" );
+	sBuf.Clear ();
+
+	sph::Sprintf ( sBuf, "Hello %d, %l world!", -2000000000, -100000000000000 );
+	ASSERT_STREQ ( sBuf.cstr(), "Hello -2000000000, -100000000000000 world!" );
+
+	sph::Sprintf ( sBuf, "Hi!" );
+	ASSERT_STREQ ( sBuf.cstr (), "Hello -2000000000, -100000000000000 world!Hi!" );
+	sBuf.Clear();
+
+	Sprintf ( sBuf, "%09.3d", -10000 );
+	EXPECT_STREQ ( sBuf.cstr(), "   -10000" );
+	sBuf.Clear ();
+
+	Sprintf ( sBuf, "%.3D", (int64_t) -10000 );
+	EXPECT_STREQ ( sBuf.cstr (), "-10.000" );
+	sBuf.Clear ();
+
+	Sprintf ( sBuf, "%.9D", -10000ll );
+	ASSERT_STREQ ( sBuf.cstr (), "-0.000010000" );
+	sBuf.Clear ();
+
+	sBuf.StartBlock ( ",", "{", "}" );
+	sBuf.Sprintf ( "%d %d %d", 1, -1, 100);
+	sBuf.Sprintf ( "%d %d %d", 2, -2, 200 );
+	sBuf.FinishBlock ();
+	ASSERT_STREQ ( sBuf.cstr (), "{1 -1 100,2 -2 200}" );
+
+	sBuf.Sprintf ( " %.3F, %.6F", 999500, -1400932 );
+	ASSERT_STREQ ( sBuf.cstr (), "{1 -1 100,2 -2 200} 999.500, -1.400932" );
+}
+
+TEST ( functions, sph_Sprintf_regression_on_empty_buf )
+{
+	StringBuilder_c sBuf;
+	sBuf.Sprintf ( "%.3F", 10 );
+	ASSERT_STREQ ( sBuf.cstr (), "0.010" );
+}
+
+TEST ( functions, DISABLED_bench_Sprintf )
+{
+	char sBuf[40];
+	auto uLoops = 10000000;
+
+	auto iTimeSpan = -sphMicroTimer ();
+	for ( auto i=0; i<uLoops; ++i )
+		sph::Sprintf ( sBuf, "%d", 1000000 );
+	iTimeSpan += sphMicroTimer ();
+	std::cout << "\n" << uLoops << " of sph::sprintf took " << iTimeSpan << " uSec";
+
+	iTimeSpan = -sphMicroTimer ();
+	for ( auto i = 0; i<uLoops; ++i )
+		sprintf ( sBuf, "%d", 1000000 );
+	iTimeSpan += sphMicroTimer ();
+	std::cout << "\n" << uLoops << " of sprintf took " << iTimeSpan << " uSec\n";
+
+	ASSERT_EQ ( sphGetSmallAllocatedSize (), 0 );
+}
+
+TEST ( functions, DISABLED_bench_builder_Appendf_vs_Sprintf )
+{
+	auto uLoops = 1000000;
+
+	const char * sFieldFmt = R"({"field":%d, "lcs":%u, "hit_count":%u, "word_count":%u, "tf_idf":%d, "min_idf":%d, )"
+				R"("max_idf":%d, "sum_idf":%d, "min_hit_pos":%d, "min_best_span_pos":%d, "exact_hit":%u, )"
+				R"("max_window_hits":%d, "min_gaps":%d, "exact_order":%u, "lccs":%d, "wlccs":%f, "atc":%f})";
+
+	StringBuilder_c sBuf;
+
+	auto iTimeSpan = -sphMicroTimer ();
+	for ( auto i = 0; i<uLoops; ++i )
+	{
+		sBuf.Appendf ( sFieldFmt, 3, 23, 23465, 234, 234, 4346,
+			345345, 3434535, 345, 54, 1,
+			23, 5, 0, 34, .345f, .234f );
+		sBuf.Clear();
+	}
+	iTimeSpan += sphMicroTimer ();
+	std::cout << "\n" << uLoops << " of Appendf took " << iTimeSpan << " uSec";
+
+	iTimeSpan = -sphMicroTimer ();
+	for ( auto i = 0; i<uLoops; ++i )
+	{
+		sBuf.Sprintf ( sFieldFmt, 3, 23, 23465, 234, 234, 4346,
+			345345, 3434535, 345, 54, 1,
+			23, 5, 0, 34, .345f, .234f );
+		sBuf.Clear();
+	}
+	iTimeSpan += sphMicroTimer ();
+	std::cout << "\n" << uLoops << " of Sprintf took " << iTimeSpan << " uSec\n";
+
+	ASSERT_EQ ( sphGetSmallAllocatedSize (), 0 );
+}
+
+TEST ( functions, DISABLED_bench_builder_Appendf_vs_Sprintf_ints )
+{
+	auto uLoops = 1000000;
+
+	const char * sFieldFmt = R"({"field":%d, "lcs":%u, "hit_count":%u, "word_count":%u, "tf_idf":%d, "min_idf":%d, )"
+			 R"("max_idf":%d, "sum_idf":%d, "min_hit_pos":%d, "min_best_span_pos":%d, "exact_hit":%u, )"
+			 R"("max_window_hits":%d, "min_gaps":%d, "exact_order":%u, "lccs":%d, "wlccs":%d, "atc":%d})";
+
+	StringBuilder_c sBuf;
+
+	auto iTimeSpan = -sphMicroTimer ();
+	for ( auto i = 0; i<uLoops; ++i )
+	{
+		sBuf.Appendf ( sFieldFmt, 3, 23, 23465, 234, 234, 4346, 345345, 3434535, 345, 54, 1, 23, 5, 0, 34, 45
+					   , 234 );
+		sBuf.Clear ();
+	}
+	iTimeSpan += sphMicroTimer ();
+	std::cout << "\n" << uLoops << " of Appendf took " << iTimeSpan << " uSec";
+
+	iTimeSpan = -sphMicroTimer ();
+	for ( auto i = 0; i<uLoops; ++i )
+	{
+		sBuf.Sprintf ( sFieldFmt, 3, 23, 23465, 234, 234, 4346, 345345, 3434535, 345, 54, 1, 23, 5, 0, 34, 45
+					   , 234 );
+		sBuf.Clear ();
+	}
+	iTimeSpan += sphMicroTimer ();
+	std::cout << "\n" << uLoops << " of Sprintf took " << iTimeSpan << " uSec\n";
+
+	ASSERT_EQ ( sphGetSmallAllocatedSize (), 0 );
+}
+
+TEST ( functions, VectorEx )
+{
+	using namespace sph;
+	CSphTightVector<int> dTVec;
+	CSphVector<int> dVec;
+	dVec.Add ( 1 );
+	dVec.Add ( 2 );
+	auto &dv = dVec.Add ();
+	dv = 3;
+	dVec.Add ( 4 );
+	dVec.Add ( 5 );
+	dVec.Add ( 6 );
+	dVec.Add ( 7 );
+	dVec.RemoveValue ( 2 );
+	dVec.Add ( 8 );
+	dVec.Add ( 9 );
+	dVec.RemoveValue ( 9 );
+	dVec.Add ( 9 );
+	dVec.Add ( 10 );
+	dVec.RemoveValue ( 10 );
+	ASSERT_EQ ( dVec.GetLength (), 8 );
+	dTVec.Add(30);
+	dTVec.Add(20);
+	dVec.Append ( dTVec );
+	ASSERT_EQ ( dVec.GetLength (), 10 );
+//	dVec.SwapData (dTVec);
+	LazyVector_T<int> dLVec;
+	dLVec.Add(4);
+	dLVec.Add(5);
+	ASSERT_EQ ( dLVec.GetLength (), 2 );
+	dTVec.Append (dLVec);
+	ASSERT_EQ ( dTVec.GetLength (), 4 );
+	int* VARIABLE_IS_NOT_USED pData = dTVec.LeakData();
+
+}
+
+#ifdef _WIN32
+#pragma warning(push) // store current warning values
+#pragma warning(disable:4101)
+#endif
+
+TEST ( functions, wider_and_widest )
+{
+	WIDER<BYTE,DWORD>::T VARIABLE_IS_NOT_USED dw;
+	ASSERT_EQ ( sizeof ( dw ), sizeof ( DWORD ) );
+	
+	WIDER<double,char>::T VARIABLE_IS_NOT_USED dbl;
+	ASSERT_EQ ( sizeof ( dbl ), sizeof ( double ) );
+	
+	WIDEST<char,BYTE,WORD,double>::T VARIABLE_IS_NOT_USED dbl2;
+	ASSERT_EQ ( sizeof ( dbl ), sizeof ( double ) );
+
+	WIDEST<char *, BYTE, WORD, float>::T VARIABLE_IS_NOT_USED pchar;
+	ASSERT_EQ ( sizeof ( pchar ), sizeof ( char* ) );
+}
+
+#ifdef _WIN32
+#pragma warning(pop) // restore warnings
+#endif
+
+TEST ( functions, warner_c )
+{
+	Warner_c sMsg;
+
+	// output two errors - expect ,-separated
+	sMsg.Err("Error 1");
+	sMsg.Err("Error 2");
+	ASSERT_STREQ ( sMsg.sError(), "Error 1, Error 2");
+
+	// formatted output
+	sMsg.Clear();
+	sMsg.Err("Error %d", 10);
+	ASSERT_STREQ ( sMsg.sError (), "Error 10" );
+
+	// finalized combo output for errors only
+	CSphString sFinal;
+	sMsg.MoveAllTo (sFinal);
+	ASSERT_STREQ ( sFinal.cstr (), "ERRORS: Error 10" );
+
+	// finalized combo output for warnings only
+	sMsg.Warn ( "msg 1" );
+	sMsg.Warn ( "msg %d", 2 );
+	sMsg.MoveAllTo ( sFinal );
+	ASSERT_STREQ ( sFinal.cstr (), "WARNINGS: msg 1, msg 2" );
+
+	// output two warnings (same as with error - expected ,-separated)
+	sMsg.Warn ( "msg 1" );
+	sMsg.Warn ( "msg %d", 2 );
+	ASSERT_STREQ ( sMsg.sWarning (), "msg 1, msg 2" );
+
+	// finalized combo output of both errors and warnings
+	sMsg.Err ( "Error %d", 10 );
+	sMsg.MoveAllTo ( sFinal );
+	ASSERT_STREQ ( sFinal.cstr (), "ERRORS: Error 10; WARNINGS: msg 1, msg 2" );
+}
+
+// testing our priority queue
+TEST ( functions, CSphQueue )
+{
+	int iMin = 1000;
+	CSphQueue<int, SphLess_T<int> > qQ ( 10 );
+	for ( auto iVal : { 89, 5, 4, 8, 4, 3, 1, 5, 4, 2 } )
+	{
+		qQ.Push ( iVal );
+		iMin = Min ( iMin, iVal );
+		ASSERT_EQ ( qQ.Root (), iMin ) << "min elem always on root";
+	}
+
+	ASSERT_EQ ( qQ.GetLength (), 10 ); ASSERT_EQ ( qQ.Root(), 1); qQ.Pop();
+	ASSERT_EQ ( qQ.GetLength (), 9 ); ASSERT_EQ ( qQ.Root (), 2 ); qQ.Pop();
+	ASSERT_EQ ( qQ.GetLength (), 8 ); ASSERT_EQ ( qQ.Root (), 3 ); qQ.Pop();
+	ASSERT_EQ ( qQ.GetLength (), 7 ); ASSERT_EQ ( qQ.Root (), 4 ); qQ.Pop();
+	ASSERT_EQ ( qQ.GetLength (), 6 ); ASSERT_EQ ( qQ.Root (), 4 ); qQ.Pop();
+	ASSERT_EQ ( qQ.GetLength (), 5 ); ASSERT_EQ ( qQ.Root (), 4 ); qQ.Pop();
+	ASSERT_EQ ( qQ.GetLength (), 4 ); ASSERT_EQ ( qQ.Root (), 5 ); qQ.Pop();
+	ASSERT_EQ ( qQ.GetLength (), 3 ); ASSERT_EQ ( qQ.Root (), 5 ); qQ.Pop();
+	ASSERT_EQ ( qQ.GetLength (), 2 ); ASSERT_EQ ( qQ.Root (), 8 ); qQ.Pop();
+	ASSERT_EQ ( qQ.GetLength (), 1 ); ASSERT_EQ ( qQ.Root (), 89 ); qQ.Pop();
+	ASSERT_EQ ( qQ.GetLength (), 0 );
+
+	qQ.Push(1000);
+	ASSERT_EQ ( qQ.Root (), 1000 ) << "pushed 1000 to empty, it is root now";
+
+	qQ.Push ( 100 );
+	ASSERT_EQ ( qQ.Root (), 100 ) << "pushed 100 over 1000, it became root now";
+
 }

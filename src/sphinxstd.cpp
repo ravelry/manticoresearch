@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2019, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -829,7 +829,10 @@ struct ThreadCall_t
 	pthread_cond_t	m_dwait;
 	itimerval		m_ditimer;
 #endif
-	ThreadCall_t *	m_pNext;
+	union {
+		ThreadCall_t *	m_pNext; 		// used in exit chain
+		char 			m_sName[16];	// used in main thread
+	};
 };
 static SphThreadKey_t g_tThreadCleanupKey;
 static SphThreadKey_t g_tMyThreadStack;
@@ -869,6 +872,20 @@ SPH_THDFUNC sphThreadProcWrapper ( void * pArg )
 
 	ThreadCall_t * pCall = (ThreadCall_t*) pArg;
 	MemorizeStack ( & cTopOfMyStack );
+
+	// set name of self
+#if HAVE_PTHREAD_SETNAME_NP
+	if ( pCall->m_sName[0]!='\0' )
+	{
+		assert ( strlen ( pCall->m_sName )<16 );
+#if HAVE_PTHREAD_SETNAME_NP_1ARG
+		pthread_setname_np ( pCall->m_sName );
+#else
+		pthread_setname_np ( pthread_self(), pCall->m_sName );
+#endif
+	}
+#endif
+
 	pCall->m_pCall ( pCall->m_pArg );
 	SafeDelete ( pCall );
 
@@ -952,7 +969,7 @@ void sphThreadDone ( int )
 #endif
 
 
-bool sphThreadCreate ( SphThread_t * pThread, void (*fnThread)(void*), void * pArg, bool bDetached )
+bool sphThreadCreate ( SphThread_t * pThread, void (*fnThread)(void*), void * pArg, bool bDetached, const char * sName )
 {
 	// we can not put this on current stack because wrapper need to see
 	// it all the time and it will destroy this data from heap by itself
@@ -960,6 +977,12 @@ bool sphThreadCreate ( SphThread_t * pThread, void (*fnThread)(void*), void * pA
 	pCall->m_pCall = fnThread;
 	pCall->m_pArg = pArg;
 	pCall->m_pNext = nullptr;
+
+#if HAVE_PTHREAD_SETNAME_NP
+	if ( sName )
+		strncpy ( pCall->m_sName, sName, 15 );
+	pCall->m_sName[15] = '\0';
+#endif
 
 	// create thread
 #if USE_WINDOWS
@@ -996,6 +1019,20 @@ bool sphThreadCreate ( SphThread_t * pThread, void (*fnThread)(void*), void * pA
 	// thread creation failed so we need to cleanup ourselves
 	SafeDelete ( pCall );
 	return false;
+}
+
+CSphString GetThreadName ( SphThread_t * pThread )
+{
+	if ( !pThread || !*pThread )
+		return "";
+
+#if HAVE_PTHREAD_GETNAME_NP
+	char sClippedName[16];
+	pthread_getname_np ( *pThread, sClippedName, 16 );
+	return sClippedName;
+#else
+	return "";
+#endif
 }
 
 
@@ -1801,6 +1838,7 @@ class CSphThdPool : public ISphThdPool
 
 public:
 	CSphThdPool ( int iThreads, const char * sName, CSphString & sError )
+		: m_sName ( sName )
 	{
 		if ( !m_tWakeup.Initialized () )
 		{
@@ -1814,7 +1852,8 @@ public:
 		int iStarted = 0;
 		for ( auto& dWorker : m_dWorkers )
 		{
-			if ( sphThreadCreate ( &dWorker, Tick, this ) )
+			if ( sphThreadCreate ( &dWorker, Tick, this, false,
+				Str_b ().Sprintf ( "%s_%d", m_sName.cstr (), iStarted ).cstr() ) )
 				++iStarted;
 		}
 		assert ( iStarted == iThreads );
@@ -1877,7 +1916,7 @@ public:
 	{
 		// FIXME!!! start thread only in case of no workers available to offload call site
 		SphThread_t tThd;
-		return sphThreadCreate ( &tThd, Start, pItem, true );
+		return sphThreadCreate ( &tThd, Start, pItem, true, ( Str_b () << m_sName << "_Job" ).cstr () );
 	}
 
 private:
@@ -1886,40 +1925,44 @@ private:
 		SetThdName ( "job" );
 
 		auto * pPool = (CSphThdPool *)pArg;
+		pPool->TickImpl();
+	}
 
-		while ( !pPool->m_bShutdown )
+	void TickImpl()
+	{
+		while ( !m_bShutdown )
 		{
-			pPool->m_tWakeup.WaitEvent();
+			m_tWakeup.WaitEvent ();
 
-			if ( pPool->m_bShutdown )
+			if ( m_bShutdown )
 				break;
 
-			pPool->m_tJobLock.Lock();
+			m_tJobLock.Lock ();
 
-			ThdJob_t * pJob = pPool->m_pTail;
-			if ( pPool->m_pHead==pPool->m_pTail ) // either 0 or 1 job case
+			ThdJob_t * pJob = m_pTail;
+			if ( m_pHead==m_pTail ) // either 0 or 1 job case
 			{
-				pPool->m_pHead = pPool->m_pTail = nullptr;
+				m_pHead = m_pTail = nullptr;
 			} else
 			{
 				pJob->m_pPrev->m_pNext = nullptr;
-				pPool->m_pTail = pJob->m_pPrev;
+				m_pTail = pJob->m_pPrev;
 			}
 
 			if ( pJob )
-				--pPool->m_iStatQueuedJobs;
+				--m_iStatQueuedJobs;
 
-			pPool->m_tJobLock.Unlock();
+			m_tJobLock.Unlock ();
 
 			if ( !pJob )
 				continue;
 
-			pPool->m_tStatActiveWorkers.Inc();
+			++m_tStatActiveWorkers;
 
-			pJob->m_pItem->Call();
+			pJob->m_pItem->Call ();
 			SafeDelete ( pJob );
 
-			pPool->m_tStatActiveWorkers.Dec();
+			--m_tStatActiveWorkers;
 
 			// FIXME!!! work stealing case (check another job prior going to sem)
 		}
@@ -1935,7 +1978,7 @@ private:
 
 	int GetActiveWorkerCount () const final
 	{
-		return m_tStatActiveWorkers.GetValue();
+		return m_tStatActiveWorkers;
 	}
 
 	int GetTotalWorkerCount () const final
@@ -2168,25 +2211,102 @@ TDigest_i * sphCreateTDigest()
 //////////////////////////////////////////////////////////////////////////
 /// StringBuilder implementation
 //////////////////////////////////////////////////////////////////////////
-
-StringBuilder_c::StringBuilder_c ()
+StringBuilder_c::StringBuilder_c ( const char * sDel, const char * sPref, const char * sTerm )
 {
-	Reset ();
+	if ( sDel || sPref || sTerm )
+		StartBlock ( sDel, sPref, sTerm );
 }
 
 StringBuilder_c::~StringBuilder_c ()
 {
+	SafeDelete ( m_pDelimiter );
 	SafeDeleteArray ( m_sBuffer );
+}
+
+StringBuilder_c::StringBuilder_c ( StringBuilder_c&& rhs ) noexcept
+	: m_sBuffer (rhs.m_sBuffer)
+	, m_iSize (rhs.m_iSize)
+	, m_iUsed (rhs.m_iUsed)
+	, m_pDelimiter (rhs.m_pDelimiter)
+{
+	rhs.m_pDelimiter = nullptr;
+	rhs.m_sBuffer = nullptr;
+}
+
+StringBuilder_c & StringBuilder_c::operator= ( StringBuilder_c && rhs ) noexcept
+{
+	if ( &rhs!=this )
+	{
+		SafeDelete ( m_pDelimiter );
+		SafeDeleteArray ( m_sBuffer );
+
+		m_sBuffer = rhs.m_sBuffer;
+		m_iSize = rhs.m_iSize;
+		m_iUsed = rhs.m_iUsed;
+		m_pDelimiter = rhs.m_pDelimiter;
+
+		rhs.m_pDelimiter = nullptr;
+		rhs.m_sBuffer = nullptr;
+	}
+	return *this;
+}
+
+StringBuilder_c::LazyComma_c * StringBuilder_c::StartBlock ( const char * sDel, const char * sPref, const char * sTerm )
+{
+	m_pDelimiter = new LazyComma_c (m_pDelimiter, sDel, sPref, sTerm );
+	return m_pDelimiter;
+}
+
+void StringBuilder_c::FinishBlock ( bool bAllowEmpty ) // finish last pushed block
+{
+	if ( !m_pDelimiter )
+		return;
+
+	if ( !bAllowEmpty && !m_pDelimiter->Started() )
+	{
+		AppendChars ( "\0", 1 );
+		--m_iUsed;
+	}
+
+	if ( m_pDelimiter->Started () )
+		AppendRawChars ( m_pDelimiter->m_sSuffix );
+
+	auto pDel = m_pDelimiter;
+	m_pDelimiter = pDel->m_pPrevious;
+	pDel->m_pPrevious = nullptr;
+	SafeDelete ( pDel );
+}
+
+void StringBuilder_c::FinishBlocks ( StringBuilder_c::LazyComma_c * pLevel, bool bAllowEmpty )
+{
+	while ( m_pDelimiter && m_pDelimiter!=pLevel )
+		FinishBlock ( bAllowEmpty );
+	if ( m_pDelimiter )
+		FinishBlock ( bAllowEmpty );
 }
 
 StringBuilder_c & StringBuilder_c::vAppendf ( const char * sTemplate, va_list ap )
 {
+	if ( !m_sBuffer )
+		InitBuffer ();
+
 	assert ( m_sBuffer );
 	assert ( m_iUsed<m_iSize );
+
+	int iComma = 0;
+	const char * sPrefix = m_pDelimiter ? m_pDelimiter->RawComma ( iComma, *this ) : nullptr;
 
 	while (true)
 	{
 		int iLeft = m_iSize - m_iUsed;
+		if ( iComma && iComma < iLeft ) // prepend delimiter first...
+		{
+			if ( sPrefix )
+				memcpy ( m_sBuffer + m_iUsed, sPrefix, iComma );
+			iLeft -= iComma;
+			m_iUsed += iComma;
+			iComma = 0;
+		}
 
 		// try to append
 		va_list cp;
@@ -2208,7 +2328,7 @@ StringBuilder_c & StringBuilder_c::vAppendf ( const char * sTemplate, va_list ap
 		// we need more chars!
 		// either 256 (happens on Windows; lets assume we need 256 more chars)
 		// or get all the needed chars and 64 more for future calls
-		Grow ( iPrinted<0 ? 256 : iPrinted - iLeft + 64 );
+		GrowEnough ( iPrinted<0 ? 256 : iPrinted + iComma );
 	}
 	return *this;
 }
@@ -2222,11 +2342,111 @@ StringBuilder_c & StringBuilder_c::Appendf ( const char * sTemplate, ... )
 	return *this;
 }
 
-char * StringBuilder_c::Leak ()
+StringBuilder_c &StringBuilder_c::vSprintf ( const char * sTemplate, va_list ap )
 {
-	char * tRes = m_sBuffer;
-	Reset ();
-	return tRes;
+	if ( !m_sBuffer )
+		InitBuffer ();
+
+	assert ( m_iUsed==0 || m_iUsed<m_iSize );
+
+	int iComma = 0;
+	const char * sPrefix = m_pDelimiter ? m_pDelimiter->RawComma ( iComma, *this ) : nullptr;
+
+	if ( iComma && sPrefix ) // prepend delimiter first...
+	{
+		GrowEnough ( iComma );
+		memcpy ( m_sBuffer + m_iUsed, sPrefix, iComma );
+		m_iUsed += iComma;
+	}
+	sph::vSprintf ( *this, sTemplate, ap );
+	return *this;
+}
+
+StringBuilder_c &StringBuilder_c::Sprintf ( const char * sTemplate, ... )
+{
+	va_list ap;
+	va_start ( ap, sTemplate );
+	vSprintf ( sTemplate, ap );
+	va_end ( ap );
+	return *this;
+}
+
+BYTE * StringBuilder_c::Leak ()
+{
+	auto pRes = ( BYTE * ) m_sBuffer;
+	NewBuffer ();
+	return pRes;
+}
+
+void StringBuilder_c::MoveTo ( CSphString &sTarget )
+{
+	sTarget.Adopt ( std::move(m_sBuffer) );
+	NewBuffer ();
+}
+
+void StringBuilder_c::AppendRawChars ( const char * sText ) // append without any commas
+{
+	if ( !sText || !*sText )
+		return;
+
+	int iLen = strlen ( sText );
+
+	GrowEnough ( iLen + 1 ); // +1 because we'll put trailing \0 also
+
+	memcpy ( m_sBuffer + m_iUsed, sText, iLen );
+	m_iUsed += iLen;
+	m_sBuffer[m_iUsed] = '\0';
+}
+
+StringBuilder_c &StringBuilder_c::SkipNextComma()
+{
+	if ( m_pDelimiter )
+		m_pDelimiter->SkipNext ();
+	return *this;
+}
+
+StringBuilder_c &StringBuilder_c::AppendName ( const char * sName )
+{
+	if ( !sName || !strlen ( sName ) )
+		return *this;
+
+	AppendChars ( sName, strlen ( sName ), '"' );
+	GrowEnough(2);
+	m_sBuffer[m_iUsed] = ':';
+	m_sBuffer[m_iUsed+1] = '\0';
+	m_iUsed+=1;
+	return SkipNextComma ();
+}
+
+StringBuilder_c & StringBuilder_c::AppendChars ( const char * sText, int iLen, char cQuote )
+{
+	if ( !iLen )
+		return *this;
+
+	int iComma = 0;
+	const char * sPrefix = m_pDelimiter ? m_pDelimiter->RawComma ( iComma, *this ) : nullptr;
+
+	int iQuote = 0;
+	if ( cQuote!='\0' )
+		++iQuote;
+
+	GrowEnough ( iLen + iComma + iQuote + iQuote + 1 ); // +1 because we'll put trailing \0 also
+
+	if ( sPrefix )
+		memcpy ( m_sBuffer + m_iUsed, sPrefix, iComma );
+	if (iQuote)
+		m_sBuffer[m_iUsed + iComma] = cQuote;
+	memcpy ( m_sBuffer + m_iUsed + iComma + iQuote, sText, iLen );
+	m_iUsed += iLen+iComma+iQuote+iQuote;
+	if ( iQuote )
+		m_sBuffer[m_iUsed-1] = cQuote;
+	m_sBuffer[m_iUsed] = '\0';
+	return *this;
+}
+
+StringBuilder_c &StringBuilder_c::AppendString ( const CSphString &sText, char cQuote)
+{
+	return AppendChars ( sText.cstr(), sText.Length (), cQuote );
 }
 
 StringBuilder_c& StringBuilder_c::operator+= ( const char * sText )
@@ -2234,49 +2454,46 @@ StringBuilder_c& StringBuilder_c::operator+= ( const char * sText )
 	if ( !sText || *sText=='\0' )
 		return *this;
 
-	int iLen = strlen ( sText );
-	int iLeft = m_iSize - m_iUsed;
-	if ( iLen>=iLeft )
-		Grow ( iLen - iLeft + 64 );
-
-	memcpy ( m_sBuffer + m_iUsed, sText, iLen + 1 );
-	m_iUsed += iLen;
-	return *this;
+	return AppendChars ( sText, strlen ( sText ) );
 }
 
-StringBuilder_c& StringBuilder_c::operator= ( const StringBuilder_c &rhs )
+StringBuilder_c &StringBuilder_c::operator<< ( const VecTraits_T<char> &sText )
 {
-	if ( this!=&rhs )
-	{
-		m_iUsed = rhs.m_iUsed;
-		m_iSize = rhs.m_iSize;
-		SafeDeleteArray ( m_sBuffer );
-		m_sBuffer = new char[m_iSize];
-		memcpy ( m_sBuffer, rhs.m_sBuffer, m_iUsed + 1 );
-	}
-	return *this;
+	if ( sText.IsEmpty () )
+		return *this;
+
+	return AppendChars ( sText.begin(), sText.GetLength() );
 }
 
 void StringBuilder_c::Grow ( int iLen )
 {
-	m_iSize += iLen;
+	assert ( m_iSize<m_iUsed + iLen + uSTEP );
+	m_iSize = m_iUsed + iLen + uSTEP;
 	auto * pNew = new char[m_iSize];
-	memcpy ( pNew, m_sBuffer, m_iUsed + 1 );
+	if ( m_sBuffer )
+		memcpy ( pNew, m_sBuffer, m_iUsed + 1 );
 	Swap ( pNew, m_sBuffer );
 	SafeDeleteArray ( pNew );
 }
 
-void StringBuilder_c::Reset ()
+void StringBuilder_c::InitBuffer ()
 {
 	m_iSize = 256;
 	m_sBuffer = new char[m_iSize];
+}
+
+void StringBuilder_c::NewBuffer ()
+{
+	InitBuffer();
 	Clear ();
 }
 
 void StringBuilder_c::Clear ()
 {
-	m_sBuffer[0] = '\0';
+	if ( m_sBuffer )
+		m_sBuffer[0] = '\0';
 	m_iUsed = 0;
+	SafeDelete ( m_pDelimiter );
 }
 
 #ifdef USE_SMALLALLOC

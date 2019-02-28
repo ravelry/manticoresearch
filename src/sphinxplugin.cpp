@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2019, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -12,6 +12,7 @@
 
 #include "sphinx.h"
 #include "sphinxint.h"
+#include "sphinxutils.h"
 #include "sphinxplugin.h"
 
 #if !USE_WINDOWS
@@ -243,6 +244,12 @@ static bool PluginLoadSymbols ( void * pDesc, const SymbolDesc_t * pSymbol, void
 #endif
 
 #if HAVE_DLOPEN
+
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#endif
+
 static SymbolDesc_t g_dSymbolsUDF[] =
 {
 	{ static_cast<int>( offsetof(PluginUDF_c, m_fnInit)),		"init",		false },

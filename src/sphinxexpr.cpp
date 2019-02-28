@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2019, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -19,6 +19,10 @@
 #include "sphinxjson.h"
 #include <time.h>
 #include <math.h>
+
+#if USE_RE2
+#include <re2/re2.h>
+#endif
 
 #ifndef M_LOG2E
 #define M_LOG2E		1.44269504088896340736
@@ -407,8 +411,9 @@ struct Expr_GetZonespanlist_c : public Expr_StrNoLocator_c
 		int iEnd = iStart + dSpans [ tMatch.m_iTag ]; // [start,end) now covers all data indexes
 		for ( int i=iStart; i<iEnd; i+=2 )
 			m_sBuilder.Appendf ( " %d:%d", 1+dSpans[i], 1+dSpans[i+1] ); // convert our 0-based span numbers to human 1-based ones
-		*ppStr = (const BYTE *) CSphString ( m_sBuilder.cstr() ).Leak();
-		return m_sBuilder.Length();
+		auto iRes = m_sBuilder.GetLength ();
+		*ppStr = m_sBuilder.Leak();
+		return iRes;
 	}
 
 	void Command ( ESphExprCommand eCmd, void * pArg ) final
@@ -952,7 +957,7 @@ public:
 					{
 						while ( nValues-- )
 						{
-							if ( m_sBuilder.Length() )
+							if ( m_sBuilder.GetLength() )
 								m_sBuilder += ",";
 							m_sBuilder.Appendf ( "%u", *pValues++ );
 						}
@@ -960,7 +965,7 @@ public:
 					{
 						for ( ; nValues; nValues-=2, pValues+=2 )
 						{
-							if ( m_sBuilder.Length() )
+							if ( m_sBuilder.GetLength() )
 								m_sBuilder += ",";
 							m_sBuilder.Appendf ( INT64_FMT, MVA_UPSIZE ( pValues ) );
 						}
@@ -980,10 +985,10 @@ public:
 					iLen = 0;
 				} else
 				{
-					CSphVector<BYTE> dTmp;
+					JsonEscapedBuilder dTmp;
 					sphJsonFieldFormat ( dTmp, m_pStrings+uOff, eJson, false );
 					iLen = dTmp.GetLength();
-					*ppStr = dTmp.LeakData();
+					*ppStr = dTmp.Leak();
 				}
 				return iLen;
 
@@ -992,14 +997,15 @@ public:
 				break;
 		}
 
-		if ( !m_sBuilder.Length() )
+		if ( !m_sBuilder.GetLength() )
 		{
 			*ppStr = nullptr;
 			return 0;
 		}
 
-		*ppStr = (const BYTE *) CSphString ( m_sBuilder.cstr() ).Leak();
-		return m_sBuilder.Length();
+		auto iRes = m_sBuilder.GetLength ();
+		*ppStr = m_sBuilder.Leak();
+		return iRes;
 	}
 
 	bool IsDataPtrAttr() const final
@@ -1144,6 +1150,12 @@ public:
 		CALC_CHILD_HASHES(m_dArgs);
 		return CALC_DEP_HASHES();
 	}
+
+	virtual bool IsJson ( bool & bConverted ) const override
+	{
+		bConverted = false;
+		return true;
+	}
 };
 
 
@@ -1216,6 +1228,13 @@ public:
 		CALC_STR_HASH(m_sKey,m_iKeyLen);
 		return CALC_DEP_HASHES();
 	}
+
+
+	virtual bool IsJson ( bool & bConverted ) const override
+	{
+		bConverted = false;
+		return true;
+	}
 };
 
 
@@ -1232,7 +1251,13 @@ public:
 	{
 		const BYTE * pVal = nullptr;
 		ESphJsonType eJson = GetKey ( &pVal, tMatch );
-		return ( eJson==JSON_STRING ) ? sphUnpackStr ( pVal, ppStr ) : 0;
+		if ( eJson!=JSON_STRING)
+			return 0;
+
+		//      using sphUnpackStr() is wrong, because BSON uses different store format of string length
+		int iLen = sphJsonUnpackInt ( &pVal );
+		*ppStr = pVal;
+		return iLen;
 	}
 
 	float Eval ( const CSphMatch & tMatch ) const override { return DoEval<float> ( tMatch ); }
@@ -1305,6 +1330,13 @@ protected:
 		EXPR_CLASS_NAME_NOCHECK(szTag);
 		CALC_CHILD_HASH(m_pArg);
 		return CALC_DEP_HASHES();
+	}
+
+	
+	virtual bool IsJson ( bool & bConverted ) const override
+	{
+		bConverted = true;
+		return true;
 	}
 };
 
@@ -1653,6 +1685,257 @@ struct Expr_TimeDiff_c : public Expr_Binary_c
 	bool IsDataPtrAttr () const final { return true; }
 };
 
+
+class Expr_SubstringIndex_c : public ISphStringExpr
+{
+private:
+	CSphRefcountedPtr<ISphExpr> m_pArg;
+	CSphString m_sDelim;
+	int m_iCount = 0;
+	int m_iLenDelim = 0;
+	bool m_bFreeResPtr = false;
+
+public:
+	explicit Expr_SubstringIndex_c ( ISphExpr * pArg, ISphExpr * pDelim, ISphExpr * pCount )
+		: m_pArg ( pArg )
+		, m_iCount ( 0 )
+		, m_bFreeResPtr ( false )
+	{
+		assert ( pArg && pDelim && pCount );
+		SafeAddRef ( pArg );
+		m_bFreeResPtr = m_pArg->IsDataPtrAttr();
+
+		const BYTE * pBuf = nullptr;
+		CSphMatch tTmp;
+		
+		m_iLenDelim = pDelim->StringEval ( tTmp, &pBuf );
+		m_sDelim.SetBinary ( (const char *)pBuf, m_iLenDelim );
+		if ( pDelim->IsDataPtrAttr() )
+			SafeDeleteArray ( pBuf );
+
+		m_iCount = pCount->IntEval ( tTmp );
+	}
+
+	void FixupLocator ( const ISphSchema * pOldSchema, const ISphSchema * pNewSchema ) override
+	{
+		if ( m_pArg )
+			m_pArg->FixupLocator ( pOldSchema, pNewSchema );
+	}
+
+	void Command ( ESphExprCommand eCmd, void * pArg ) override
+	{
+		if ( m_pArg )
+			m_pArg->Command ( eCmd, pArg );
+	}
+
+	int StringEval ( const CSphMatch & tMatch, const BYTE ** ppStr ) const final
+	{
+		const char* pDoc = nullptr;
+		int iDocLen = m_pArg->StringEval ( tMatch, (const BYTE **)&pDoc );
+		int iLength = 0;
+		*ppStr = NULL;
+
+		if ( pDoc && iDocLen>0 && m_iLenDelim>0 && m_iCount!=0 )
+		{
+			if ( m_iCount>0 )
+				LeftSearch ( pDoc, iDocLen, m_iCount, false, ppStr, &iLength );
+			else
+				RightSearch ( pDoc, iDocLen, m_iCount, ppStr, &iLength );
+		}
+
+		if ( m_pArg->IsDataPtrAttr() )
+			SafeDeleteArray ( pDoc );
+
+		return iLength;
+	}
+
+	bool IsDataPtrAttr() const final
+	{
+		return m_bFreeResPtr;
+	}
+
+	//	base class does not convert string to float
+	float Eval ( const CSphMatch & tMatch ) const final
+	{
+		float fVal = 0.f;
+		const char * pBuf = nullptr;
+		int  iLen = StringEval ( tMatch, (const BYTE **) &pBuf );
+
+		const char * pMax = sphFindLastNumeric ( pBuf, iLen );
+		if ( pBuf<pMax )
+		{
+			fVal = (float) strtod ( pBuf, NULL );
+		}
+		else
+		{
+			CSphString sBuf;
+			sBuf.SetBinary ( pBuf, iLen );
+			fVal = (float) strtod ( sBuf.cstr(), NULL );
+		}
+
+		if ( IsDataPtrAttr() )
+			SafeDeleteArray ( pBuf );
+		return fVal;
+	}
+
+	//	base class does not convert string to int
+	int IntEval ( const CSphMatch & tMatch ) const final
+	{
+		int iVal = 0;
+		const char * pBuf = nullptr;
+		int  iLen = StringEval ( tMatch, (const BYTE **) &pBuf );
+
+		const char * pMax = sphFindLastNumeric ( pBuf, iLen );
+		if ( pBuf<pMax )
+		{
+			iVal = strtol ( pBuf, NULL, 10 );
+		}
+		else
+		{
+			CSphString sBuf;
+			sBuf.SetBinary ( pBuf, iLen );
+			iVal = strtol ( sBuf.cstr(), NULL, 10 );
+		}
+
+		if ( IsDataPtrAttr() )
+			SafeDeleteArray ( pBuf );
+		return iVal;
+	}
+
+	//	base class does not convert string to int64
+	int64_t Int64Eval ( const CSphMatch & tMatch ) const final
+	{
+		int64_t iVal = 0;
+		const char * pBuf = nullptr;
+		int  iLen = StringEval ( tMatch, (const BYTE **) &pBuf );
+
+		const char * pMax = sphFindLastNumeric ( pBuf, iLen );
+		if ( pBuf<pMax )
+		{
+			iVal = strtoll ( pBuf, NULL, 10 );
+		}
+		else
+		{
+			CSphString sBuf;
+			sBuf.SetBinary ( pBuf, iLen );
+			iVal = strtoll ( sBuf.cstr(), NULL, 10 );
+		}
+
+		if ( IsDataPtrAttr() )
+			SafeDeleteArray ( pBuf );
+		return iVal;
+	}
+
+	bool IsConst () const final { return true; }
+
+	uint64_t GetHash ( const ISphSchema & tSorterSchema, uint64_t uPrevHash, bool & bDisable ) final
+	{
+		EXPR_CLASS_NAME("Expr_SubstringIndex_c");
+		CALC_CHILD_HASH(m_pArg);
+		CALC_POD_HASH(m_sDelim);
+		CALC_POD_HASH(m_iCount);
+		return CALC_DEP_HASHES();
+	}
+
+private:
+	int SetResultString ( const char * pDoc, int iDocLen, const BYTE ** ppResStr ) const;
+	int LeftSearch ( const char * pDoc, int iDocLen, int iCount, bool bGetRight, const BYTE ** ppResStr, int * pResLen ) const;
+	int RightSearch ( const char * pDoc, int iDocLen, int iCount, const BYTE ** ppResStr, int * pResLen ) const;
+};
+
+//	in case of input static string, function returns only pointer and length of substring. buffer is not allocated
+//	in case of input dynamic string, function allocates buffer for substring and copy substring to it
+int Expr_SubstringIndex_c::SetResultString ( const char * pDoc, int iDocLen, const BYTE ** ppResStr ) const
+{
+	if ( IsDataPtrAttr()==false )
+	{
+		*ppResStr = (const BYTE *) pDoc;
+	}
+	else
+	{
+		CSphString  sRetVal;
+		sRetVal.SetBinary ( pDoc, iDocLen );
+		*ppResStr = (const BYTE *) sRetVal.Leak();
+	}
+	return iDocLen;
+}
+
+int Expr_SubstringIndex_c::LeftSearch ( const char * pDoc, int iDocLen, int iCount, bool bGetRight, const BYTE ** ppResStr, int * pResLen ) const
+{
+	int	  iTotalDelim = 0;
+	const char * pDelBeg = m_sDelim.cstr();
+	const char * pDelEnd = pDelBeg + m_iLenDelim;
+	const char * pStrBeg = pDoc;
+	const char * pStrEnd = (pStrBeg + iDocLen) - m_iLenDelim + 1;
+
+	while ( pStrBeg<pStrEnd )
+	{
+		//	check first delimer string's char with current char from pStr
+		if ( *pStrBeg==*pDelBeg )
+		{
+			//	first char is found, now we compare next chars in delimer string
+			bool	bMatched = true;
+			const char * p1 = pStrBeg + 1;
+			const char * p2 = pDelBeg + 1;
+			while ( bMatched && p2!=pDelEnd )
+			{
+				if ( *p1!=*p2 )
+					bMatched = false;
+				p1++;
+				p2++;
+			}
+
+			//	if we found matched delimer string, then return left substring or search next delimer string
+			if ( bMatched )
+			{
+				iTotalDelim++;
+				iCount--;
+
+				if ( iCount==0 )
+				{
+					if ( ppResStr && !bGetRight )
+						*pResLen = SetResultString ( pDoc, pStrBeg - pDoc, ppResStr );
+
+					if ( ppResStr && bGetRight )
+					{
+						pStrBeg += m_iLenDelim;
+						*pResLen = SetResultString ( pStrBeg, iDocLen - (pStrBeg - pDoc), ppResStr );
+					}
+
+					return iTotalDelim;
+				}
+				pStrBeg += m_iLenDelim;
+				continue;
+			}
+		}
+
+		//	delimer string does not maatch with current ptr, goto to next char and repeat comparation
+		int  iCharLen = sphUTF8Len ( pStrBeg, 1 );
+		pStrBeg += ( iCharLen > 0 ) ? iCharLen : 1;
+	}
+
+	//	not found, return original string
+	if ( iCount && ppResStr )
+		*pResLen = SetResultString ( pDoc, iDocLen, ppResStr );
+
+	return iTotalDelim;
+}
+
+int Expr_SubstringIndex_c::RightSearch ( const char * pDoc, int iDocLen, int iCount, const BYTE ** ppResStr, int * pResLen ) const
+{
+	//	find and count (iNumFoundDelim) of all delimer sub strings
+	int  iNumFoundDelim = LeftSearch ( pDoc, iDocLen, iDocLen+1, false, NULL, NULL );
+
+	//	correct iCount (which is negative) to positive index from left to right
+	iCount += iNumFoundDelim + 1;
+
+	//	if not found, return original string
+	if ( iCount<=0 )
+		*pResLen = SetResultString ( pDoc, iDocLen, ppResStr );
+
+	//	find delimer sub string according to iCount and return result
+	return LeftSearch ( pDoc, iDocLen, iCount, true, ppResStr, pResLen );
+}
 
 struct Expr_Iterator_c : Expr_JsonField_c
 {
@@ -2419,7 +2702,11 @@ enum Func_e
 	FUNC_MIN_TOP_SORTVAL,
 
 	FUNC_ATAN2,
-	FUNC_RAND
+	FUNC_RAND,
+
+	FUNC_REGEX,
+
+	FUNC_SUBSTRING_INDEX
 };
 
 
@@ -2506,7 +2793,11 @@ static FuncDesc_t g_dFuncs[] =
 	{ "min_top_sortval",	0,	FUNC_MIN_TOP_SORTVAL,	SPH_ATTR_FLOAT },
 
 	{ "atan2",			2,	FUNC_ATAN2,			SPH_ATTR_FLOAT },
-	{ "rand",			-1,	FUNC_RAND,			SPH_ATTR_FLOAT }
+	{ "rand",			-1,	FUNC_RAND,			SPH_ATTR_FLOAT },
+
+	{ "regex",			2,	FUNC_REGEX,			SPH_ATTR_INTEGER },
+
+	{ "substring_index",	3,	FUNC_SUBSTRING_INDEX,	SPH_ATTR_STRINGPTR }
 };
 
 
@@ -2549,34 +2840,34 @@ static int FuncHashLookup ( const char * sKey )
 	assert ( sKey && sKey[0] );
 
 	static BYTE dAsso[] =
-	{
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		0, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 60, 109, 25, 25, 0,
-		25, 15, 30, 10, 60, 10, 109, 109, 5, 0,
-		10, 25, 25, 25, 0, 55, 0, 0, 109, 15,
-		60, 20, 0, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109, 109, 109, 109, 109,
-		109, 109, 109, 109, 109, 109
-	};
+    {
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		 15, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139,  25, 139,	15,  25,   0,
+		 75,  10,  65,	10,  15,   0, 139, 139,   5,   0,
+		 10,   0,  55,	 0,  25,  35,  25,	25, 139,  80,
+		 55,  40,	0, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139, 139, 139, 139, 139,
+		139, 139, 139, 139, 139, 139
+    };
 
 	auto * s = (const BYTE*) sKey;
 	auto iHash = strlen ( sKey );
@@ -2589,17 +2880,20 @@ static int FuncHashLookup ( const char * sKey )
 
 	static int dIndexes[] =
 	{
-		-1, -1, -1, -1, -1, 13, -1, 51, 52, 29,
-		-1, -1, 55, 53, -1, -1, -1, 6, 54, -1,
-		33, -1, 31, 23, 50, -1, 21, 45, 30, 2,
-		44, -1, -1, 49, 60, 61, 47, -1, 57, 63,
-		16, 32, 27, 38, 7, 8, 41, 39, 56, 26,
-		48, 11, 59, 0, 28, 62, 46, 34, 58, 37,
-		-1, 36, 43, 42, 17, 3, -1, -1, 25, 18,
-		-1, -1, 19, 15, 14, -1, 22, -1, 4, 12,
-		-1, -1, -1, 5, 10, -1, -1, -1, 24, 20,
-		35, -1, -1, -1, 40, -1, -1, -1, -1, -1,
-		-1, -1, -1, 9, -1, -1, -1, -1, 1
+		-1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+		-1, -1, 31, 23, 2, 16, 21, 6, 38, 7,
+		8, -1, 39, 56, 60, 61, -1, 34, 57, 37,
+		13, 47, -1, 54, 29, 48, -1, -1, 5, 50,
+		33, 11, 45, 30, 20, 44, -1, -1, 4, 12,
+		64, 22, -1, 49, 63, -1, 32, 51, 52, 40,
+		62, 41, 55, 53, 10, -1, 36, 27, 58, 17,
+		35, -1, -1, 24, 18, 3, -1, 19, 1, 26,
+		-1, -1, -1, 42, -1, -1, -1, 43, -1, -1,
+		-1, -1, 59, 0, 28, -1, -1, -1, -1, 14,
+		65, -1, -1, -1, -1, -1, 46, -1, -1, -1,
+		-1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+		-1, -1, -1, 9, -1, -1, -1, -1, -1, -1,
+		-1, -1, -1, 15, -1, -1, -1, -1, 25,
 	};
 
 	if ( iHash>=(int)(sizeof(dIndexes)/sizeof(dIndexes[0])) )
@@ -2636,6 +2930,9 @@ static int VARIABLE_IS_NOT_USED G_FUNC_HASH_CHECK = FuncHashCheck();
 
 //////////////////////////////////////////////////////////////////////////
 
+static ISphExpr * ConvertExprJson ( ISphExpr * pExpr );
+static void ConvertArgsJson ( VecRefPtrs_t<ISphExpr *> & dArgs );
+
 /// check whether the type is numeric
 static inline bool IsNumeric ( ESphAttr eType )
 {
@@ -2646,6 +2943,11 @@ static inline bool IsNumeric ( ESphAttr eType )
 static inline bool IsInt ( ESphAttr eType )
 {
 	return eType==SPH_ATTR_INTEGER || eType==SPH_ATTR_BIGINT;
+}
+
+static inline bool IsJson ( ESphAttr eAttr )
+{
+	return ( eAttr==SPH_ATTR_JSON_FIELD );
 }
 
 /// check for type based on int value
@@ -2739,7 +3041,7 @@ struct ExprNode_t
 
 	union
 	{
-		int64_t			m_iConst = 0;	///< constant value, for TOK_CONST_INT type
+		int64_t			m_iConst;		///< constant value, for TOK_CONST_INT type
 		float			m_fConst;		///< constant value, for TOK_CONST_FLOAT type
 		int				m_iFunc;		///< built-in function id, for TOK_FUNC type
 		int				m_iArgs;		///< args count, for arglist (token==',') type
@@ -2747,6 +3049,7 @@ struct ExprNode_t
 		MapArg_c	*	m_pMapArg;		///< map argument (maps name to const or name to expr), for TOK_MAP_ARG type
 		const char	*	m_sIdent;		///< pointer to const char, for TOK_IDENT type
 		SphAttr_t	*	m_pAttr;		///< pointer to 64-bit value, for TOK_ITERATOR type
+		WIDEST<int64_t,float,int, ConstList_c *, MapArg_c *,const char*, SphAttr_t*>::T m_null = 0;
 	};
 	int				m_iLeft = -1;
 	int				m_iRight = -1;
@@ -2870,6 +3173,7 @@ private:
 	ISphExpr *				CreateContainsNode ( const ExprNode_t & tNode );
 	ISphExpr *				CreateAggregateNode ( const ExprNode_t & tNode, ESphAggrFunc eFunc, ISphExpr * pLeft );
 	ISphExpr *				CreateForInNode ( int iNode );
+	ISphExpr *				CreateRegexNode ( ISphExpr * pAttr, ISphExpr * pString );
 	void					FixupIterators ( int iNode, const char * sKey, SphAttr_t * pAttr );
 
 	bool					GetError () const { return !( m_sLexerError.IsEmpty() && m_sParserError.IsEmpty() && m_sCreateError.IsEmpty() ); }
@@ -3705,9 +4009,10 @@ public:
 					tArgs.str_lengths[i] = 0;
 				} else
 				{
-					sphJsonFieldFormat ( dTmp, m_pStrings+uOff, eJson, false );
-					tArgs.str_lengths[i] = dTmp.GetLength();
-					tArgs.arg_values[i] = (char *)dTmp.LeakData();
+					JsonEscapedBuilder sTmp;
+					sphJsonFieldFormat ( sTmp, m_pStrings+uOff, eJson, false );
+					tArgs.str_lengths[i] = sTmp.GetLength();
+					tArgs.arg_values[i] = (char*) sTmp.Leak();
 				}
 			break;
 
@@ -4468,8 +4773,8 @@ ISphExpr * ExprParser_t::CreateContainsNode ( const ExprNode_t & tNode )
 	const int iPoly = m_dNodes [ tArglist.m_iLeft ].m_iLeft;
 	const int iLat = m_dNodes [ tArglist.m_iLeft ].m_iRight;
 	const int iLon = tArglist.m_iRight;
-	assert ( IsNumeric ( m_dNodes[iLat].m_eRetType ) );
-	assert ( IsNumeric ( m_dNodes[iLat].m_eRetType ) );
+	assert ( IsNumeric ( m_dNodes[iLat].m_eRetType ) || IsJson ( m_dNodes[iLat].m_eRetType )  );
+	assert ( IsNumeric ( m_dNodes[iLon].m_eRetType ) || IsJson ( m_dNodes[iLon].m_eRetType ) );
 	assert ( m_dNodes[iPoly].m_eRetType==SPH_ATTR_POLY2D );
 
 	// create evaluator
@@ -4477,14 +4782,14 @@ ISphExpr * ExprParser_t::CreateContainsNode ( const ExprNode_t & tNode )
 	CSphVector<int> dPolyArgs;
 	GatherArgNodes ( m_dNodes[iPoly].m_iLeft, dPolyArgs );
 
-	CSphRefcountedPtr<ISphExpr> pLat { CreateTree ( iLat ) };
-	CSphRefcountedPtr<ISphExpr> pLon { CreateTree ( iLon ) };
+	CSphRefcountedPtr<ISphExpr> pLat { ConvertExprJson ( CreateTree ( iLat ) ) };
+	CSphRefcountedPtr<ISphExpr> pLon { ConvertExprJson ( CreateTree ( iLon ) ) };
 
 	bool bGeoTesselate = ( m_dNodes[iPoly].m_iToken==TOK_FUNC && m_dNodes[iPoly].m_iFunc==FUNC_GEOPOLY2D );
 
-	if ( dPolyArgs.GetLength()==1 && m_dNodes[dPolyArgs[0]].m_iToken==TOK_ATTR_STRING )
+	if ( dPolyArgs.GetLength()==1 && ( m_dNodes[dPolyArgs[0]].m_iToken==TOK_ATTR_STRING || m_dNodes[dPolyArgs[0]].m_iToken==TOK_ATTR_JSON ) )
 	{
-		CSphRefcountedPtr<ISphExpr> dPolyArgs0 { CreateTree ( dPolyArgs[0] ) };
+		CSphRefcountedPtr<ISphExpr> dPolyArgs0 { ConvertExprJson ( CreateTree ( dPolyArgs[0] ) ) };
 		return new Expr_ContainsStrattr_c ( pLat, pLon, dPolyArgs0, bGeoTesselate );
 	}
 
@@ -4499,6 +4804,8 @@ ISphExpr * ExprParser_t::CreateContainsNode ( const ExprNode_t & tNode )
 		dExprs.Resize ( dPolyArgs.GetLength() );
 		ARRAY_FOREACH ( i, dExprs )
 			dExprs[i] = CreateTree ( dPolyArgs[i] );
+
+		ConvertArgsJson ( dExprs );
 
 		// will adopt dExprs and utilize them on d-tr
 		return new Expr_ContainsExprvec_c ( pLat, pLon, dExprs );
@@ -4599,6 +4906,32 @@ public:
 };
 
 //////////////////////////////////////////////////////////////////////////
+
+ISphExpr * ConvertExprJson ( ISphExpr * pExpr )
+{
+	if ( !pExpr )
+		return nullptr;
+
+	bool bConverted = false;
+	bool bJson = pExpr->IsJson ( bConverted );
+	if ( bJson && !bConverted )
+	{
+		ISphExpr * pConv = new Expr_JsonFieldConv_c ( pExpr );
+		pExpr->Release();
+		return pConv;
+	} else
+	{
+		return pExpr;
+	}
+}
+
+void ConvertArgsJson ( VecRefPtrs_t<ISphExpr *> & dArgs )
+{
+	ARRAY_FOREACH ( i, dArgs )
+	{
+		dArgs[i] = ConvertExprJson ( dArgs[i] );
+	}
+}
 
 /// fold nodes subtree into opcodes
 ISphExpr * ExprParser_t::CreateTree ( int iNode )
@@ -4749,6 +5082,24 @@ ISphExpr * ExprParser_t::CreateTree ( int iNode )
 
 				switch ( eFunc )
 				{
+				case FUNC_TO_STRING:
+				case FUNC_INTERVAL:
+				case FUNC_IN:
+				case FUNC_LENGTH:
+				case FUNC_LEAST:
+				case FUNC_GREATEST:
+				case FUNC_ALL:
+				case FUNC_ANY:
+				case FUNC_INDEXOF:
+					break; // these have its own JSON converters
+
+				// all others will get JSON auto-converter
+				default:
+					ConvertArgsJson ( dArgs );
+				}
+
+				switch ( eFunc )
+				{
 					case FUNC_NOW:		return new Expr_Now_c(m_iConstNow); break;
 
 					case FUNC_ABS:		return new Expr_Abs_c ( dArgs[0] );
@@ -4845,8 +5196,6 @@ ISphExpr * ExprParser_t::CreateTree ( int iNode )
 					case FUNC_INTEGER:
 					case FUNC_DOUBLE:
 					case FUNC_UINT:
-						if ( m_dNodes[tNode.m_iLeft].m_iToken==TOK_ATTR_JSON )
-							return new Expr_JsonFieldConv_c ( dArgs[0] );
 						SafeAddRef ( dArgs[0] );
 						return dArgs[0];
 
@@ -4871,6 +5220,14 @@ ISphExpr * ExprParser_t::CreateTree ( int iNode )
 						m_eEvalStage = SPH_EVAL_PRESORT;
 						return new Expr_MinTopSortval();
 						break;
+					case FUNC_REGEX:
+						return CreateRegexNode ( dArgs[0], dArgs[1] );
+						break;
+
+					case FUNC_SUBSTRING_INDEX:
+						return new Expr_SubstringIndex_c ( dArgs[0], dArgs[1], dArgs[2] );
+						break;
+
 					default: // just make gcc happy
 						break;
 				}
@@ -5691,6 +6048,12 @@ protected:
 		}
 		return 0;
 	}
+
+	virtual bool IsJson ( bool & bConverted ) const override
+	{
+		bConverted = true;
+		return true;
+	}
 };
 
 
@@ -6061,6 +6424,66 @@ private:
 	ISphExpr *	m_pAnchorLat;
 	ISphExpr *	m_pAnchorLon;
 };
+
+class Expr_Regex_c : public Expr_ArgVsSet_c<int>
+{
+protected:
+	uint64_t m_uFilterHash = SPH_FNV64_SEED;
+#if USE_RE2
+	RE2 *	m_pRE2 = nullptr;
+#endif
+
+public:
+	Expr_Regex_c ( ISphExpr * pAttr, ISphExpr * pString )
+		: Expr_ArgVsSet_c ( pAttr )
+	{
+		CSphMatch tTmp;
+		const BYTE * sVal = nullptr;
+		int iLen = pString->StringEval ( tTmp, &sVal );
+		if ( iLen )
+			m_uFilterHash = sphFNV64 ( sVal, iLen );
+
+#if USE_RE2
+		re2::StringPiece tBuf ( (const char *)sVal, iLen );
+		RE2::Options tOpts;
+		tOpts.set_utf8 ( true );
+		m_pRE2 = new RE2 ( tBuf, tOpts );
+#endif
+	}
+
+	~Expr_Regex_c() final
+	{
+#if USE_RE2
+		SafeDelete ( m_pRE2 );
+#endif
+	}
+
+	int IntEval ( const CSphMatch & tMatch ) const final
+	{
+		int iRes = 0;
+#if USE_RE2
+		if ( !m_pRE2 )
+			return 0;
+
+		const BYTE * sVal = nullptr;
+		int iLen = m_pArg->StringEval ( tMatch, &sVal );
+
+		re2::StringPiece tBuf ( (const char *)sVal, iLen );
+		iRes = !!( RE2::PartialMatchN ( tBuf, *m_pRE2, nullptr, 0 ) );
+		if ( m_pArg->IsDataPtrAttr () ) SafeDeleteArray ( sVal );
+#endif
+
+		return iRes;
+	}
+
+	uint64_t GetHash ( const ISphSchema & tSorterSchema, uint64_t uPrevHash, bool & bDisable ) final
+	{
+		EXPR_CLASS_NAME("Expr_Regex_c");
+		uHash ^= m_uFilterHash;
+		return CALC_DEP_HASHES();
+	}
+};
+
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -6436,10 +6859,12 @@ ISphExpr * ExprParser_t::CreateGeodistNode ( int iArgs )
 				m_dNodes[dArgs[0]].m_iLocator, m_dNodes[dArgs[1]].m_iLocator );
 		} else
 		{
+			CSphRefcountedPtr<ISphExpr> pAttr0 { ConvertExprJson ( CreateTree ( dArgs[0] ) ) };
+			CSphRefcountedPtr<ISphExpr> pAttr1 { ConvertExprJson ( CreateTree ( dArgs[1] ) ) };
+
 			// expr point
 			return new Expr_GeodistConst_c ( GeodistFn ( eMethod, bDeg ), fOut,
-				CSphRefcountedPtr<ISphExpr> { CreateTree ( dArgs[0] )},
-				CSphRefcountedPtr<ISphExpr> { CreateTree ( dArgs[1] )},
+				pAttr0, pAttr1,
 				FloatVal ( &m_dNodes[dArgs[2]] ), FloatVal ( &m_dNodes[dArgs[3]] ) );
 		}
 	}
@@ -6448,6 +6873,7 @@ ISphExpr * ExprParser_t::CreateGeodistNode ( int iArgs )
 	VecRefPtrs_t<ISphExpr *> dExpr;
 	MoveToArgList ( CreateTree ( iArgs ), dExpr );
 	assert ( dExpr.GetLength()==4 );
+	ConvertArgsJson ( dExpr );
 	return new Expr_Geodist_c ( GeodistFn ( eMethod, bDeg ), fOut, dExpr[0], dExpr[1], dExpr[2], dExpr[3] );
 }
 
@@ -6551,6 +6977,11 @@ ISphExpr * ExprParser_t::CreateForInNode ( int iNode )
 	pFunc->SetExpr ( CSphRefcountedPtr<ISphExpr> { CreateTree ( iExprNode ) } );
 
 	return pFunc;
+}
+
+ISphExpr * ExprParser_t::CreateRegexNode ( ISphExpr * pAttr, ISphExpr * pString )
+{
+	return new Expr_Regex_c ( pAttr, pString );
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -6843,7 +7274,7 @@ int ExprParser_t::AddNodeFunc ( int iFunc, int iArg )
 		bGotString |= ( dRetTypes[i]==SPH_ATTR_STRING );
 		bGotMva |= ( dRetTypes[i]==SPH_ATTR_UINT32SET || dRetTypes[i]==SPH_ATTR_INT64SET );
 	}
-	if ( bGotString && !( eFunc==FUNC_CRC32 || eFunc==FUNC_EXIST || eFunc==FUNC_POLY2D || eFunc==FUNC_GEOPOLY2D ) )
+	if ( bGotString && !( eFunc==FUNC_SUBSTRING_INDEX || eFunc==FUNC_CRC32 || eFunc==FUNC_EXIST || eFunc==FUNC_POLY2D || eFunc==FUNC_GEOPOLY2D || eFunc==FUNC_REGEX ) )
 	{
 		m_sParserError.SetSprintf ( "%s() arguments can not be string", sFuncName );
 		return -1;
@@ -6915,9 +7346,9 @@ int ExprParser_t::AddNodeFunc ( int iFunc, int iArg )
 			m_sParserError.SetSprintf ( "1st CONTAINS() argument must be a 2D polygon (see POLY2D)" );
 			return -1;
 		}
-		if ( !IsNumeric ( dRetTypes[1] ) || !IsNumeric ( dRetTypes[2] ) )
+		if ( !( IsNumeric ( dRetTypes[1] ) || IsJson ( dRetTypes[1] ) ) || ! ( IsNumeric ( dRetTypes[2] ) || IsJson ( dRetTypes[2] ) ) )
 		{
-			m_sParserError.SetSprintf ( "2nd and 3rd CONTAINS() arguments must be numeric" );
+			m_sParserError.SetSprintf ( "2nd and 3rd CONTAINS() arguments must be numeric or JSON" );
 			return -1;
 		}
 		break;
@@ -6926,9 +7357,9 @@ int ExprParser_t::AddNodeFunc ( int iFunc, int iArg )
 		if ( dRetTypes.GetLength ()==1 )
 		{
 			// handle 1 arg version, POLY2D(string-attr)
-			if ( dRetTypes[0]!=SPH_ATTR_STRING )
+			if ( dRetTypes[0]!=SPH_ATTR_STRING && dRetTypes[0]!=SPH_ATTR_JSON_FIELD )
 			{
-				m_sParserError.SetSprintf ( "%s() argument must be a string attribute", sFuncName );
+				m_sParserError.SetSprintf ( "%s() argument must be a string or JSON field attribute", sFuncName );
 				return -1;
 			}
 		} else if ( dRetTypes.GetLength ()<6 )
@@ -6946,9 +7377,9 @@ int ExprParser_t::AddNodeFunc ( int iFunc, int iArg )
 				return -1;
 			}
 			ARRAY_FOREACH ( i, dRetTypes )
-				if ( !IsNumeric ( dRetTypes[i] ) )
+				if ( !( IsNumeric ( dRetTypes[i] ) || IsJson ( dRetTypes[i] ) ) )
 				{
-					m_sParserError.SetSprintf ( "%s() argument %d must be numeric", sFuncName, 1 + i );
+					m_sParserError.SetSprintf ( "%s() argument %d must be numeric or JSON field", sFuncName, 1 + i );
 					return -1;
 				}
 		}
@@ -6973,6 +7404,32 @@ int ExprParser_t::AddNodeFunc ( int iFunc, int iArg )
 			return -1;
 		}
 		break;
+	case FUNC_SUBSTRING_INDEX:
+		if ( dRetTypes.GetLength()!=3 )
+		{
+			m_sParserError.SetSprintf ( "%s() called with %d args, but 3 args expected", sFuncName
+				, dRetTypes.GetLength () );
+			return -1;
+		}
+		
+		if ( dRetTypes[0]!=SPH_ATTR_STRING && dRetTypes[0]!=SPH_ATTR_JSON && dRetTypes[0]!=SPH_ATTR_JSON_FIELD )
+		{
+			m_sParserError.SetSprintf ( "%s() arguments 1 must be string or json", sFuncName );
+			return -1;
+		}
+
+		if ( dRetTypes[1]!=SPH_ATTR_STRING )
+		{
+			m_sParserError.SetSprintf ( "%s() arguments 2 must be string", sFuncName );
+			return -1;
+		}
+
+		if ( dRetTypes[2]!=SPH_ATTR_INTEGER )
+		{
+			m_sParserError.SetSprintf ( "%s() arguments 3 must be numeric", sFuncName );
+			return -1;
+		}
+		break;
 	case FUNC_GEODIST: // check GEODIST args count, and that optional arg 5 is a map argument
 		if ( dRetTypes.GetLength ()>5 )
 		{
@@ -6986,6 +7443,33 @@ int ExprParser_t::AddNodeFunc ( int iFunc, int iArg )
 			m_sParserError.SetSprintf ( "%s() argument 5 must be map", sFuncName );
 			return -1;
 		}
+		break;
+	case FUNC_REGEX:
+		{
+#if USE_RE2
+			int iLeft = m_dNodes[iArg].m_iLeft;
+			ESphAttr eLeft = m_dNodes[iLeft].m_eRetType;
+			bool bIsLeftGood = ( eLeft==SPH_ATTR_STRING || eLeft==SPH_ATTR_STRINGPTR || eLeft==SPH_ATTR_JSON_FIELD );
+			if ( !bIsLeftGood )
+			{
+				m_sParserError.SetSprintf ( "first %s() argument must be string or JSON.field", sFuncName );
+				return -1;
+			}
+
+			int iRight = m_dNodes[iArg].m_iRight;
+			ESphAttr eRight = m_dNodes[iRight].m_eRetType;
+			bool bIsRightGood = ( eRight==SPH_ATTR_STRING );
+			if ( !bIsRightGood )
+			{
+				m_sParserError.SetSprintf ( "second %s() argument must be string", sFuncName );
+				return -1;
+			}
+#else
+			m_sParserError.SetSprintf ( "%s() used but no regexp support compiled", sFuncName );
+			return -1;
+#endif
+		}
+		break;
 	default:;
 	}
 
@@ -7006,7 +7490,13 @@ int ExprParser_t::AddNodeFunc ( int iFunc, int iArg )
 	case FUNC_MADD:
 	case FUNC_MUL3:
 	case FUNC_ABS:
-	case FUNC_IDIV: tNode.m_eRetType = tNode.m_eArgType; break;
+	case FUNC_IDIV:
+		if ( IsJson ( tNode.m_eArgType ) ) // auto-converter from JSON field for universal (SPH_ATTR_NONE return type) nodes
+			tNode.m_eRetType = SPH_ATTR_BIGINT;
+		else
+			tNode.m_eRetType = tNode.m_eArgType;
+		break;
+
 	case FUNC_EXIST:
 		{
 			ESphAttr eType = m_dNodes[m_dNodes[iArg].m_iRight].m_eRetType;
@@ -7019,7 +7509,10 @@ int ExprParser_t::AddNodeFunc ( int iFunc, int iArg )
 			tNode.m_eRetType = SPH_ATTR_FLOAT; // enforce if we can; FIXME! silently ignores BIGINT() on floats; should warn or raise an error
 		break;
 	case FUNC_IF:
-	case FUNC_BITDOT: tNode.m_eRetType = tNode.m_eArgType ; break;
+	case FUNC_BITDOT:
+		tNode.m_eRetType = tNode.m_eArgType;
+		break;
+
 	case FUNC_GREATEST:
 	case FUNC_LEAST: // fixup MVA return type according to the leftmost argument
 		{

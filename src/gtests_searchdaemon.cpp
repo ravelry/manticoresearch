@@ -1,5 +1,13 @@
 //
-// Created by alexey on 14.02.18.
+// Copyright (c) 2017-2019, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2001-2016, Andrew Aksyonoff
+// Copyright (c) 2008-2016, Sphinx Technologies Inc
+// All rights reserved
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License. You should have
+// received a copy of the GPL license along with this program; if you
+// did not, you can find it at http://www.gnu.org/
 //
 
 #include <gtest/gtest.h>
@@ -41,7 +49,10 @@ class tstlogger
 			break;
 		case SPH_LOG_DEBUG:
 		case SPH_LOG_VERBOSE_DEBUG:
-		case SPH_LOG_VERY_VERBOSE_DEBUG: lvl = "DEBUG: ";
+		case SPH_LOG_RPL_DEBUG:
+		case SPH_LOG_VERY_VERBOSE_DEBUG:
+		default:
+			lvl = "DEBUG: ";
 			break;
 		}
 		char * pOut = sLogBuff;
@@ -173,7 +184,7 @@ protected:
 		g_bHostnameLookup = true;
 		const char * pTest = sInExpr;
 		auto pResult = ConfigureMultiAgent ( pTest, "tstidx", tAgentOptions );
-		EXPECT_EQ ( (bool)pResult, bExpectedResult ) << sInExpr;
+		EXPECT_EQ ( pResult!=nullptr, bExpectedResult ) << sInExpr;
 		return pResult;
 	}
 
@@ -549,6 +560,25 @@ TEST ( T_IndexHash, served_hash_and_getter )
 	ASSERT_EQ ( pFee->GetRefcount (), 1 ) << "hash owns the var, we just have a weak ptr";
 	delete pHash;
 	ASSERT_EQ ( pFoo->GetRefcount (), 1 ) << "we're the only owner now";
+}
+
+
+TEST ( T_IndexHash, served_hash_add_or_replace )
+{
+	auto pHash = new GuardedHash_c;
+	ServedDesc_t tDesc;
+
+	// crash of AddOrReplace after Delete
+	ServedIndex_c * pIdx1 = new ServedIndex_c ( tDesc );
+	ServedIndex_c * pIdx2 = new ServedIndex_c ( tDesc );
+	ASSERT_TRUE ( pHash->AddUniq ( pIdx1, "idx1" ) );
+
+	// case itself
+	ASSERT_TRUE ( pHash->Delete ( "idx1" ) );
+	pHash->AddOrReplace ( pIdx2, "idx1" );
+
+	// cleanup
+	ASSERT_TRUE ( pHash->Delete ( "idx1" ) );
 }
 
 TEST ( T_IndexHash, ensure_right_refcounting )

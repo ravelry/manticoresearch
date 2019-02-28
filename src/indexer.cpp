@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2019, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -199,24 +199,24 @@ public:
 	void				Save ( const char * sOutput, int iTop, bool bFreqs );
 
 public:
-	virtual SphWordID_t	GetWordID ( BYTE * pWord );
-	virtual SphWordID_t	GetWordID ( const BYTE * pWord, int iLen, bool );
+	SphWordID_t	GetWordID ( BYTE * pWord ) final;
+	SphWordID_t	GetWordID ( const BYTE * pWord, int iLen, bool ) final;
 
-	virtual void		LoadStopwords ( const char *, const ISphTokenizer * ) {}
-	virtual void		LoadStopwords ( const CSphVector<SphWordID_t> & ) {}
-	virtual void		WriteStopwords ( CSphWriter & ) const {}
-	virtual bool		LoadWordforms ( const StrVec_t &, const CSphEmbeddedFiles *, const ISphTokenizer *, const char * ) { return true; }
-	virtual void		WriteWordforms ( CSphWriter & ) const {}
-	virtual int			SetMorphology ( const char *, CSphString & ) { return ST_OK; }
+	void		LoadStopwords ( const char *, const ISphTokenizer *, bool ) final {}
+	void		LoadStopwords ( const CSphVector<SphWordID_t> & ) final {}
+	void		WriteStopwords ( CSphWriter & ) const final {}
+	bool		LoadWordforms ( const StrVec_t &, const CSphEmbeddedFiles *, const ISphTokenizer *, const char * ) final { return true; }
+	void		WriteWordforms ( CSphWriter & ) const final {}
+	int			SetMorphology ( const char *, CSphString & ) final { return ST_OK; }
 
-	virtual void		Setup ( const CSphDictSettings & tSettings ) { m_tSettings = tSettings; }
-	virtual const CSphDictSettings & GetSettings () const { return m_tSettings; }
-	virtual const CSphVector <CSphSavedFile> & GetStopwordsFileInfos () const { return m_dSWFileInfos; }
-	virtual const CSphVector <CSphSavedFile> & GetWordformsFileInfos () const { return m_dWFFileInfos; }
-	virtual const CSphMultiformContainer * GetMultiWordforms () const { return NULL; }
-	virtual uint64_t		GetSettingsFNV () const { return 0; }
+	void		Setup ( const CSphDictSettings & tSettings ) final { m_tSettings = tSettings; }
+	const CSphDictSettings & GetSettings () const final { return m_tSettings; }
+	const CSphVector <CSphSavedFile> & GetStopwordsFileInfos () const final { return m_dSWFileInfos; }
+	const CSphVector <CSphSavedFile> & GetWordformsFileInfos () const final { return m_dWFFileInfos; }
+	const CSphMultiformContainer * GetMultiWordforms () const final { return nullptr; }
+	uint64_t		GetSettingsFNV () const final { return 0; }
 
-	virtual bool IsStopWord ( const BYTE * ) const { return false; }
+	bool IsStopWord ( const BYTE * ) const final { return false; }
 
 protected:
 	struct HashFunc_t
@@ -965,8 +965,8 @@ bool DoIndex ( const CSphConfigSection & hIndex, const char * sIndexName,
 
 		// multiforms filter
 		pDict = tDictSettings.m_bWordDict
-			? sphCreateDictionaryKeywords ( tDictSettings, NULL, pTokenizer, sIndexName, sError )
-			: sphCreateDictionaryCRC ( tDictSettings, NULL, pTokenizer, sIndexName, sError );
+			? sphCreateDictionaryKeywords ( tDictSettings, NULL, pTokenizer, sIndexName, false, sError )
+			: sphCreateDictionaryCRC ( tDictSettings, NULL, pTokenizer, sIndexName, false, sError );
 		if ( !pDict )
 			sphDie ( "index '%s': %s", sIndexName, sError.cstr() );
 
@@ -1419,8 +1419,8 @@ void SetSignalHandlers ()
 	bool bSignalsSet = false;
 	while (true)
 	{
-		sa.sa_flags = SA_NOCLDSTOP;
-		sa.sa_handler = SIG_IGN; if ( sigaction ( SIGCHLD, &sa, NULL )!=0 ) break;
+//		sa.sa_flags = SA_NOCLDSTOP;
+//		sa.sa_handler = SIG_IGN; if ( sigaction ( SIGCHLD, &sa, NULL )!=0 ) break;
 
 		sa.sa_flags |= SA_RESETHAND;
 		sa.sa_handler = sigsegv; if ( sigaction ( SIGSEGV, &sa, NULL )!=0 ) break;

@@ -1,5 +1,13 @@
 //
-// Created by alexey on 28.09.17.
+// Copyright (c) 2017-2019, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2001-2016, Andrew Aksyonoff
+// Copyright (c) 2008-2016, Sphinx Technologies Inc
+// All rights reserved
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License. You should have
+// received a copy of the GPL license along with this program; if you
+// did not, you can find it at http://www.gnu.org/
 //
 
 #include <gtest/gtest.h>
@@ -28,6 +36,7 @@ protected:
 	}
 
 	CSphFilterSettings tOpt;
+	CreateFilterContext_t tCtx;
 };
 
 TEST_F ( filter_block_level, range )
@@ -44,7 +53,10 @@ TEST_F ( filter_block_level, range )
 	
 	tOpt.m_iMinValue = 10;
 	tOpt.m_iMaxValue = 40;
-	tFilter = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+
+	tCtx.m_pSchema = &tSchema;
+
+	tFilter = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( tFilter.Ptr()!=NULL );
 
 	// filter >=10 && <=40 vs block 1-5
@@ -74,7 +86,7 @@ TEST_F ( filter_block_level, range )
 	SetDefault();
 	tOpt.m_iMaxValue = 40;
 	tOpt.m_bOpenLeft = true;
-	tFilter = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	tFilter = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( tFilter.Ptr()!=NULL );
 
 	// filter <=40 vs block 41-50
@@ -106,7 +118,7 @@ TEST_F ( filter_block_level, range )
 	SetDefault ();
 	tOpt.m_iMinValue = 15;
 	tOpt.m_bOpenRight = true;
-	tFilter = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	tFilter = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( tFilter.Ptr()!=NULL );
 
 	// filter >=15 vs block 10-14
@@ -139,7 +151,7 @@ TEST_F ( filter_block_level, range )
 	tOpt.m_iMaxValue = 40;
 	tOpt.m_bHasEqualMin = false;
 	tOpt.m_bHasEqualMax = false;
-	tFilter = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	tFilter = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( tFilter.Ptr()!=NULL );
 
 	// filter >10 && <40 vs block 1-5
@@ -175,7 +187,7 @@ TEST_F ( filter_block_level, range )
 	tOpt.m_bOpenLeft = true;
 	tOpt.m_bHasEqualMax = false;
 	tOpt.m_bHasEqualMin = false;
-	tFilter = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	tFilter = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( tFilter.Ptr()!=NULL );
 
 	// filter <40 vs block 40-50
@@ -209,7 +221,7 @@ TEST_F ( filter_block_level, range )
 	tOpt.m_bOpenRight = true;
 	tOpt.m_bHasEqualMax = false;
 	tOpt.m_bHasEqualMin = false;
-	tFilter = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	tFilter = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( tFilter.Ptr()!=NULL );
 
 	// filter >15 vs block 10-15
@@ -250,7 +262,8 @@ TEST_F ( filter_block_level, range_float )
 	tOpt.m_fMaxValue = 40.0f;
 	tOpt.m_bHasEqualMin = false;
 	tOpt.m_bHasEqualMax = false;
-	tFilter = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	tCtx.m_pSchema = &tSchema;
+	tFilter = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( tFilter.Ptr()!=NULL );
 
 	// filter >10 && <40 vs block 1-5
@@ -284,7 +297,7 @@ TEST_F ( filter_block_level, range_float )
 	tOpt.m_bOpenLeft = true;
 	tOpt.m_bHasEqualMin = false;
 	tOpt.m_bHasEqualMax = false;
-	tFilter = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	tFilter = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( tFilter.Ptr()!=NULL );
 
 	// filter <40 vs block 40-50
@@ -312,7 +325,7 @@ TEST_F ( filter_block_level, range_float )
 	tOpt.m_bOpenLeft = true; // FIXME!!! OpenLeft should work for FLOAT range too
 	tOpt.m_bHasEqualMin = false;
 	tOpt.m_bHasEqualMax = false;
-	tFilter = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	tFilter = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( tFilter.Ptr()!=NULL );
 
 	// filter <40 vs block 1-4
@@ -328,7 +341,7 @@ TEST_F ( filter_block_level, range_float )
 	tOpt.m_bOpenRight = true;
 	tOpt.m_bHasEqualMin = false;
 	tOpt.m_bHasEqualMax = false;
-	tFilter = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	tFilter = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( tFilter.Ptr()!=NULL );
 
 	// filter >15 vs block 10-15
@@ -373,8 +386,9 @@ TEST_F ( filter_block_level, values )
 	tOpt.m_eType = SPH_FILTER_VALUES;
 	SphAttr_t dValues[] = { 10, 40, 100 };
 	tOpt.SetExternalValues ( dValues, sizeof ( dValues ) / sizeof ( dValues[0] ) );
+	tCtx.m_pSchema = &tSchema;
 
-	tFilter = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	tFilter = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( tFilter.Ptr()!=NULL );
 
 	// filter values vs block 1-9
@@ -403,7 +417,7 @@ TEST_F ( filter_block_level, values )
 	SphAttr_t dValuesSingle[] = { 10 };
 	tOpt.SetExternalValues ( dValuesSingle, sizeof ( dValuesSingle ) / sizeof ( dValuesSingle[0] ) );
 
-	tFilter = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	tFilter = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( tFilter.Ptr()!=NULL );
 
 	// filter values vs block 1-9
@@ -438,13 +452,15 @@ TEST_F ( filter_block_level, and2 )
 	SphAttr_t dVal1[] = { 10 };
 	tOpt.SetExternalValues ( dVal1, sizeof ( dVal1 ) / sizeof ( dVal1[0] ) );
 
-	ISphFilter * pFilter1 = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	tCtx.m_pSchema = &tSchema;
+
+	ISphFilter * pFilter1 = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( pFilter1!=NULL );
 
 	SphAttr_t dVal2[] = { 20 };
 	tOpt.SetExternalValues ( dVal2, sizeof ( dVal2 ) / sizeof ( dVal2[0] ) );
 
-	ISphFilter * pFilter2 = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	ISphFilter * pFilter2 = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( pFilter2!=NULL );
 
 	tFilter = sphJoinFilters ( pFilter1, pFilter2 );
@@ -482,19 +498,21 @@ TEST_F ( filter_block_level, and3 )
 	SphAttr_t dVal1[] = { 10 };
 	tOpt.SetExternalValues ( dVal1, sizeof ( dVal1 ) / sizeof ( dVal1[0] ) );
 
-	ISphFilter * pFilter1 = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	tCtx.m_pSchema = &tSchema;
+
+	ISphFilter * pFilter1 = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( pFilter1!=NULL );
 
 	SphAttr_t dVal2[] = { 15 };
 	tOpt.SetExternalValues ( dVal2, sizeof ( dVal2 ) / sizeof ( dVal2[0] ) );
 
-	ISphFilter * pFilter2 = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	ISphFilter * pFilter2 = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( pFilter2!=NULL );
 
 	SphAttr_t dVal3[] = { 20 };
 	tOpt.SetExternalValues ( dVal3, sizeof ( dVal3 ) / sizeof ( dVal3[0] ) );
 
-	ISphFilter * pFilter3 = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	ISphFilter * pFilter3 = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( pFilter3!=NULL );
 
 	tFilter = sphJoinFilters ( pFilter1, sphJoinFilters ( pFilter2, pFilter3 ) );
@@ -532,25 +550,27 @@ TEST_F ( filter_block_level, and )
 	SphAttr_t dVal1[] = { 10 };
 	tOpt.SetExternalValues ( dVal1, sizeof ( dVal1 ) / sizeof ( dVal1[0] ) );
 
-	ISphFilter * pFilter1 = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	tCtx.m_pSchema = &tSchema;
+
+	ISphFilter * pFilter1 = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( pFilter1!=NULL );
 
 	SphAttr_t dVal2[] = { 14 };
 	tOpt.SetExternalValues ( dVal2, sizeof ( dVal2 ) / sizeof ( dVal2[0] ) );
 
-	ISphFilter * pFilter2 = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	ISphFilter * pFilter2 = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( pFilter2!=NULL );
 
 	SphAttr_t dVal3[] = { 18 };
 	tOpt.SetExternalValues ( dVal3, sizeof ( dVal3 ) / sizeof ( dVal3[0] ) );
 
-	ISphFilter * pFilter3 = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	ISphFilter * pFilter3 = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( pFilter3!=NULL );
 
 	SphAttr_t dVal4[] = { 20 };
 	tOpt.SetExternalValues ( dVal4, sizeof ( dVal4 ) / sizeof ( dVal4[0] ) );
 
-	ISphFilter * pFilter4 = sphCreateFilter ( tOpt, tSchema, NULL, NULL, sError, sWarning, SPH_COLLATION_DEFAULT, false );
+	ISphFilter * pFilter4 = sphCreateFilter ( tOpt, tCtx, sError, sWarning );
 	ASSERT_TRUE ( pFilter4!=NULL );
 
 	tFilter = sphJoinFilters ( pFilter1, sphJoinFilters ( pFilter2, sphJoinFilters ( pFilter3, pFilter4 ) ) );

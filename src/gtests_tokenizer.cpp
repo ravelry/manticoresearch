@@ -1,5 +1,13 @@
 //
-// Created by alexey on 24.08.17.
+// Copyright (c) 2017-2019, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2001-2016, Andrew Aksyonoff
+// Copyright (c) 2008-2016, Sphinx Technologies Inc
+// All rights reserved
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License. You should have
+// received a copy of the GPL license along with this program; if you
+// did not, you can find it at http://www.gnu.org/
 //
 
 #include <gtest/gtest.h>
@@ -631,11 +639,11 @@ static void CheckQuerySoftSpace ( const XQNode_t * pNode, const int * pQPos, int
 	ARRAY_FOREACH ( i, dChildren )
 	{
 		const XQNode_t * pChild = dChildren[i];
-		ARRAY_FOREACH ( j, pChild->m_dChildren )
-			dChildren.Add ( pChild->m_dChildren[j] );
+		for ( auto * pChildren : pChild->m_dChildren )
+			dChildren.Add ( pChildren );
 
-		ARRAY_FOREACH ( j, pChild->m_dWords )
-			dTerms.Add ( pChild->m_dWords.Begin () + j );
+		for ( auto & dWord : pChild->m_dWords )
+			dTerms.Add ( &dWord );
 	}
 
 	dTerms.Sort ( CmpAtomPos_fn () );
@@ -678,7 +686,7 @@ protected:
 
 		CSphDictSettings tDictSettings;
 		tDictSettings.m_bWordDict = false;
-		pDict = sphCreateDictionaryCRC ( tDictSettings, NULL, pTokenizer, "query", sError );
+		pDict = sphCreateDictionaryCRC ( tDictSettings, NULL, pTokenizer, "query", false, sError );
 
 		ASSERT_TRUE ( pTokenizer );
 		ASSERT_TRUE ( pDict );

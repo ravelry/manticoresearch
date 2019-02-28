@@ -97,7 +97,7 @@ function LoadCachedGuesses ()
 function CacheGuesses ()
 {
 	global $g_locals;
-	global $g_re2, $g_rlp, $g_odbc;
+	global $g_re2, $g_rlp, $g_odbc, $g_repli, $g_repli_path;
 
 	$guessfile = $g_locals['testdir'].'guess.txt';
 
@@ -105,6 +105,8 @@ function CacheGuesses ()
 	if ( $g_re2 ) $text .= "global \$g_re2; \$g_re2 = true;\n";
 	if ( $g_rlp ) $text .= "global \$g_rlp; \$g_rlp = true;\n";
 	if ( $g_odbc ) $text .= "global \$g_odbc; \$g_odbc = true;\n";
+	if ( $g_repli ) $text .= "global \$g_repli; \$g_repli = true;\n";
+	if ( $g_repli_path ) $text .= "global \$g_repli_path; \$g_repli_path = '" . $g_locals['galera_lib_path'] . "';\n";
 
 	file_put_contents ( $guessfile, $text );
 }
@@ -167,6 +169,34 @@ function GetVersion ()
 {
 	$banner = GetBanner();
 	return $banner[0];
+}
+
+function GuessReplication()
+{
+	$repli_on = 'DWITH_REPLICATION=ON';
+	$galera_name = 'libgalera_smm.so';
+	global $g_repli, $g_repli_path, $g_locals;
+	
+	$banner = GetBanner();
+	foreach ( $banner as $line )
+	{
+		if ( strpos ( $line, $repli_on ) !== false )
+		{
+			$g_repli = true;
+			break;
+		}
+	}
+
+	// build with replication and galera_lib_path set at .sphinx
+	if ( $g_repli )
+	{
+		$g_repli = false;
+		if ( isset ( $g_locals['galera_lib_path'] ) && is_file ( $g_locals['galera_lib_path'] . $galera_name ) !== false )
+		{
+			$g_repli = true;
+			$g_repli_path = $g_locals['galera_lib_path'];
+		}
+	}
 }
 
 function PublishLocals ( &$locals, $benchmark )

@@ -22,7 +22,7 @@
 
 json:
 	// empty
-	| '{' key_value_list '}'	{ if ( !pParser->WriteNode ( $2 ) ) YYERROR; }
+	| '{' key_value_list '}'	{ if ( !pParser->WriteRoot ( $2 ) ) YYERROR; }
 	| '[' value_list ']' 		{ if ( !pParser->WriteNode ( $2 ) ) YYERROR; }
 	;
 
@@ -45,52 +45,68 @@ value:
 key_value_list:
 	// empty
 		{
+			$$ = JsonNode_t();
 			$$.m_eType = JSON_OBJECT;
-			$$.m_iHandle = -1;
+			$$.m_dChildren.m_iStart = -1;
+			$$.m_dChildren.m_iLen = 0;
+
 		}
 	| key ':' value
-		{ 
+		{
+			$$ = JsonNode_t();
 			$$.m_eType = JSON_OBJECT;
-			$$.m_iHandle = pParser->m_dNodes.GetLength();
-			$3.m_iKeyStart = $1.m_iStart;
-			$3.m_iKeyEnd = $1.m_iEnd;
-			pParser->m_dNodes.Add().Add($3);
+			$$.m_dChildren.m_iStart = $$.m_iNext = pParser->m_dNodes.GetLength();
+			$$.m_dChildren.m_iLen = 1;
+			$3.m_sName = $1.m_sValue;
+			pParser->AddNode($3);
+
 		}
 	| key_value_list ',' key ':' value
-		{ 
-			if ( $1.m_iHandle<0 )
+		{
+			if ( !$1.m_dChildren.m_iLen )
 			{
 				yyerror ( pParser, "unexpected ','" );
 				YYERROR;
 			}
-			$$ = $1;
-			$5.m_iKeyStart = $3.m_iStart;
-			$5.m_iKeyEnd = $3.m_iEnd;
-			pParser->m_dNodes[$$.m_iHandle].Add($5);
+			$$ = JsonNode_t();
+			$$.m_eType = JSON_OBJECT;
+			$$.m_dChildren.m_iStart = $1.m_dChildren.m_iStart;
+			$$.m_dChildren.m_iLen = $1.m_dChildren.m_iLen+1;
+			$$.m_iNext = pParser->m_dNodes[$1.m_iNext].m_iNext = pParser->m_dNodes.GetLength();
+			$5.m_sName = $3.m_sValue;
+			pParser->AddNode($5);
 		}
 	;
 
 value_list:
 	// empty
 		{
+			$$ = JsonNode_t();
 			$$.m_eType = JSON_MIXED_VECTOR;
-			$$.m_iHandle = -1;
+			$$.m_dChildren.m_iStart = -1;
+			$$.m_dChildren.m_iLen = 0;
 		}
 	| value
 		{
+			$$ = JsonNode_t();
 			$$.m_eType = JSON_MIXED_VECTOR;
-			$$.m_iHandle = pParser->m_dNodes.GetLength();
-			pParser->m_dNodes.Add().Add($1);
+			$$.m_dChildren.m_iStart = $$.m_iNext = pParser->m_dNodes.GetLength();
+			$$.m_dChildren.m_iLen = 1;
+			pParser->AddNode($1);
 		}
 	| value_list ',' value
 		{
-			if ( $1.m_iHandle<0 )
+			if ( !$1.m_dChildren.m_iLen )
 			{
 				yyerror ( pParser, "unexpected ','" );
 				YYERROR;
 			}
-			$$ = $1;
-			pParser->m_dNodes[$$.m_iHandle].Add($3);
+			$$ = JsonNode_t();
+			$$.m_eType = JSON_MIXED_VECTOR;
+            $$.m_dChildren.m_iStart = $1.m_dChildren.m_iStart;
+            $$.m_dChildren.m_iLen = $1.m_dChildren.m_iLen+1;
+			$$.m_iNext = pParser->m_dNodes[$1.m_iNext].m_iNext = pParser->m_dNodes.GetLength();
+			pParser->AddNode($3);
 		}
 	;
 

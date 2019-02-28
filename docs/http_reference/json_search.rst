@@ -24,6 +24,22 @@ or use ``_all`` or ``*`` to issue the query to all available indexes:
 can be used to organize queries and filters into a tree (using the bool
 query).
 
+``"limit"`` and ``"offset"`` options set the offset into server-side result set and the amount of matches to return to starting from that offset. They work the same as ``SetLimits`` in the API and ``LIMIT`` and ``OFFSET`` in the SphinxQL. Example:
+
+.. code-block:: json
+
+    {
+      "index":"test",
+      "query": { "match_all": {} },
+      "limit":100,
+      "offset":50,
+    }
+
+You can also use ``"size"``/``"from"`` synonyms in place of ``"limit"``/``"offset"``.
+
+
+In case the index contains json attributes, they will be injected into output json as inline objects, so you can simple take and work with them (before they were returned as escaped strings, so you had to parse them into json).
+
 Fulltext queries
 """"""""""""""""
 

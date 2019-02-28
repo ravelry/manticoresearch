@@ -1,5 +1,13 @@
 //
-// Created by alexey on 28.09.17.
+// Copyright (c) 2017-2019, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2001-2016, Andrew Aksyonoff
+// Copyright (c) 2008-2016, Sphinx Technologies Inc
+// All rights reserved
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License. You should have
+// received a copy of the GPL license along with this program; if you
+// did not, you can find it at http://www.gnu.org/
 //
 
 #include <gtest/gtest.h>
@@ -34,7 +42,7 @@ void ThdSearch ( void * )
 		ARRAY_FOREACH ( i, g_dLocals )
 		{
 			auto pDesc = GetTestLocal ( g_dLocals[i] );
-			bool bGot = pDesc;
+			bool bGot = pDesc!=nullptr;
 
 			// check that it exists
 			if ( !bGot )
@@ -243,4 +251,13 @@ TEST ( searchd_stuff, iovec_behaviour )
 	ASSERT_EQ ( tIO.IOSize (), 1 );
 	tIO.StepForward (4);
 	ASSERT_EQ ( tIO.IOSize (), 0 );
+}
+
+TEST ( searchd_stuff, prepare_emulation )
+{
+	CSphQuery tQuery;
+	tQuery.m_eMode = SPH_MATCH_ALL;
+	PrepareQueryEmulation ( &tQuery );
+
+	ASSERT_EQ ( tQuery.m_eRanker, SPH_RANK_PROXIMITY );
 }

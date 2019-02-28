@@ -57,6 +57,7 @@ ALPHA				[a-zA-Z_]+
 "CALL"				{ YYSTOREBOUNDS; return TOK_CALL; }
 "CHARACTER"			{ YYSTOREBOUNDS; return TOK_CHARACTER; }
 "CHUNK"				{ YYSTOREBOUNDS; return TOK_CHUNK; }
+"CLUSTER"			{ YYSTOREBOUNDS; return TOK_CLUSTER; }
 "COLLATE"                       { YYSTOREBOUNDS; return TOK_COLLATE; }
 "COLLATION"			{ YYSTOREBOUNDS; return TOK_COLLATION; }
 "COLUMN"			{ YYSTOREBOUNDS; return TOK_COLUMN; }
@@ -97,6 +98,7 @@ ALPHA				[a-zA-Z_]+
 "INTO"				{ YYSTOREBOUNDS; return TOK_INTO; }
 "IS"				{ YYSTOREBOUNDS; return TOK_IS; }
 "ISOLATION"			{ YYSTOREBOUNDS; return TOK_ISOLATION; }
+"JOIN"				{ YYSTOREBOUNDS; return TOK_JOIN; }
 "JSON"				{ YYSTOREBOUNDS; return TOK_JSON; }
 "LEVEL"				{ YYSTOREBOUNDS; return TOK_LEVEL; }
 "LIKE"				{ YYSTOREBOUNDS; return TOK_LIKE; }
@@ -123,6 +125,7 @@ ALPHA				[a-zA-Z_]+
 "RAMCHUNK"			{ YYSTOREBOUNDS; return TOK_RAMCHUNK; }
 "RAND"				{ YYSTOREBOUNDS; return TOK_RAND; }
 "READ"				{ YYSTOREBOUNDS; return TOK_READ; }
+"REGEX"				{ YYSTOREBOUNDS; return TOK_REGEX; }
 "RECONFIGURE"		{ YYSTOREBOUNDS; return TOK_RECONFIGURE; }
 "RELOAD"			{ YYSTOREBOUNDS; return TOK_RELOAD; }
 "REPEATABLE"		{ YYSTOREBOUNDS; return TOK_REPEATABLE; }
@@ -187,6 +190,7 @@ ALPHA				[a-zA-Z_]+
 "`ID`"				{ YYSTOREBOUNDS; lvalp->m_iStart++; lvalp->m_iEnd--; return TOK_ID; }
 `{ID}`				{ YYSTOREBOUNDS; lvalp->m_iStart++; lvalp->m_iEnd--; return TOK_IDENT; }
 `{DIGIT}+{ID}`		{ YYSTOREBOUNDS; lvalp->m_iStart++; lvalp->m_iEnd--; return TOK_IDENT; } // allow `123xyz` column names
+{ID}:{ID}			{ YYSTOREBOUNDS; return TOK_IDENT; }
 
 {SPACE}+			{ ; }
 \.{SPACE}*{ID}		{ YYSTOREBOUNDS; return TOK_SUBKEY; }

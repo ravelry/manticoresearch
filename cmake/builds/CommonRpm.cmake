@@ -31,7 +31,7 @@ configure_file ( "sphinx.conf.in" "${MANTICORE_BINARY_DIR}/sphinx.conf.dist" @ON
 
 configure_file ( "dist/rpm/manticore.init.in" "${MANTICORE_BINARY_DIR}/manticore.init" @ONLY )
 configure_file ( "dist/rpm/manticore.tmpfiles.in" "${MANTICORE_BINARY_DIR}/searchd.conf" @ONLY )
-configure_file ( "dist/rpm/manticore.service.in" "${MANTICORE_BINARY_DIR}/searchd.service" @ONLY )
+configure_file ( "dist/rpm/manticore.generator.in" "${MANTICORE_BINARY_DIR}/searchd.generator" @ONLY )
 configure_file ( "dist/rpm/manticore.logrotate.in" "${MANTICORE_BINARY_DIR}/manticore.logrotate" @ONLY )
 
 install ( FILES ${MANTICORE_BINARY_DIR}/sphinx-min.conf.dist
@@ -46,7 +46,10 @@ install ( FILES ${MANTICORE_BINARY_DIR}/sphinx-min.conf.dist
 
 install ( FILES doc/indexer.1 doc/indextool.1 doc/searchd.1 doc/spelldump.1
 		DESTINATION ${MANDIR}/man1 COMPONENT doc )
-install ( DIRECTORY api DESTINATION share/${PACKAGE_NAME} COMPONENT doc )
+
+install ( DIRECTORY misc/stopwords DESTINATION ${SHAREDIR}/${PACKAGE_NAME} COMPONENT doc)
+
+install ( DIRECTORY api DESTINATION ${SHAREDIR}/${PACKAGE_NAME} COMPONENT doc )
 install ( FILES COPYING example.sql
 		DESTINATION ${DOCDIR} COMPONENT doc )
 

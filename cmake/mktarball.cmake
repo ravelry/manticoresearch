@@ -23,15 +23,18 @@ endif()
 set ( FNAME "${TARBALL_FILE_NAME}${SUFFIX}" )
 set ( PACKDIR "${BINARY_DIR}/sources/${FNAME}" )
 
-file (REMOVE_RECURSE ${PACKDIR})
-file (COPY ${SOURCE_DIR}/ DESTINATION ${PACKDIR}
+# unwind symlinks before file copy
+get_filename_component ( FULL_SOURCE_DIR "${SOURCE_DIR}" REALPATH )
+
+file ( REMOVE_RECURSE ${PACKDIR} )
+file ( COPY ${FULL_SOURCE_DIR}/ DESTINATION ${PACKDIR}
 		PATTERN "cmake-*" EXCLUDE
 		PATTERN "build-*" EXCLUDE
 		PATTERN "build" EXCLUDE
 		PATTERN ".*" EXCLUDE
 		PATTERN "CMakeCache.txt" EXCLUDE
 		)
-configure_file ("${BINARY_DIR}/config/gen_sphinxversion.h"
+configure_file ( "${BINARY_DIR}/config/gen_sphinxversion.h"
 		"${PACKDIR}/src/sphinxversion.h" COPYONLY )
 
 if ( WITH_STEMMER AND STEMMER_BASEDIR )

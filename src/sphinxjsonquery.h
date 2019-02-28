@@ -16,6 +16,7 @@
 #define _sphinxjsonquery_
 
 #include "sphinx.h"
+#include "sphinxjson.h"
 
 class QueryParser_i;
 class StmtErrorReporter_i;
@@ -29,26 +30,21 @@ bool			sphParseJsonInsert ( const char * szInsert, SqlStmt_t & tStmt, SphDocID_t
 bool			sphParseJsonUpdate ( const char * szUpdate, SqlStmt_t & tStmt, SphDocID_t & tDocId, CSphString & sError );
 bool			sphParseJsonDelete ( const char * szDelete, SqlStmt_t & tStmt, SphDocID_t & tDocId, CSphString & sError );
 bool			sphParseJsonStatement ( const char * szStmt, SqlStmt_t & tStmt, CSphString & sStmt, CSphString & sQuery, SphDocID_t & tDocId, CSphString & sError );
-CSphString		sphJsonToString ( const cJSON * pJson );
 
 CSphString		sphEncodeResultJson ( const AggrResult_t & tRes, const CSphQuery & tQuery, CSphQueryProfile * pProfile, bool bAttrsHighlight );
-cJSON *			sphEncodeInsertResultJson ( const char * szIndex, bool bReplace, SphDocID_t tDocId );
-cJSON *			sphEncodeUpdateResultJson ( const char * szIndex, SphDocID_t tDocId, int iAffected );
-cJSON *			sphEncodeDeleteResultJson ( const char * szIndex, SphDocID_t tDocId, int iAffected );
-cJSON *			sphEncodeInsertErrorJson ( const char * szIndex, const char * szError );
+JsonObj_c		sphEncodeInsertResultJson ( const char * szIndex, bool bReplace, SphDocID_t tDocId );
+JsonObj_c		sphEncodeUpdateResultJson ( const char * szIndex, SphDocID_t tDocId, int iAffected );
+JsonObj_c 		sphEncodeDeleteResultJson ( const char * szIndex, SphDocID_t tDocId, int iAffected );
+JsonObj_c		sphEncodeInsertErrorJson ( const char * szIndex, const char * szError );
 
 bool			sphGetResultStats ( const char * szResult, int & iAffected, int & iWarnings, bool bUpdate );
 
-cJSON *			sphBuildProfileJson ( XQNode_t * pNode, const CSphSchema & tSchema );
-void			sphInitCJson();
+void			sphBuildProfileJson ( JsonEscapedBuilder &tOut, const XQNode_t * pNode, const CSphSchema &tSchema, const StrVec_t &dZones );
 
 int				PackSnippets ( const CSphVector<BYTE> & dRes, CSphVector<int> & dSeparators, int iSepLen, const BYTE ** ppStr );
 
-bool ParseJsonQueryFilters ( const cJSON * pQuery, CSphQuery & tQuery, CSphString & sError, CSphString & sWarning );
-bool NonEmptyQuery ( const cJSON * pQuery );
-cJSON * GetJSONPropertyString ( const cJSON * pNode, const char * szName, CSphString & sError );
-cJSON * GetJSONPropertyInt ( const cJSON * pNode, const char * szName, CSphString & sError );
-cJSON * GetJSONPropertyObject ( const cJSON * pNode, const char * szName, CSphString & sError );
+bool			ParseJsonQueryFilters ( const JsonObj_c & tJson, CSphQuery & tQuery, CSphString & sError, CSphString & sWarning );
+bool			NonEmptyQuery ( const JsonObj_c & tQuery );
 
 #endif
 

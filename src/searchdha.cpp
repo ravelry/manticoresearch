@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2019, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -13,6 +13,7 @@
 #include "sphinx.h"
 #include "sphinxstd.h"
 #include "sphinxrt.h"
+#include "sphinxpq.h"
 #include "sphinxint.h"
 #include <errno.h>
 
@@ -505,12 +506,7 @@ CSphString MultiAgentDesc_c::GetKey ( const CSphVector<AgentDesc_t *> &dTemplate
 {
 	StringBuilder_c sKey;
 	for ( const auto* dHost : dTemplateHosts )
-	{
-		sKey+=dHost->GetMyUrl ().cstr();
-		sKey+=":";
-		sKey+=dHost->m_sIndexes.cstr();
-		sKey+="|";
-	}
+		sKey << dHost->GetMyUrl () << ":" << dHost->m_sIndexes << "|";
 	sKey.Appendf ("[%d,%d,%d,%d,%d]",
 		tOpt.m_bBlackhole?1:0,
 		tOpt.m_bPersistent?1:0,
@@ -1337,7 +1333,8 @@ int SmartOutputBuffer_t::GetSentCount () const
 
 void SmartOutputBuffer_t::StartNewChunk ()
 {
-	assert ( BlobsEmpty() );
+	CommitAllMeasuredLengths ();
+	assert ( BlobsEmpty () );
 	m_dChunks.Add ( new ISphOutputBuffer ( m_dBuf ) );
 	m_dBuf.Reserve ( NETOUTBUF );
 }
@@ -1700,7 +1697,8 @@ bool AgentConn_t::BadResult ( int iError )
 
 	State ( Agent_e::RETRY );
 	Finish ();
-	m_dResults.Reset ();
+	if ( m_pResult )
+		m_pResult->Reset ();
 	return false;
 }
 
@@ -1812,21 +1810,19 @@ void AgentConn_t::TimeoutCallback ()
 	}
 }
 
-// fixme! Actually this must never happens.
-// So, explicit sphWarning used to detect if it actually called
 // the reason for orphanes is suggested to be combined write, then read in netloop with epoll
 bool AgentConn_t::CheckOrphaned()
 {
 	// check if we accidentally orphaned (that is bug!)
 	if ( IsLast () && !IsBlackhole () )
 	{
-		sphWarning ( "Orphaned (last) connection detected!" );
+		sphLogDebug ( "Orphaned (last) connection detected!" );
 		return true;
 	}
 
 	if ( m_pReporter && m_pReporter->IsDone () )
 	{
-		sphWarning ( "Orphaned (kind of done) connection detected!" );
+		sphLogDebug ( "Orphaned (kind of done) connection detected!" );
 		return true;
 	}
 	return false;
@@ -2142,7 +2138,7 @@ void ScheduleDistrJobs ( VectorAgentConn_t &dRemotes, IRequestBuilder_t * pQuery
 	}
 
 	if ( pReporter )
-		pReporter->SetTotal ( dRemotes.GetLength () );
+		pReporter->Add ( dRemotes.GetLength () );
 
 	if ( bNeedKick )
 	{
@@ -2240,10 +2236,10 @@ bool AgentConn_t::DoQuery()
 	m_tOutput.StartNewChunk ();
 	if ( IsPersistent() && m_iSock==-1 )
 	{
-		m_tOutput.SendWord ( SEARCHD_COMMAND_PERSIST );
-		m_tOutput.SendWord ( 0 ); // dummy version
-		m_tOutput.SendInt ( 4 ); // request body length
-		m_tOutput.SendInt ( 1 ); // set persistent to 1.
+		{
+			APICommand_t dPersist ( m_tOutput, SEARCHD_COMMAND_PERSIST );
+			m_tOutput.SendInt ( 1 ); // set persistent to 1.
+		}
 		m_tOutput.StartNewChunk ();
 	}
 
@@ -2508,8 +2504,8 @@ bool AgentConn_t::CommitResult ()
 
 	Finish();
 
-	if ( !bWarnings )
-		bWarnings = m_dResults.FindFirst ( [] ( const CSphQueryResult &dRes ) { return !dRes.m_sWarning.IsEmpty(); } );
+	if ( !bWarnings && m_pResult )
+		bWarnings = m_pResult->HasWarnings ();
 
 	agent_stats_inc ( *this, bWarnings ? eNetworkCritical : eNetworkNonCritical );
 	m_bSuccess = 1;
@@ -3653,7 +3649,7 @@ private:
 		if ( g_bShutdown )
 		{
 			AbortScheduled();
-			sphInfo ( "EventTick() exit because of shutdown=%d", g_bShutdown );
+			sphLogDebugL ( "EventTick() exit because of shutdown=%d", g_bShutdown );
 			return false;
 		}
 
@@ -3769,15 +3765,16 @@ public:
 	explicit LazyNetEvents_c ( int iSizeHint )
 	{
 		events_create ( iSizeHint );
-		SphCrashLogger_c::ThreadCreate ( &m_dWorkingThread, WorkerFunc, this );
+		SphCrashLogger_c::ThreadCreate ( &m_dWorkingThread, WorkerFunc, this, false, "AgentsPoller" );
 	}
 
 	~LazyNetEvents_c ()
 	{
-		assert ( g_bShutdown );
 		sphLogDebug ( "~LazyNetEvents_c. Shutdown=%d", g_bShutdown );
 		Fire();
-		sphThreadJoin ( &m_dWorkingThread );
+		// might be crash - no need to hung waiting thread
+		if ( g_bShutdown )
+			sphThreadJoin ( &m_dWorkingThread );
 		events_destroy();
 	}
 
@@ -3921,24 +3918,25 @@ public:
 		m_tChanged.SetEvent ();
 	}
 
-	void SetTotal ( int iTasks ) final
+	void Add ( int iTasks ) final
 	{
-		m_iTasks = iTasks;
+		m_iTasks.Add ( iTasks );
+		m_bGotTasks = true;
 	}
 
 	// check that there are no works to do
 	bool IsDone () const final
 	{
-		if ( m_iTasks>=0 )
+		if ( m_bGotTasks )
 		{
 			if ( m_iFinished > m_iTasks )
-				sphWarning ("Orphaned chain detected (expected %d, got %d)", m_iTasks, (int) m_iFinished );
+				sphWarning ( "Orphaned chain detected (expected %d, got %d)", (int)m_iTasks.GetValue(), (int)m_iFinished.GetValue() );
 			return m_iFinished>=m_iTasks;
 		}
 		return false;
 	}
 
-	// block execution untill all tasks are finished
+	// block execution until all tasks are finished
 	void Finish () final
 	{
 		while (!IsDone())
@@ -3965,7 +3963,8 @@ private:
 	CSphAutoEvent	m_tChanged;			///< the signaller
 	CSphAtomic		m_iSucceeded { 0 };	//< num of tasks finished successfully
 	CSphAtomic		m_iFinished { 0 };	//< num of tasks finished.
-	volatile int	m_iTasks = -1;		//< total num of tasks
+	CSphAtomic		m_iTasks { 0 };		//< total num of tasks
+	bool			m_bGotTasks = false;
 
 };
 

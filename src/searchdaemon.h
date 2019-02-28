@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2019, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -107,6 +107,7 @@
 // declarations for correct work of code analysis
 #include "sphinxutils.h"
 #include "sphinxint.h"
+#include "sphinxrt.h"
 
 const char * sphSockError ( int =0 );
 int sphSockGetErrno ();
@@ -124,6 +125,7 @@ Invokes getaddrinfo for given host which perform name resolving (dns).
  so no potentially lengthy network host address lockup necessary
  \return ipv4 address as DWORD, to be directly used as s_addr in connect(). */
 DWORD sphGetAddress ( const char * sHost, bool bFatal=false, bool bIP=false );
+char * sphFormatIP ( char * sBuffer, int iBufferSize, DWORD uAddress );
 
 /////////////////////////////////////////////////////////////////////////////
 // MISC GLOBALS
@@ -149,6 +151,8 @@ enum SearchdCommand_e : WORD
 	SEARCHD_COMMAND_COMMIT		= 14,
 	SEARCHD_COMMAND_SUGGEST		= 15,
 	SEARCHD_COMMAND_JSON		= 16,
+	SEARCHD_COMMAND_CALLPQ 		= 17,
+	SEARCHD_COMMAND_CLUSTERPQ	= 18,
 
 	SEARCHD_COMMAND_TOTAL,
 	SEARCHD_COMMAND_WRONG = SEARCHD_COMMAND_TOTAL,
@@ -168,6 +172,8 @@ enum SearchdCommandV_e : WORD
 	VER_COMMAND_JSON		= 0x100,
 	VER_COMMAND_PING		= 0x100,
 	VER_COMMAND_UVAR		= 0x100,
+	VER_COMMAND_CALLPQ		= 0x100,
+	VER_COMMAND_CLUSTERPQ	= 0x100,
 
 	VER_COMMAND_WRONG = 0,
 };
@@ -181,15 +187,18 @@ enum ESphAddIndex
 //	ADD_CLUSTER	= 4,
 };
 
-enum class eITYPE
+enum class IndexType_e
 {
-	PLAIN,
+	PLAIN = 0,
 	TEMPLATE,
 	RT,
 	PERCOLATE,
 	DISTR,
 	ERROR_, // simple "ERROR" doesn't work on win due to '#define ERROR 0' somewhere.
 };
+
+CSphString GetTypeName ( IndexType_e eType );
+IndexType_e TypeOfIndexConfig ( const CSphString & sType );
 
 /////////////////////////////////////////////////////////////////////////////
 // SOME SHARED GLOBAL VARIABLES
@@ -251,13 +260,22 @@ public:
 	}
 
 	void		SendDocid ( SphDocID_t iValue )	{ SendUint64 ( iValue ); }
-	void		SendString ( const char * sStr );
 
-	void		SendMysqlInt ( int iVal );
-	void		SendMysqlString ( const char * sStr );
+	// send raw byte blob
 	void		SendBytes ( const void * pBuf, int iLen );	///< (was) protected to avoid network-vs-host order bugs
-	void		SendOutput ( const ISphOutputBuffer & tOut );
-	void		SwapData ( CSphVector<BYTE> & rhs ) { m_dBuf.SwapData ( rhs ); }
+	void		SendBytes ( const char * pBuf );    // used strlen() to get length
+	void		SendBytes ( const CSphString& sStr );    // used strlen() to get length
+	void		SendBytes ( const VecTraits_T<BYTE>& dBuf );
+	void		SendBytes ( const StringBuilder_c& dBuf );
+
+	// send array: first length(int), then byte blob
+	void		SendString ( const char * sStr );
+	void		SendArray ( const ISphOutputBuffer &tOut );
+	void		SendArray ( const VecTraits_T<BYTE> &dBuf, int iElems=-1 );
+	void		SendArray ( const void * pBuf, int iLen );
+	void		SendArray ( const StringBuilder_c &dBuf );
+
+	virtual void	SwapData ( CSphVector<BYTE> & rhs ) { m_dBuf.SwapData ( rhs ); }
 
 	virtual void	Flush () {}
 	virtual bool	GetError () const { return false; }
@@ -271,7 +289,7 @@ protected:
 
 	CSphVector<BYTE>	m_dBuf;
 
-	template < typename T > void WriteT ( intptr_t iOff, const T& tValue )
+	template < typename T > void WriteT ( intptr_t iOff, T tValue )
 	{
 		sphUnalignedWrite ( m_dBuf.Begin () + iOff, tValue );
 	}
@@ -280,7 +298,7 @@ private:
 	template < typename T > void	SendT ( T tValue )							///< (was) protected to avoid network-vs-host order bugs
 	{
 		intptr_t iOff = m_dBuf.GetLength();
-		m_dBuf.Resize ( iOff + sizeof(T) );
+		m_dBuf.AddN ( sizeof(T) );
 		WriteT ( iOff, tValue );
 	}
 };
@@ -291,35 +309,42 @@ private:
 class CachedOutputBuffer_c : public ISphOutputBuffer
 {
 	CSphVector<intptr_t> m_dBlobs;
+	using BASE = ISphOutputBuffer;
 
 public:
 	// start blob on create, commit on dtr.
 	class ReqLenCalc : public ISphNoncopyable
 	{
 		CachedOutputBuffer_c &m_dBuff;
+		intptr_t m_iPos;
 	public:
-		explicit ReqLenCalc ( CachedOutputBuffer_c &dBuff )
+		ReqLenCalc ( CachedOutputBuffer_c &dBuff, WORD uCommand, WORD uVer = 0 /* SEARCHD_OK */ )
 			: m_dBuff ( dBuff )
 		{
-			dBuff.StartChunk ();
+			m_dBuff.AddRef();
+			m_dBuff.SendWord ( uCommand );
+			m_dBuff.SendWord ( uVer );
+			m_iPos = m_dBuff.StartMeasureLength();
 		}
 
 		~ReqLenCalc ()
 		{
-			m_dBuff.CommitChunk ();
+			m_dBuff.CommitMeasuredLength ( m_iPos );
+			m_dBuff.Release();
 		}
 	};
 
 public:
 	void Flush() override; // just check integrity before flush
-	bool BlobsEmpty() const { return m_dBlobs.IsEmpty (); }
-
-protected:
-	void StartChunk(); // reserve int in the buf, push it's position
-	void CommitChunk(); // get last pushed int, write delta count there.
+	void SwapData ( CSphVector<BYTE> &rhs ) override { CommitAllMeasuredLengths (); BASE::SwapData (rhs); }
+	inline bool BlobsEmpty () const { return m_dBlobs.IsEmpty (); }
+public:
+	intptr_t StartMeasureLength (); // reserve int in the buf, push it's position, return cur pos.
+	void CommitMeasuredLength ( intptr_t uStoredPos=-1 ); // get last pushed int, write delta count there.
+	void CommitAllMeasuredLengths (); // finalize all nums starting from the last one.
 };
 
-using WriteLenHere_c = CachedOutputBuffer_c::ReqLenCalc;
+using APICommand_t = CachedOutputBuffer_c::ReqLenCalc;
 
 // buffer that knows if it has requested data or not
 class SmartOutputBuffer_t : public CachedOutputBuffer_c
@@ -349,15 +374,12 @@ public:
 	bool	GetError () const override { return m_bError; }
 	int		GetSentCount () const override { return m_iSent; }
 	void	SetProfiler ( CSphQueryProfile * pProfiler ) override { m_pProfile = pProfiler; }
-	const char * GetErrorMsg () const;
 
 private:
 	CSphQueryProfile *	m_pProfile = nullptr;
 	int			m_iSock;			///< my socket
 	int			m_iSent = 0;
 	bool		m_bError = false;
-	CSphString	m_sError;
-
 };
 
 
@@ -382,6 +404,7 @@ public:
 	bool			GetBytes ( void * pBuf, int iLen );
 	const BYTE *	GetBufferPtr () const { return m_pBuf; }
 	int				GetLength() const { return m_iLen; }
+	bool			GetBytesZerocopy ( const BYTE ** ppData, int iLen );
 
 	template < typename T > bool	GetDwords ( CSphVector<T> & dBuffer, int & iGot, int iMax );
 	template < typename T > bool	GetQwords ( CSphVector<T> & dBuffer, int & iGot, int iMax );
@@ -398,7 +421,7 @@ protected:
 	int				m_iLen;
 
 protected:
-	void						SetError ( bool bError ) { m_bError = bError; }
+	void			SetError ( bool bError ) { m_bError = bError; }
 	template < typename T > T	GetT ();
 };
 
@@ -420,30 +443,31 @@ template < typename T > T InputBuffer_c::GetT ()
 using MemInputBuffer_c = InputBuffer_c;
 
 /// simple network request buffer
-class NetInputBuffer_c : public InputBuffer_c
+class NetInputBuffer_c : private LazyVector_T<BYTE>, public InputBuffer_c
 {
+	using STORE = LazyVector_T<BYTE>;
 public:
 	explicit		NetInputBuffer_c ( int iSock );
-	virtual			~NetInputBuffer_c ();
 
 	bool			ReadFrom ( int iLen, int iTimeout, bool bIntr=false, bool bAppend=false );
 	bool			ReadFrom ( int iLen ) { return ReadFrom ( iLen, g_iReadTimeout ); }
 
 	bool			IsIntr () const { return m_bIntr; }
 
-protected:
-	static const int	NET_MINIBUFFER_SIZE = 4096;
+	using InputBuffer_c::GetLength;
+private:
+	static const int	NET_MINIBUFFER_SIZE = STORE::iSTATICSIZE;
 
 	int					m_iSock;
-	bool				m_bIntr;
-
-	BYTE				m_dMinibufer[NET_MINIBUFFER_SIZE];
-	int					m_iMaxibuffer;
-	BYTE *				m_pMaxibuffer;
+	bool				m_bIntr = false;
 };
 
 bool IsPortInRange ( int iPort );
 int sphSockRead ( int iSock, void * buf, int iLen, int iReadTimeout, bool bIntr );
+
+// first try to get data, and only then fall into sphSockRead (which poll socket first)
+int SockReadFast ( int iSock, void * buf, int iLen, int iReadTimeout );
+int GetOsThreadId();
 
 
 extern ThreadRole MainThread;
@@ -472,7 +496,7 @@ public:
 	static void SetTopQueryTLS ( CrashQuery_t * pQuery );
 
 	// create thread with crash logging
-	static bool ThreadCreate ( SphThread_t * pThread, void ( *pCall )(void*), void * pArg, bool bDetached=false );
+	static bool ThreadCreate ( SphThread_t * pThread, void ( *pCall )(void*), void * pArg, bool bDetached=false, const char* sName=nullptr );
 
 private:
 	struct CallArgPair_t
@@ -645,8 +669,12 @@ struct ServedDesc_t
 	bool		m_bOnDiskPools	= false;
 	int64_t		m_iMass			= 0; // relative weight (by access speed) of the index
 	mutable CSphString	m_sUnlink;
-	eITYPE		m_eType			= eITYPE::PLAIN;
-	inline bool IsMutable () const { return m_eType==eITYPE::RT || m_eType==eITYPE::PERCOLATE; }
+	IndexType_e	m_eType			= IndexType_e::PLAIN;
+	bool		m_bJson			= false;
+	CSphString	m_sCluster;
+
+	inline bool IsMutable () const { return m_eType==IndexType_e::RT || m_eType==IndexType_e::PERCOLATE; }
+	bool		IsCluster () const { return m_bJson || !m_sCluster.IsEmpty(); }
 	virtual                ~ServedDesc_t ();
 };
 
@@ -659,6 +687,7 @@ class ServedIndex_c : public ISphRefcountedMT, private ServedDesc_t, public Serv
 private:
 	friend class ServedDescRPtr_c;
 	friend class ServedDescWPtr_c;
+	friend class ServedDescPtr_c;
 
 	ServedDesc_t * ReadLock () const ACQUIRE_SHARED( m_tLock );
 	ServedDesc_t * WriteLock () const ACQUIRE( m_tLock );
@@ -745,6 +774,67 @@ public:
 
 	operator ServedDesc_t * () const
 	{ return m_pCore; }
+
+private:
+	ServedDesc_t * m_pCore = nullptr;
+	const ServedIndex_c * m_pLock = nullptr;
+};
+
+
+/// RAII exclusive writer for ServedDesc_t hidden in ServedIndex_c
+class SCOPED_CAPABILITY ServedDescPtr_c : ISphNoncopyable
+{
+public:
+	ServedDescPtr_c () = default;
+
+	// acquire write (exclusive) lock
+	ServedDescPtr_c ( const ServedIndex_c * pLock, bool bWrite ) ACQUIRE ( pLock->m_tLock )
+		: m_pLock { pLock }
+	{
+		if ( m_pLock )
+		{
+			if ( bWrite )
+				m_pCore = m_pLock->WriteLock();
+			else
+				m_pCore = m_pLock->ReadLock();
+		}
+	}
+
+	ServedDescPtr_c ( ServedDescPtr_c && tOther )
+		: m_pCore ( std::move ( tOther.m_pCore ) )
+		, m_pLock ( std::move ( tOther.m_pLock ) )
+	{
+		tOther.m_pCore = nullptr;
+		tOther.m_pLock = nullptr;
+	}
+
+	ServedDescPtr_c & operator= ( ServedDescPtr_c && tOther )
+	{
+		m_pCore = std::move ( tOther.m_pCore );
+		m_pLock = std::move ( tOther.m_pLock );
+		tOther.m_pCore = nullptr;
+		tOther.m_pLock = nullptr;
+
+		return *this;
+	}
+
+	/// unlock on going out of scope
+	~ServedDescPtr_c () RELEASE ()
+	{
+		if ( m_pLock )
+			m_pLock->Unlock ();
+	}
+
+public:
+	ServedDesc_t * operator-> () const
+	{
+		return m_pCore;
+	}
+
+	explicit operator bool () const
+	{
+		return m_pCore!=nullptr;
+	}
 
 private:
 	ServedDesc_t * m_pCore = nullptr;
@@ -995,6 +1085,11 @@ enum SqlStmt_e
 	STMT_RELOAD_INDEXES,
 	STMT_SYSFILTERS,
 	STMT_DEBUG,
+	STMT_JOIN_CLUSTER,
+	STMT_CLUSTER_CREATE,
+	STMT_CLUSTER_DELETE,
+	STMT_CLUSTER_ALTER_ADD,
+	STMT_CLUSTER_ALTER_DROP,
 
 	STMT_TOTAL
 };
@@ -1005,7 +1100,8 @@ enum SqlSet_e
 	SET_LOCAL,
 	SET_GLOBAL_UVAR,
 	SET_GLOBAL_SVAR,
-	SET_INDEX_UVAR
+	SET_INDEX_UVAR,
+	SET_CLUSTER_UVAR
 };
 
 /// refcounted vector
@@ -1024,10 +1120,6 @@ struct SqlInsert_t
 	int64_t					m_iVal = 0;
 	float					m_fVal = 0.0;
 	AttrValues_p			m_pVals;
-
-	SqlInsert_t ()
-		: m_pVals ( nullptr )
-	{}
 };
 
 /// parsing result
@@ -1040,12 +1132,14 @@ struct SqlStmt_t
 
 	// SELECT specific
 	CSphQuery				m_tQuery;
+	ISphTableFunc *			m_pTableFunc = nullptr;
 
 	CSphString				m_sTableFunc;
 	StrVec_t				m_dTableFuncArgs;
 
 	// used by INSERT, DELETE, CALL, DESC, ATTACH, ALTER, RELOAD INDEX
 	CSphString				m_sIndex;
+	CSphString				m_sCluster;
 
 	// INSERT (and CALL) specific
 	CSphVector<SqlInsert_t>	m_dInsertValues; // reused by CALL
@@ -1058,7 +1152,7 @@ struct SqlStmt_t
 	int64_t					m_iSetValue = 0;
 	CSphString				m_sSetValue;
 	CSphVector<SphAttr_t>	m_dSetValues;
-	bool					m_bSetNull = false;
+//	bool					m_bSetNull = false; // not(yet) used
 
 	// CALL specific
 	CSphString				m_sCallProc;
@@ -1082,6 +1176,7 @@ struct SqlStmt_t
 
 	// SHOW THREADS specific
 	int						m_iThreadsCols = 0;
+	CSphString				m_sThreadFormat;
 
 	// generic parameter, different meanings in different statements
 	// filter pattern in DESCRIBE, SHOW TABLES / META / VARIABLES
@@ -1097,6 +1192,8 @@ struct SqlStmt_t
 	bool					m_bLimitSet = false; // true for query with not default values
 
 	SqlStmt_t ();
+	~SqlStmt_t();
+
 	bool AddSchemaItem ( const char * psName );
 	// check if the number of fields which would be inserted is in accordance to the given schema
 	bool CheckInsertIntegrity();
@@ -1123,7 +1220,7 @@ public:
 	virtual							~ISphSearchHandler() {}
 	virtual void					RunQueries () = 0;					///< run all queries, get all results
 
-	virtual void					SetQuery ( int iQuery, const CSphQuery & tQuery ) = 0;
+	virtual void					SetQuery ( int iQuery, const CSphQuery & tQuery, ISphTableFunc * pTableFunc ) = 0;
 	virtual void					SetProfile ( CSphQueryProfile * pProfile ) = 0;
 	virtual AggrResult_t *			GetResult ( int iResult ) = 0;
 };
@@ -1210,16 +1307,19 @@ enum ESphHttpEndpoint
 	SPH_HTTP_ENDPOINT_TOTAL
 };
 
-bool CheckCommandVersion ( WORD uVer, WORD uDaemonVersion, ISphOutputBuffer & tOut );
-ISphSearchHandler * sphCreateSearchHandler ( int iQueries, const QueryParser_i * pQueryParser, QueryType_e eQueryType, bool bMaster, int iCID );
-void sphFormatFactors ( CSphVector<BYTE> & dOut, const unsigned int * pFactors, bool bJson );
-bool sphParseSqlQuery ( const char * sQuery, int iLen, CSphVector<SqlStmt_t> & dStmt, CSphString & sError, ESphCollation eCollation );
-void sphHandleMysqlInsert ( StmtErrorReporter_i & tOut, const SqlStmt_t & tStmt, bool bReplace, bool bCommit, CSphString & sWarning, CSphSessionAccum & tAcc, ESphCollation	eCollation );
-void sphHandleMysqlUpdate ( StmtErrorReporter_i & tOut, const QueryParserFactory_i & tQueryParserFactory, const SqlStmt_t & tStmt, const CSphString & sQuery, CSphString & sWarning, int iCID );
-void sphHandleMysqlDelete ( StmtErrorReporter_i & tOut, const QueryParserFactory_i & tQueryParserFactory, const SqlStmt_t & tStmt, const CSphString & sQuery, bool bCommit, CSphSessionAccum & tAcc, int iCID );
+// fwd
+struct ThdDesc_t;
 
-bool				sphLoopClientHttp ( const BYTE * pRequest, int iRequestLen, CSphVector<BYTE> & dResult, int iCID );
-bool				sphProcessHttpQueryNoResponce ( ESphHttpEndpoint eEndpoint, const CSphString & sQuery, const SmallStringHash_T<CSphString> & tOptions, int iCID, CSphVector<BYTE> & dResult );
+bool CheckCommandVersion ( WORD uVer, WORD uDaemonVersion, CachedOutputBuffer_c & tOut );
+ISphSearchHandler * sphCreateSearchHandler ( int iQueries, const QueryParser_i * pQueryParser, QueryType_e eQueryType, bool bMaster, const ThdDesc_t & tThd );
+void sphFormatFactors ( StringBuilder_c& dOut, const unsigned int * pFactors, bool bJson );
+bool sphParseSqlQuery ( const char * sQuery, int iLen, CSphVector<SqlStmt_t> & dStmt, CSphString & sError, ESphCollation eCollation );
+void sphHandleMysqlInsert ( StmtErrorReporter_i & tOut, SqlStmt_t & tStmt, bool bReplace, bool bCommit, CSphString & sWarning, CSphSessionAccum & tAcc, ESphCollation	eCollation );
+void sphHandleMysqlUpdate ( StmtErrorReporter_i & tOut, const QueryParserFactory_i & tQueryParserFactory, const SqlStmt_t & tStmt, const CSphString & sQuery, CSphString & sWarning, const ThdDesc_t & tThd );
+void sphHandleMysqlDelete ( StmtErrorReporter_i & tOut, const QueryParserFactory_i & tQueryParserFactory, const SqlStmt_t & tStmt, const CSphString & sQuery, bool bCommit, CSphSessionAccum & tAcc, const ThdDesc_t & tThd );
+
+bool				sphLoopClientHttp ( const BYTE * pRequest, int iRequestLen, CSphVector<BYTE> & dResult, const ThdDesc_t & tThd );
+bool				sphProcessHttpQueryNoResponce ( ESphHttpEndpoint eEndpoint, const char * sQuery, const SmallStringHash_T<CSphString> & tOptions, const ThdDesc_t & tThd, CSphVector<BYTE> & dResult );
 void				sphHttpErrorReply ( CSphVector<BYTE> & dData, ESphHttpStatus eCode, const char * szError );
 ESphHttpEndpoint	sphStrToHttpEndpoint ( const CSphString & sEndpoint );
 CSphString			sphHttpEndpointToStr ( ESphHttpEndpoint eEndpoint );
@@ -1230,7 +1330,27 @@ int sphGetTokTypeFloat();
 int sphGetTokTypeStr();
 int sphGetTokTypeConstMVA();
 
+
+struct PercolateOptions_t
+{
+	enum MODE
+	{
+		unknown = 0, sparsed = 1, sharded = 2
+	};
+	bool m_bGetDocs = false;
+	bool m_bVerbose = false;
+	bool m_bJsonDocs = true;
+	bool m_bGetQuery = false;
+	bool m_bSkipBadJson = false; // don't fail whole call if one doc is bad; warn instead.
+	int m_iShift = 0;
+	MODE m_eMode = unknown;
+	CSphString m_sIdAlias;
+	CSphString m_sIndex;
+};
+
+struct CPqResult; // defined in sphinxpq.h
+
 bool PercolateParseFilters ( const char * sFilters, ESphCollation eCollation, const CSphSchema & tSchema, CSphVector<CSphFilterSettings> & dFilters, CSphVector<FilterTreeItem_t> & dFilterTree, CSphString & sError );
-
-
+void PercolateMatchDocuments ( const BlobVec_t &dDocs, const PercolateOptions_t &tOpts, CSphSessionAccum &tAcc
+							   , CPqResult &tResult );
 #endif // _searchdaemon_

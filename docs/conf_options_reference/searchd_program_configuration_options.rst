@@ -451,13 +451,15 @@ but not the address, ``searchd`` will listen on all network interfaces.
 Unix path is identified by a leading slash.
 
 You can also specify a protocol handler (listener) to be used for
-connections on this socket. Supported protocol values are ‘sphinx’
-(Manticore 0.9.x API protocol) and ‘mysql41’ (MySQL protocol used since 4.1
-upto at least 5.1). More details on MySQL protocol support can be found
-in :ref:`mysql_protocol_support_and_sphinxql` section.
+connections on this socket. Supported protocol values are :
 
-Adding a “_vip" suffix to a protocol (for instance “sphinx_vip” or
-“mysql41_vip”) makes all connections to that port bypass the thread
+* ``sphinx`` - native API protocol, used for client connections but also by distributed indexes. Default protocol if none specified.
+* ``mysql41`` - MySQL protocol used since 4.1. More details on MySQL protocol support can be found in :ref:`mysql_protocol_support_and_sphinxql` section.
+* ``http`` - HTTP protocol. More details can be found in :ref:`httpapi_reference` section.
+
+
+Adding a "_vip" suffix to a protocol (for instance ``sphinx_vip`` or
+``mysql41_vip``) makes all connections to that port bypass the thread
 pool and always forcibly create a new dedicated thread. That's useful
 for managing in case of a severe overload when the daemon would either
 stall or not let you connect via a regular port.
@@ -474,14 +476,16 @@ Examples:
     listen = /var/run/sphinx.s
     listen = 9312
     listen = localhost:9306:mysql41
+	listen = 127.0.0.1:9308:http
 
 There can be multiple listen directives, ``searchd`` will listen for
-client connections on all specified ports and sockets. If no ``listen``
-directives are found then the server will listen on all available
-interfaces using the default SphinxAPI port 9312, and also on default
-SphinxQL port 9306. Both port numbers are assigned by IANA (see
+client connections on all specified ports and sockets. 
+If no ``listen`` directives are found then the server will listen on all available
+interfaces using the default SphinxAPI port **9312**, and also on default
+SphinxQL port **9306**. Both port numbers are assigned by IANA (see
 http://www.iana.org/assignments/port-numbers for details) and should
-therefore be available.
+therefore be available. For HTTP port **9308** should be considered, however please note that the port is not assigned by IANA, therefor 
+it should be checked if it's available.
 
 Unix-domain sockets are not supported on Windows.
 
@@ -589,7 +593,8 @@ until there are free worker threads. The queries will only start failing
 with a temporary. Thus, in thread_pool mode it makes little sense to
 raise max_children much higher than the amount of CPU cores. Usually
 that will only hurt CPU contention and *decrease* the general
-throughput.
+throughput. The threads are created at startup to initialized the thread pool, 
+using extreme high values can lead to a slow daemon startup.
 
 Example:
 
@@ -1062,11 +1067,11 @@ incoming queries at some point with a “maxed out” message.
 read_buffer
 ~~~~~~~~~~~
 
-Per-keyword read buffer size. Optional, default is 256K.
+Per-keyword read buffer size. Optional, default is 256K. Deprecated. Unused.
 
-For every keyword occurrence in every search query, there are two
+In past, for every keyword occurrence in every search query, there were two
 associated read buffers (one for document list and one for hit list).
-This setting lets you control their sizes, increasing per-query RAM use,
+This setting let you control their sizes, increasing per-query RAM use,
 but possibly decreasing IO time.
 
 Example:
@@ -1076,6 +1081,13 @@ Example:
 
 
     read_buffer = 1M
+
+NOTE: At this moment instead of reading files with document and hit lists we map them into address space and then just
+directly access the content. It eliminates explicit calls for 'seek' and 'read' operations, which may need to switch from
+userspace to kernel, and also eliminates redundand copying of buffers (when we call 'read', system fills a read buffer
+internally, then our read routine copy that blob into own internal buffer, and finally it settles into operative buffer
+used directly for computations. With mapping the file we just copy once from mapped area to operative buffer).
+Such approach made the param deprecated; it is no more used, but kept for a while to avoid breaking existing configs.
 
 .. _read_timeout:
 
@@ -1099,14 +1111,14 @@ Example:
 read_unhinted
 ~~~~~~~~~~~~~
 
-Unhinted read size. Optional, default is 32K.
+Unhinted read size. Optional, default is 32K. Deprecated. Unused.
 
-When querying, some reads know in advance exactly how much data is there
+In past, when querying, some reads knew in advance exactly how much data is there
 to be read, but some currently do not. Most prominently, hit list size
-in not currently known in advance. This setting lest you control how
-much data to read in such cases. It will impact hit list IO time,
+in not currently known in advance. This setting let you control how
+much data to read in such cases. It impacted hit list IO time,
 reducing it for lists larger than unhinted read size, but raising it for
-smaller lists. It will **not** affect RAM use because read buffer
+smaller lists. It **not** affected RAM use because read buffer
 will be already allocated. So it should be not greater than
 read_buffer.
 
@@ -1117,6 +1129,14 @@ Example:
 
 
     read_unhinted = 32K
+
+
+NOTE: At this moment instead of reading files with document and hit lists we map them into address space and then just
+directly access the content. It eliminates explicit calls for 'seek' and 'read' operations, which may need to switch from
+userspace to kernel, and also eliminates redundand copying of buffers (when we call 'read', system fills a read buffer
+internally, then our read routine copy that blob into own internal buffer, and finally it settles into operative buffer
+used directly for computations. With mapping the file we just copy once from mapped area to operative buffer).
+Such approach made the param deprecated; it is no more used, but kept for a while to avoid breaking existing configs.
 
 .. _rt_flush_period:
 

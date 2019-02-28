@@ -112,7 +112,8 @@ WHERE
    
 This clause will map both to fulltext query and
 filters. Comparison operators (=, !=, <, >, <=, >=), IN, AND, OR, NOT,
-and BETWEEN are all supported and map directly to filters. MATCH(‘query’) is supported
+BETWEEN and :ref:`REGEX <expr-func-regex>`
+are all supported and map directly to filters. MATCH(‘query’) is supported
 and maps to fulltext query. Query will be interpreted according to
 :ref:`full-text query language rules <extended_query_syntax>`.
 There must be at most one MATCH() in the clause.
@@ -596,4 +597,4 @@ Subselects currently have 2 usage cases:
         ORDER by some_attr LIMIT 50000;
 
    In this case, the nodes receive only the inner query and execute. This means the master will receive only *20x10K=200K records*. The master will take all the records received, reorder them by the OUTER clause and return the best 50K records. The  subselect help reducing the traffic between the master and the nodes and also reduce the master's computation time (as it process only 200K instead of 1M).
-   
+

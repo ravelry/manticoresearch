@@ -15,10 +15,10 @@ set ( LIBSPHINX_SRCS sphinx.cpp sphinxexcerpt.cpp
 		sphinxsearch.cpp sphinxrt.cpp sphinxjson.cpp
 		sphinxaot.cpp sphinxplugin.cpp sphinxudf.c
 		sphinxqcache.cpp sphinxrlp.cpp sphinxjsonquery.cpp
-		json/cJSON.c )
+		json/cJSON.c sphinxpq.cpp )
 set ( INDEXER_SRCS indexer.cpp )
 set ( INDEXTOOL_SRCS indextool.cpp )
-set ( SEARCHD_SRCS_TESTABLE searchdha.cpp http/http_parser.c searchdhttp.cpp )
+set ( SEARCHD_SRCS_TESTABLE searchdha.cpp http/http_parser.c searchdhttp.cpp searchdreplication.cpp replication/wsrep_loader.cpp replication/wsrep_dummy.cpp replication/wsrep_uuid.cpp replication/wsrep_gtid.cpp )
 set ( SEARCHD_SRCS searchd.cpp ${SEARCHD_SRCS_TESTABLE} )
 set ( SPELLDUMP_SRCS spelldump.cpp )
 set ( TESTS_SRCS tests.cpp )
@@ -31,12 +31,23 @@ set ( SEARCHD_FLEX sphinxql.l )
 # The headers is not neccessary for executable build, but nesessary for MSVC and other projects
 # all the (non-generated) headers
 file ( GLOB HEADERS "sphinx*.h" lz4.h lz4hc.h http/http_parser.h )
-file ( GLOB SEARCHD_H "searchd*.h" )
+file ( GLOB SEARCHD_H "searchd*.h" replication/wsrep_api.h )
 
 file ( GLOB GHEADERS "yysphinx*.h" )
 source_group ( "Generated Header Files" FILES ${GHEADERS} )
 source_group ( "Grammar sources" FILES ${LIBSPHINX_BISON} ${SEARCHD_BISON} )
 source_group ( "Lexer sources" FILES ${LIBSPHINX_FLEX} ${SEARCHD_FLEX} )
+
+include ( genheader )
+
+# compile globalaliases.h
+set ( CHARSET_FILTER "charsets/*.txt" )
+set ( CHARSET_TEMPLATE "charsets/globalaliases.h.in" )
+hsnippetfolder ( "${CHARSET_FILTER}" "${CHARSET_TEMPLATE}" )
+
+# populate charset files for IDE
+file ( GLOB CHARSET_FILES "${CHARSET_FILTER}" )
+source_group ( "Charset sources" FILES ${CHARSET_FILES} ${CHARSET_TEMPLATE} )
 
 add_custom_target (
 		vergen
@@ -134,7 +145,11 @@ add_custom_target (
 add_dependencies ( tarball vergen )
 
 # our mega-lib
-add_library ( libsphinx STATIC ${LIBSPHINX_SRCS} ${HEADERS} ${GHEADERS} ${LIBSPHINX_BISON} ${LIBSPHINX_FLEX} )
+if ( WIN32 )
+	add_library ( libsphinx STATIC ${LIBSPHINX_SRCS} ${HEADERS} ${GHEADERS} ${LIBSPHINX_BISON} ${LIBSPHINX_FLEX} ${CHARSET_FILES} ${CHARSET_TEMPLATE} "../misc/manticore.natvis" )
+else ()
+	add_library ( libsphinx STATIC ${LIBSPHINX_SRCS} ${HEADERS} ${GHEADERS} ${LIBSPHINX_BISON} ${LIBSPHINX_FLEX} ${CHARSET_FILES} ${CHARSET_TEMPLATE} )
+endif()
 add_dependencies ( libsphinx vergen )
 
 # our executables
@@ -146,12 +161,16 @@ add_executable ( wordbreaker ${WORDBREAKER_SRCS} )
 add_dependencies ( wordbreaker vergen )
 target_link_libraries ( indexer libsphinx ${EXTRA_LIBRARIES} )
 target_link_libraries ( indextool libsphinx ${EXTRA_LIBRARIES} )
-target_link_libraries ( searchd libsphinx ${EXTRA_LIBRARIES} )
+target_link_libraries ( searchd libsphinx ${EXTRA_LIBRARIES} ${EXTRA_SEARCHD_LIBRARIES} )
 target_link_libraries ( spelldump libsphinx ${EXTRA_LIBRARIES} )
-target_link_libraries ( wordbreaker ${EXTRA_LIBRARIES} )
+target_link_libraries ( wordbreaker libsphinx ${EXTRA_LIBRARIES} )
+
+SET_RPATH ( searchd )
+
+include ( helpers )
+
 
 if ( SPLIT_SYMBOLS )
-	include ( helpers )
 	install_dbg ( indexer )
 	install_dbg ( indextool )
 	install_dbg ( searchd )
@@ -169,7 +188,8 @@ if ( NOT DISABLE_TESTING )
 		include ( GetGoogletest )
 		if ( HAVE_GOOGLETEST )
 			set ( GTESTS_SRC ${SEARCHD_SRCS_TESTABLE} gtests_rtstuff.cpp gtests_tokenizer.cpp gtests_text.cpp
-					gtests_functions.cpp gtests_globalstate.cpp gtests_searchd.cpp gtests_filter.cpp gtests_searchdaemon.cpp )
+					gtests_functions.cpp gtests_globalstate.cpp gtests_searchd.cpp gtests_filter.cpp gtests_searchdaemon.cpp
+					gtests_pqstuff.cpp gtests_json.cpp json/cJSON_test.c )
 			add_executable ( gmanticoretest ${GTESTS_SRC} )
 			target_link_libraries ( gmanticoretest gmock_main libsphinx ${EXTRA_LIBRARIES} )
 			if ( CMAKE_VERSION VERSION_LESS 3.9.0 )# freshest cmake able to discover google-tests
@@ -194,15 +214,58 @@ if ( NOT DISABLE_TESTING )
 	if ( SPLIT_SYMBOLS )
 		install_dbg ( tests )
 	endif()
-    # testrt is win-only project
-	if ( WIN32 )
-		add_executable ( testrt testrt.cpp )
-		target_link_libraries ( testrt libsphinx ${EXTRA_LIBRARIES} )
-		add_test ( NAME "\"Internal rt src/tests\""
-			#	    	CONFIGURATIONS Debug
-				WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-				COMMAND "testrt" )
-	endif ( WIN32 )
+
+	# compile rtestconfig.h
+	hsnippet ( rtestconfig testrt.conf "static" )
+
+	set (DATAFLD "${MANTICORE_BINARY_DIR}/test/data")
+	file ( MAKE_DIRECTORY ${DATAFLD} )
+	add_definitions ( -DDATAFLD="${DATAFLD}/" )
+	source_group ( "Testing config" FILES testrt.conf.in )
+	add_executable ( testrt testrt.cpp testrt.conf )
+	target_link_libraries ( testrt libsphinx ${EXTRA_LIBRARIES} )
+
+	# testrt is alive, however it needs database 'lj' accessible
+	# in order to work. So, avoid it's calling till the base is persist
+	# in out CI env
+	if (0)
+
+	add_test ( NAME "\"Remove dump index\""
+			COMMAND ${CMAKE_COMMAND} -E remove "${DATAFLD}/dump.*" )
+	SET_TESTS_PROPERTIES ( "\"Remove dump index\"" PROPERTIES FIXTURES_SETUP TESTRT )
+
+	add_test ( NAME "\"Internal rt src/testrt\""
+			WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+			COMMAND testrt )
+	SET_TESTS_PROPERTIES ( "\"Internal rt src/testrt\"" PROPERTIES FIXTURES_REQUIRED TESTRT )
+	SET_TESTS_PROPERTIES ( "\"Internal rt src/testrt\"" PROPERTIES RESOURCE_LOCK DbAccess )
+
+	add_test ( NAME "\"Internal rt src/testrt step 1000\""
+			WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+			COMMAND testrt 1000 )
+	SET_TESTS_PROPERTIES ( "\"Internal rt src/testrt step 1000\"" PROPERTIES FIXTURES_REQUIRED TESTRT )
+	SET_TESTS_PROPERTIES ( "\"Internal rt src/testrt step 1000\"" PROPERTIES RESOURCE_LOCK DbAccess )
+
+	add_test ( NAME "\"Internal rt src/testrt step 100\""
+			WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+			COMMAND testrt 100 )
+	SET_TESTS_PROPERTIES ( "\"Internal rt src/testrt step 100\"" PROPERTIES FIXTURES_REQUIRED TESTRT )
+	SET_TESTS_PROPERTIES ( "\"Internal rt src/testrt step 1000\"" PROPERTIES RESOURCE_LOCK DbAccess )
+
+	add_test ( NAME "\"Internal rt src/testrt step 10\""
+			WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+			COMMAND testrt 10 )
+	SET_TESTS_PROPERTIES ( "\"Internal rt src/testrt step 10\"" PROPERTIES FIXTURES_REQUIRED TESTRT )
+	SET_TESTS_PROPERTIES ( "\"Internal rt src/testrt step 1000\"" PROPERTIES RESOURCE_LOCK DbAccess )
+
+	add_test ( NAME "\"Internal rt src/testrt step 1\""
+			WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+			COMMAND testrt 1 )
+	SET_TESTS_PROPERTIES ( "\"Internal rt src/testrt step 1\"" PROPERTIES FIXTURES_REQUIRED TESTRT )
+	SET_TESTS_PROPERTIES ( "\"Internal rt src/testrt step 1000\"" PROPERTIES RESOURCE_LOCK DbAccess )
+
+	endif(0)
+
 	# first check syntax
 	find_package ( PythonInterp QUIET )
 	if ( PYTHONINTERP_FOUND )

@@ -30,6 +30,7 @@ if ( !is_array($args) || empty($args) )
 	print ( "g, gen\t\t\tgenerate reference ('model') test results\n" );
 	print ( "t, test\t\t\trun tests and compare results to reference\n" );
 	print ( "qt\t\t\tsame as test, but skips user-configured slow tests\n" );
+	print ( "show\t\tdisplay internal blocks after all settings applied\n" );
 	print ( "\nOptions are:\n" );
 	print ( "-u, --user <USER>\tuse 'USER' as MySQL user\n" );
 	print ( "-p, --password <PASS>\tuse 'PASS' as MySQL password\n" );
@@ -60,6 +61,8 @@ if ( !is_array($args) || empty($args) )
 	print ( "php ubertest.php t --user test --password test\n" );
 	print ( "php ubertest.php t test_015\n" );
 	print ( "php ubertest.php t 31 37 41 53-64\n" );
+	print ( "php ubertest.php show sql_settings\n" );
+	print ( "php ubertest.php show searchd_settings\n" );
 	print ( "DBPASS=test make check\n" );
 	exit ( 0 );
 }
@@ -81,6 +84,8 @@ $test_dirs = array();
 $test_range = array();
 $user_skip = false;
 $force_guess = true;
+$show = false;
+$showpar = array();
 
 for ( $i=0; $i<count($args); $i++ )
 {
@@ -90,6 +95,7 @@ for ( $i=0; $i<count($args); $i++ )
 	else if ( $arg=="g" || $arg=="gen" )			{ $g_model = true; $run = true; }
 	else if ( $arg=="t" || $arg=="test" )			{ $g_model = false; $run = true; }
 	else if ( $arg=="qt" )							{ $g_model = false; $run = true; $user_skip = true; }
+	else if ( $arg=="show" )						{ $run = false; $show = true; }
 	else if ( $arg=="--managed" )					$sd_managed_searchd = true;
 	else if ( $arg=="--skip-indexer")				$sd_skip_indexer = true;
 	else if ( $arg=="-u" || $arg=="--user" )		$locals['db-user'] = $args[++$i];
@@ -128,13 +134,16 @@ for ( $i=0; $i<count($args); $i++ )
 	{
 		$test_dirs[] = sprintf("test_%03d", $arg);
 
+	} else if ( $show )
+	{
+		$showpar[] = $arg;
 	} else
 	{
 		print ( "ERROR: unknown option '$arg'; run with no arguments for help screen.\n" );
 		exit ( 1 );
 	}
 }
-if ( !$run )
+if ( !$run && !$show )
 {
 	print ( "ERROR: no run mode defined; run with no arguments for help screen.\n" );
 	exit ( 1 );
@@ -150,6 +159,16 @@ $sd_log				= testdir("searchd.log");
 $sd_query_log		= testdir("query.log");
 $sd_pid_file		= testdir("searchd.pid");
 
+require_once ( "helpers.inc" );
+
+if ( $show )
+{
+	$config = new SphinxConfig ( $g_locals );
+	foreach ( $showpar as $nodename )
+		$config->show_settings ($nodename);
+	exit (0);
+}
+
 global $g_guesscached;
 
 if ( $force_guess )
@@ -161,6 +180,7 @@ if ( !$g_guesscached ) {
 	GuessRE2();
 	GuessRLP();
 	GuessODBC();
+	GuessReplication();
 	if ( !$force_guess )
 		CacheGuesses();
 }
@@ -173,8 +193,6 @@ if ( $g_locals["malloc-scribble"] )
 	putenv ( "MallocPreScribble=1" );
 	putenv ( "MallocGuardEdges=1" );
 }
-
-require_once ( "helpers.inc" );
 
 /////////////
 // run tests
@@ -296,7 +314,7 @@ foreach ( $tests as $test )
 	}
 	elseif ( file_exists ( $test."/test.inc" ) )
 	{
-		$run_func = create_function ( '$test_path', file_get_contents ( $test."/test.inc" ) );
+		$run_func = function ( $test_path ) use ($test) { return file_get_contents ( $test."/test.inc" ); };
 
 		$total_tests++;
 		$total_subtests++;

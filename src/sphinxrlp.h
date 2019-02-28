@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2018, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2019, Manticore Software LTD (http://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -14,6 +14,7 @@
 #define _sphinxrlp_
 
 #include "sphinxstd.h"
+#include "sphinxutils.h"
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -335,7 +336,7 @@ private:
 
 	void AddNumber ( BYTE * & pPtr, int iNumber )
 	{
-		sphUItoA ( ( char ** ) &pPtr, iNumber );
+		pPtr += sph::ItoA ( (char*&) pPtr, iNumber );
 	}
 
 	int ReadNumber ( BYTE * & pPtr, BYTE * const pEndPtr ) // expect to read ' ', uint num, ' ' from utf8 buffer

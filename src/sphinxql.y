@@ -41,6 +41,7 @@
 %token	TOK_CALL
 %token	TOK_CHARACTER
 %token	TOK_CHUNK
+%token	TOK_CLUSTER
 %token  TOK_COLLATE
 %token	TOK_COLLATION
 %token	TOK_COLUMN
@@ -81,6 +82,7 @@
 %token	TOK_INTO
 %token	TOK_IS
 %token	TOK_ISOLATION
+%token	TOK_JOIN
 %token	TOK_JSON
 %token	TOK_LEVEL
 %token	TOK_LIKE
@@ -105,6 +107,7 @@
 %token	TOK_RAND
 %token	TOK_RAMCHUNK
 %token	TOK_READ
+%token	TOK_REGEX
 %token	TOK_RECONFIGURE
 %token	TOK_RELOAD
 %token	TOK_REPEATABLE
@@ -231,6 +234,9 @@ statement:
 	| flush_logs
 	| sysfilters
 	| debug_clause
+	| join_cluster
+	| create_cluster
+	| delete_cluster
 	;
 
 //////////////////////////////////////////////////////////////////////////
@@ -248,7 +254,7 @@ ident_set:
 	TOK_IDENT
 	| TOK_ADD | TOK_AGENT | TOK_ALL | TOK_ALTER | TOK_ANY | TOK_ASC | TOK_ATTACH | TOK_ATTRIBUTES
 	| TOK_AVG | TOK_BEGIN | TOK_BETWEEN | TOK_BIGINT | TOK_BOOL| TOK_CALL
-	| TOK_CHARACTER | TOK_CHUNK | TOK_COLLATION | TOK_COLUMN | TOK_COMMIT
+	| TOK_CHARACTER | TOK_CHUNK | TOK_CLUSTER | TOK_COLLATION | TOK_COLUMN | TOK_COMMIT
 	| TOK_COMMITTED | TOK_COUNT | TOK_CREATE | TOK_DATABASES | TOK_DELETE
 	| TOK_DESC | TOK_DESCRIBE  | TOK_DISTINCT  | TOK_DOUBLE | TOK_DROP
 	| TOK_FLOAT | TOK_FLUSH | TOK_FOR| TOK_FUNCTION | TOK_GLOBAL | TOK_GROUP
@@ -476,12 +482,32 @@ filter_item:
 		}
 	| expr_ident TOK_IN '(' string_list ')'
 		{
-			if ( !pParser->AddStringListFilter ( $1, $4, false ) )
+			if ( !pParser->AddStringListFilter ( $1, $4, STRLIST::IN_ ) )
 				YYERROR;
 		}
 	| expr_ident TOK_NOT TOK_IN '(' string_list ')'
 		{
-			if ( !pParser->AddStringListFilter ( $1, $5, true ) )
+			if ( !pParser->AddStringListFilter ( $1, $5, STRLIST::IN_, true ) )
+				YYERROR;
+		}
+	| expr_ident TOK_ANY '(' string_list ')'
+		{
+			if ( !pParser->AddStringListFilter ( $1, $4, STRLIST::ANY ) )
+				YYERROR;
+		}
+	| expr_ident TOK_NOT TOK_ANY '(' string_list ')'
+    	{
+    		if ( !pParser->AddStringListFilter ( $1, $5, STRLIST::ANY, true ) )
+    			YYERROR;
+    	}
+	| expr_ident TOK_ALL '(' string_list ')'
+		{
+			if ( !pParser->AddStringListFilter ( $1, $4, STRLIST::ALL ) )
+				YYERROR;
+		}
+	| expr_ident TOK_NOT TOK_ALL '(' string_list ')'
+		{
+			if ( !pParser->AddStringListFilter ( $1, $5, STRLIST::ALL, true ) )
 				YYERROR;
 		}
 	| expr_ident TOK_IN TOK_USERVAR
@@ -667,6 +693,13 @@ filter_item:
 	| mva_aggr TOK_GTE const_int
 		{
 			AddMvaRange ( pParser, $1, $3.m_iValue, INT64_MAX );
+		}
+	| TOK_REGEX '(' json_field ',' TOK_QUOTED_STRING ')'
+		{
+			TRACK_BOUNDS ( $$, $1, $6 );
+			CSphFilterSettings * pFilter = pParser->AddFilter ( $$, SPH_FILTER_EXPRESSION );
+			if ( !pFilter )
+				YYERROR;
 		}
 	;
 
@@ -972,6 +1005,7 @@ function:
 	| TOK_REMAP '(' expr ',' expr ',' '(' arglist ')' ',' '(' arglist ')' ')' { TRACK_BOUNDS ( $$, $1, $14 ); }
 	| TOK_RAND '(' ')'				{ TRACK_BOUNDS ( $$, $1, $3 ); }
 	| TOK_RAND '(' arglist ')'		{ TRACK_BOUNDS ( $$, $1, $4 ); }
+	| TOK_REGEX '(' arglist ')'		{ TRACK_BOUNDS ( $$, $1, $4 ); }
 	;
 	
 arglist:
@@ -1086,7 +1120,7 @@ set_stmt:
 	| TOK_SET ident_set '=' TOK_NULL
 		{
 			pParser->SetStatement ( $2, SET_LOCAL );
-			pParser->m_pStmt->m_bSetNull = true;
+//			pParser->m_pStmt->m_bSetNull = true;
 		}
 	| TOK_SET TOK_NAMES set_value		{ pParser->m_pStmt->m_eStmt = STMT_DUMMY; }
 	| TOK_SET TOK_NAMES set_value TOK_COLLATE set_value { pParser->m_pStmt->m_eStmt = STMT_DUMMY; }
@@ -1115,6 +1149,12 @@ set_global_stmt:
 			pParser->SetStatement ( $5, SET_INDEX_UVAR );
 			pParser->m_pStmt->m_dSetValues = *$8.m_pValues;
 			pParser->ToString ( pParser->m_pStmt->m_sIndex, $3 );
+		}
+	| TOK_SET TOK_CLUSTER ident TOK_GLOBAL set_string_value
+		{
+			pParser->SetStatement ( $5, SET_CLUSTER_UVAR );
+			pParser->ToString ( pParser->m_pStmt->m_sIndex, $3 );
+			pParser->ToString ( pParser->m_pStmt->m_sSetValue, $5 ).Unquote();
 		}
 	;
 
@@ -1170,7 +1210,7 @@ insert_into:
 	insert_or_replace TOK_INTO ident opt_column_list TOK_VALUES insert_rows_list opt_insert_options
 		{
 			// everything else is pushed directly into parser within the rules
-			pParser->ToString ( pParser->m_pStmt->m_sIndex, $3 );
+			pParser->SetIndex ( $3 );
 		}
 	;
 
@@ -1320,12 +1360,19 @@ call_opt_name:
 //////////////////////////////////////////////////////////////////////////
 
 describe:
-	describe_tok ident like_filter
+	describe_tok ident describe_opt like_filter
 		{
 			pParser->m_pStmt->m_eStmt = STMT_DESCRIBE;
 			pParser->ToString ( pParser->m_pStmt->m_sIndex, $2 );
 		}
 	;
+
+describe_opt:
+	// empty
+	| TOK_TABLE
+		{
+			pParser->m_pStmt->m_iIntParam = 42; // just a flag that 'TOK_TABLE' is in use
+		}
 
 describe_tok:
 	TOK_DESCRIBE
@@ -1444,6 +1491,20 @@ alter:
 			SqlStmt_t & tStmt = *pParser->m_pStmt;
 			tStmt.m_eStmt = STMT_ALTER_RECONFIGURE;
 			pParser->ToString ( tStmt.m_sIndex, $3 );
+		}
+	| TOK_ALTER TOK_CLUSTER ident TOK_ADD ident
+		{
+			SqlStmt_t & tStmt = *pParser->m_pStmt;
+			tStmt.m_eStmt = STMT_CLUSTER_ALTER_ADD;
+			pParser->ToString ( tStmt.m_sCluster, $3 );
+			pParser->ToString ( tStmt.m_sIndex, $5 );
+		}
+	| TOK_ALTER TOK_CLUSTER ident TOK_DROP ident
+		{
+			SqlStmt_t & tStmt = *pParser->m_pStmt;
+			tStmt.m_eStmt = STMT_CLUSTER_ALTER_DROP;
+			pParser->ToString ( tStmt.m_sCluster, $3 );
+			pParser->ToString ( tStmt.m_sIndex, $5 );
 		}
 	;
 
@@ -1644,7 +1705,7 @@ truncate:
 		{
 			SqlStmt_t & tStmt = *pParser->m_pStmt;
 			tStmt.m_eStmt = STMT_TRUNCATE_RTINDEX;
-			pParser->ToString ( tStmt.m_sIndex, $3 );
+			pParser->SetIndex ( $3 );
 		}
 	;
 
@@ -1829,6 +1890,39 @@ opt_par:
 			pParser->ToString ( pParser->m_pStmt->m_sIndex, $1 );
 			pParser->m_pStmt->m_iIntParam = $2.m_iValue;
 		}
+
+join_cluster:
+	TOK_JOIN TOK_CLUSTER ident cluster_opts_list
+		{
+			SqlStmt_t & tStmt = *pParser->m_pStmt;
+			tStmt.m_eStmt = STMT_JOIN_CLUSTER;
+			pParser->ToString ( tStmt.m_sIndex, $3 );
+		}
+	;
+
+cluster_opts_list:
+	// empty
+	| call_opts_list
+	;
+
+create_cluster:
+	TOK_CREATE TOK_CLUSTER ident cluster_opts_list
+		{
+			SqlStmt_t & tStmt = *pParser->m_pStmt;
+			tStmt.m_eStmt = STMT_CLUSTER_CREATE;
+			pParser->ToString ( tStmt.m_sIndex, $3 );
+		}
+	;
+
+delete_cluster:
+	TOK_DELETE TOK_CLUSTER ident
+		{
+			SqlStmt_t & tStmt = *pParser->m_pStmt;
+			tStmt.m_eStmt = STMT_CLUSTER_DELETE;
+			pParser->ToString ( tStmt.m_sIndex, $3 );
+		}
+	;
+
 %%
 
 #if USE_WINDOWS
