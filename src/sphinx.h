@@ -3031,7 +3031,7 @@ struct CSphMatchComparatorState
 		return m_fnStrCmp ( aa, bb, eStrSource, 0, 0 );
 	}
 
-	void FixupLocators ( const ISphSchema * pOldSchema, const ISphSchema * pNewSchema );
+	void FixupLocators ( const ISphSchema * pOldSchema, const ISphSchema * pNewSchema, bool bRemapKeyparts );
 };
 
 
@@ -3090,7 +3090,7 @@ public:
 	virtual void		SetStringPool ( const BYTE * ) {}
 
 	/// set sorter schema
-	virtual void		SetSchema ( ISphSchema * pSchema );
+	virtual void		SetSchema ( ISphSchema * pSchema, bool bRemapCmp );
 
 	/// get incoming schema
 	virtual const ISphSchema * GetSchema () const { return m_pSchema; }
@@ -3504,8 +3504,8 @@ ISphMatchSorter *	sphCreateQueue ( SphQueueSettings_t & tQueue );
 /// convert queue to sorted array, and add its entries to result's matches array
 int					sphFlattenQueue ( ISphMatchSorter * pQueue, CSphQueryResult * pResult, int iTag );
 
-/// setup per-keyword read buffer sizes (deprecated, not used)
-//void				sphSetReadBuffers ( int iReadBuffer, int iReadUnhinted ) {}
+/// setup per-keyword read buffer sizes
+void				sphSetReadBuffers ( int iReadBuffer, int iReadUnhinted );
 
 /// check query for expressions
 bool				sphHasExpressions ( const CSphQuery & tQuery, const CSphSchema & tSchema );

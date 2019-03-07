@@ -468,12 +468,6 @@ static CSphAtomic							g_iPersistentInUse;
 
 static ServiceThread_t						g_tPrereadThread;
 
-/// master-agent API protocol extensions version
-enum
-{
-	VER_MASTER = 17
-};
-
 
 /// command names
 static const char * g_dApiCommands[] =
@@ -3361,7 +3355,7 @@ void SearchRequestBuilder_t::BuildRequest ( const AgentConn_t & tAgent, CachedOu
 {
 	APICommand_t tWr { tOut, SEARCHD_COMMAND_SEARCH, VER_COMMAND_SEARCH }; // API header
 
-	tOut.SendInt ( VER_MASTER );
+	tOut.SendInt ( VER_COMMAND_SEARCH_MASTER );
 	tOut.SendInt ( m_iEnd-m_iStart+1 );
 	for ( int i=m_iStart; i<=m_iEnd; ++i )
 		SendQuery ( tAgent.m_tDesc.m_sIndexes.cstr (), tOut, m_dQueries[i], tAgent.m_iWeight, tAgent.m_iMyQueryTimeout );
@@ -8132,7 +8126,7 @@ void HandleCommandSearch ( CachedOutputBuffer_c & tOut, WORD uVer, InputBuffer_c
 	}
 
 	int iMasterVer = tReq.GetInt();
-	if ( iMasterVer<0 || iMasterVer>VER_MASTER )
+	if ( iMasterVer<0 || iMasterVer>VER_COMMAND_SEARCH_MASTER )
 	{
 		SendErrorReply ( tOut, "master-agent version mismatch; update me first, then update master!" );
 		return;
@@ -16334,25 +16328,30 @@ void HandleMysqlAttach ( SqlRowBuffer_c & tOut, const SqlStmt_t & tStmt )
 	auto pServedFrom = GetServed ( sFrom );
 	auto pServedTo = GetServed ( sTo );
 
-	ServedDescWPtr_c pFrom ( pServedFrom ); // write-lock
-	ServedDescWPtr_c pTo ( pServedTo ) ; // write-lock
-
-	if ( !pFrom
-		|| !pTo
-		|| pFrom->m_eType!=IndexType_e::PLAIN
-		|| pTo->m_eType!=IndexType_e::RT )
+	// need just read lock for initial checks and prevent deadlock of attaching index to itself
 	{
-		if ( !pFrom )
-			tOut.ErrorEx ( MYSQL_ERR_PARSE_ERROR, "no such index '%s'", sFrom.cstr() );
-		else if ( !pTo )
-			tOut.ErrorEx ( MYSQL_ERR_PARSE_ERROR, "no such index '%s'", sTo.cstr() );
-		else if ( pFrom->m_eType!=IndexType_e::PLAIN )
-			tOut.Error ( tStmt.m_sStmt, "1st argument to ATTACH must be a plain index" );
-		else if ( pTo->m_eType!=IndexType_e::RT )
-			tOut.Error ( tStmt.m_sStmt, "2nd argument to ATTACH must be a RT index" );
-		return;
+		ServedDescRPtr_c pFrom ( pServedFrom );
+		ServedDescRPtr_c pTo ( pServedTo ) ;
+
+		if ( !pFrom
+			|| !pTo
+			|| pFrom->m_eType!=IndexType_e::PLAIN
+			|| pTo->m_eType!=IndexType_e::RT )
+		{
+			if ( !pFrom )
+				tOut.ErrorEx ( MYSQL_ERR_PARSE_ERROR, "no such index '%s'", sFrom.cstr() );
+			else if ( !pTo )
+				tOut.ErrorEx ( MYSQL_ERR_PARSE_ERROR, "no such index '%s'", sTo.cstr() );
+			else if ( pFrom->m_eType!=IndexType_e::PLAIN )
+				tOut.Error ( tStmt.m_sStmt, "1st argument to ATTACH must be a plain index" );
+			else if ( pTo->m_eType!=IndexType_e::RT )
+				tOut.Error ( tStmt.m_sStmt, "2nd argument to ATTACH must be a RT index" );
+			return;
+		}
 	}
 
+	ServedDescWPtr_c pFrom ( pServedFrom ); // write-lock
+	ServedDescWPtr_c pTo ( pServedTo ) ; // write-lock
 
 	auto * pRtTo = ( ISphRtIndex * ) pTo->m_pIndex;
 
@@ -23474,10 +23473,12 @@ void ConfigureSearchd ( const CSphConfig & hConf, bool bOptPIDFile )
 		"\x08\x82" // server capabilities low WORD; CLIENT_PROTOCOL_41 | CLIENT_CONNECT_WITH_DB | CLIENT_SECURE_CONNECTION
 		"\x21" // server language; let it be ut8_general_ci to make different clients happy
 		"\x02\x00" // server status
-		"\x00\x00" // server capabilities hi WORD; no CLIENT_PLUGIN_AUTH
-		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" // filler
+		"\x08\x00" // server capabilities hi WORD; CLIENT_PLUGIN_AUTH
+		"\x15\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" // salts length + 10 char filler
 		"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c" // salt2 (for auth, 4.1+)
-  		"\x00"; // filler
+		"\x00"
+		"\x6d\x79\x73\x71\x6c\x5f\x6e\x61\x74\x69\x76\x65\x5f\x70\x61\x73\x73\x77\x6f\x72\x64" // auth plugin name: mysql_native_password
+		"\x00";
 
 	g_sMySQLVersion = hSearchd.GetStr ( "mysql_version_string", SPHINX_VERSION );
 	int iLen = g_sMySQLVersion.Length();
@@ -24361,7 +24362,7 @@ int WINAPI ServiceMain ( int argc, char **argv ) REQUIRES (!MainThread)
 		MySetServiceStatus ( SERVICE_RUNNING, NO_ERROR, 0 );
 #endif
 
-//	sphSetReadBuffers ( hSearchd.GetSize ( "read_buffer", 0 ), hSearchd.GetSize ( "read_unhinted", 0 ) );
+	sphSetReadBuffers ( hSearchd.GetSize ( "read_buffer", 0 ), hSearchd.GetSize ( "read_unhinted", 0 ) );
 
 	// in threaded mode, create a dedicated rotation thread
 	if ( g_bSeamlessRotate && !g_tRotateThread.Create ( RotationThreadFunc, 0, "rotation" ) )

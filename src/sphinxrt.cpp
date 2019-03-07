@@ -3859,7 +3859,7 @@ void RtIndex_t::SaveDiskHeader ( const char * sFilename, SphDocID_t iMinDocID, i
 	tWriter.PutDword ( SPH_HIT_FORMAT_INLINE );
 	tWriter.PutByte ( m_tSettings.m_bIndexSP ? 1 : 0 ); // m_bIndexSP, v.21+
 	tWriter.PutString ( m_tSettings.m_sZones ); // m_sZonePrefix, v.22+
-	tWriter.PutDword ( 0 ); // m_iBoundaryStep, v.23+
+	tWriter.PutDword ( m_tSettings.m_iBoundaryStep ); // m_iBoundaryStep, v.23+
 	tWriter.PutDword ( 1 ); // m_iStopwordStep, v.23+
 	tWriter.PutDword ( 1 );	// m_iOvershortStep
 	tWriter.PutDword ( m_tSettings.m_iEmbeddedLimit );	// v.30+
@@ -6682,7 +6682,7 @@ static void TransformSorterSchema ( ISphMatchSorter * pSorter, const SphChunkGua
 	RTMatchesToNewSchema_c fnFinal ( pOldSchema, pNewSchema, tGuard, dMVA, dStrings, tMvaArenaFlag );
 	pSorter->Finalize ( fnFinal, false );
 
-	pSorter->SetSchema ( pNewSchema );
+	pSorter->SetSchema ( pNewSchema, true );
 	SafeDelete ( pOldSchema );
 }
 
@@ -8169,8 +8169,6 @@ bool RtIndex_t::AttachDiskIndex ( CSphIndex * pIndex, CSphString & sError )
 	// we do not support some of the disk index features in RT just yet
 #define LOC_ERROR(_arg) { sError = _arg; return false; }
 	const CSphIndexSettings & tSettings = pIndex->GetSettings();
-	if ( tSettings.m_iBoundaryStep!=0 )
-		LOC_ERROR ( "ATTACH currently requires boundary_step=0 in disk index (RT-side support not implemented yet)" );
 	if ( tSettings.m_iStopwordStep!=1 )
 		LOC_ERROR ( "ATTACH currently requires stopword_step=1 in disk index (RT-side support not implemented yet)" );
 	if ( tSettings.m_eDocinfo!=SPH_DOCINFO_EXTERN )
@@ -9662,6 +9660,12 @@ void RtBinlog_c::SaveMeta ()
 		wrMeta.ZipInt ( m_dLogFiles[i].m_iExt ); // everything else is saved in logs themselves
 
 	wrMeta.CloseFile();
+
+	if ( wrMeta.IsError() )
+	{
+		sphWarning ( "%s", sError.cstr() );
+		return;
+	}
 
 	if ( sph::rename ( sMeta.cstr(), sMetaOld.cstr() ) )
 		sphDie ( "failed to rename meta (src=%s, dst=%s, errno=%d, error=%s)",
