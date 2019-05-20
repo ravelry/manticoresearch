@@ -161,7 +161,7 @@ enum SearchdCommand_e : WORD
 /// master-agent API SEARCH command protocol extensions version
 enum
 {
-	VER_COMMAND_SEARCH_MASTER = 16
+	VER_COMMAND_SEARCH_MASTER = 17
 };
 
 
@@ -171,7 +171,7 @@ enum SearchdCommandV_e : WORD
 {
 	VER_COMMAND_SEARCH		= 0x121, // 1.33
 	VER_COMMAND_EXCERPT		= 0x104,
-	VER_COMMAND_UPDATE		= 0x103,
+	VER_COMMAND_UPDATE		= 0x104,
 	VER_COMMAND_KEYWORDS	= 0x101,
 	VER_COMMAND_STATUS		= 0x101,
 	VER_COMMAND_FLUSHATTRS	= 0x100,
@@ -180,9 +180,17 @@ enum SearchdCommandV_e : WORD
 	VER_COMMAND_PING		= 0x100,
 	VER_COMMAND_UVAR		= 0x100,
 	VER_COMMAND_CALLPQ		= 0x100,
-	VER_COMMAND_CLUSTERPQ	= 0x100,
+	VER_COMMAND_CLUSTERPQ	= 0x101,
 
 	VER_COMMAND_WRONG = 0,
+};
+
+enum UpdateType_e
+{
+	UPDATE_INT		= 0,
+	UPDATE_MVA32	= 1,
+	UPDATE_STRING	= 2,
+	UPDATE_JSON		= 3
 };
 
 enum ESphAddIndex
@@ -266,9 +274,6 @@ public:
 		SendUint64 ( (uint64_t) iValue );
 	}
 
-	void		SendDocid ( SphDocID_t iValue )	{ SendUint64 ( iValue ); }
-
-	// send raw byte blob
 	void		SendBytes ( const void * pBuf, int iLen );	///< (was) protected to avoid network-vs-host order bugs
 	void		SendBytes ( const char * pBuf );    // used strlen() to get length
 	void		SendBytes ( const CSphString& sStr );    // used strlen() to get length
@@ -675,6 +680,8 @@ struct ServedDesc_t
 	bool		m_bOnDiskAttrs	= false;
 	bool		m_bOnDiskPools	= false;
 	int64_t		m_iMass			= 0; // relative weight (by access speed) of the index
+	int			m_iRotationPriority = 0;	// rotation priority (for proper rotation of indexes chained by killlist_target). 0==high priority
+	StrVec_t	m_dKilllistTargets;
 	mutable CSphString	m_sUnlink;
 	IndexType_e	m_eType			= IndexType_e::PLAIN;
 	bool		m_bJson			= false;
@@ -1092,11 +1099,13 @@ enum SqlStmt_e
 	STMT_RELOAD_INDEXES,
 	STMT_SYSFILTERS,
 	STMT_DEBUG,
+	STMT_ALTER_KLIST_TARGET,
 	STMT_JOIN_CLUSTER,
 	STMT_CLUSTER_CREATE,
 	STMT_CLUSTER_DELETE,
 	STMT_CLUSTER_ALTER_ADD,
 	STMT_CLUSTER_ALTER_DROP,
+	STMT_CLUSTER_ALTER_UPDATE,
 
 	STMT_TOTAL
 };
@@ -1147,6 +1156,7 @@ struct SqlStmt_t
 	// used by INSERT, DELETE, CALL, DESC, ATTACH, ALTER, RELOAD INDEX
 	CSphString				m_sIndex;
 	CSphString				m_sCluster;
+	bool					m_bClusterUpdateNodes = false;
 
 	// INSERT (and CALL) specific
 	CSphVector<SqlInsert_t>	m_dInsertValues; // reused by CALL
@@ -1179,6 +1189,7 @@ struct SqlStmt_t
 
 	// ALTER specific
 	CSphString				m_sAlterAttr;
+	CSphString				m_sAlterOption;
 	ESphAttr				m_eAlterColType = SPH_ATTR_NONE;
 
 	// SHOW THREADS specific
@@ -1212,7 +1223,6 @@ struct AggrResult_t : CSphQueryResult
 	CSphVector<CSphSchema>			m_dSchemas;			///< aggregated result sets schemas (for schema minimization)
 	CSphVector<int>					m_dMatchCounts;		///< aggregated result sets lengths (for schema minimization)
 	CSphVector<const CSphIndex*>	m_dLockedAttrs;		///< indexes which are hold in the memory until sending result
-	CSphTaggedVector				m_dTag2Pools;		///< tag to MVA and strings storage pools mapping
 	StrVec_t						m_dZeroCount;
 
 	void ClampMatches ( int iLimit, bool bCommonSchema );
@@ -1239,8 +1249,8 @@ public:
 	explicit	CSphSessionAccum ( bool bManage );
 				~CSphSessionAccum();
 
-	ISphRtAccum * GetAcc ( ISphRtIndex * pIndex, CSphString & sError );
-	ISphRtIndex * GetIndex ();
+	ISphRtAccum * GetAcc ( RtIndex_i * pIndex, CSphString & sError );
+	RtIndex_i * GetIndex ();
 
 private:
 	ISphRtAccum *		m_pAcc = nullptr;
@@ -1299,7 +1309,6 @@ enum ESphHttpStatus
 enum ESphHttpEndpoint
 {
 	SPH_HTTP_ENDPOINT_INDEX,
-	SPH_HTTP_ENDPOINT_SEARCH,
 	SPH_HTTP_ENDPOINT_SQL,
 	SPH_HTTP_ENDPOINT_JSON_SEARCH,
 	SPH_HTTP_ENDPOINT_JSON_INDEX,

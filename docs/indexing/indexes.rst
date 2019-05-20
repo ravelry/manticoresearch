@@ -19,7 +19,9 @@ architecture allows internally for different *index types*, or
 Manticore provides 2 different backends: a **disk index** backend, and a
 **RT (realtime) index** backend.
 
-Offline/plain indexes
+.. _plain_indexes:
+
+Plain indexes
 ~~~~~~~~~~~~~~~~~~~~~
 
 **Disk indexes** are designed to provide maximum indexing and
@@ -68,7 +70,7 @@ Template indexes are indexes with no storage backend. They can be used operation
 Percolate indexes
 ~~~~~~~~~~~~~~~~~
 
-Percolate indexes are special Real-Time indexes that store queries instead of documents. They are used for prospective searches ( or "search in reverse"). 
+Percolate indexes are special Real-Time indexes that store queries instead of documents. They are used for prospective searches ( or "search in reverse").
 Refer to :ref:`percolate_query` for more details.
 
 
@@ -82,36 +84,41 @@ specify what indexes to search in run time.
 Index files
 ~~~~~~~~~~~
 
-Each index consists of a number of files. 
+Each index consists of a number of files.
+
+Small index components are fully loaded into memory.
+Big index components  are read from disk as needed.  Currently these use seek+read to retrieve data from disk.
+Attribute components are opened and mapped with mmap(). They can be loaded fully in memory or left on disk and read when needed.
 
 Plain indexes and RealTime indexes chunks:
 
 +-----------+------------------------------+-----------------------------------------+
 | Extension |  Stores                      | Memory management                       |
 +===========+==============================+=========================================+
-| spa       | scalar attrs                 | see :ref:`ondisk_attrs`                 |
+| spa       | scalar attrs                 | mmap(), also see :ref:`ondisk_attrs`    |
 +-----------+------------------------------+-----------------------------------------+
-| spd       | document lists               | on disk, gets cached by OS              |
+| spd       | document lists               | read, on disk, gets cached by OS        |
 +-----------+------------------------------+-----------------------------------------+
 | spi       | dictionary                   | always loaded in memory                 |
 +-----------+------------------------------+-----------------------------------------+
 | sph       | index/chunk header           | always loaded in memory                 |
 +-----------+------------------------------+-----------------------------------------+
-| spk       | Kill list                    | always loaded in memory                 |
+| spk       | Kill list                    | loaded and discarded :sup:`[1]`         |
 +-----------+------------------------------+-----------------------------------------+
 | spl       | index lock file              | on disk only                            |
 +-----------+------------------------------+-----------------------------------------+
-| spm       | MVA attrs                    | see :ref:`ondisk_attrs`                 |
+| spm       | row map                      | mmap()                                  |
 +-----------+------------------------------+-----------------------------------------+
-| spp       | keyword positions            | on disk, gets cached by OS              |
+| sphi      | secondary index histograms   | always loaded in memory                 |
 +-----------+------------------------------+-----------------------------------------+
-| sps       | string/json attrs            | see :ref:`ondisk_attrs`                 |
+| spt       | docid lookups                | mmap()                                  |
 +-----------+------------------------------+-----------------------------------------+
-| mvp       | MVA attrs updates :sup:`[1]` | always loaded in memory                 |
+| spp       | keyword positions            | read, on disk, gets cached by OS        |
++-----------+------------------------------+-----------------------------------------+
+| spb       | var-length attrs             | mmap(), also see :ref:`ondisk_attrs`    |
 +-----------+------------------------------+-----------------------------------------+
 
-:sup:`[1]` - created only in case of MVA persistent updates
-
+:sup:`[1]` Kill lists -  loaded in memory at startup and discarded after they are applied to targets
 
 RealTime indexes also have:
 
@@ -138,7 +145,7 @@ Operations on indexes
 Declaration
 ^^^^^^^^^^^
 
-Plain indexes can only be created by **indexer** tool. 
+Plain indexes can only be created by **indexer** tool.
 If a plain index is only declared in configuration,but not created, the daemon will print a warning about that.
 It must be also noted that the daemon requires at least one index of type RT, percolate or plain in order to start.
 
@@ -154,7 +161,7 @@ Changing the type of an index, for example from template to Real-Time, can also 
 
 Alternative to signaling HUP to searchd daemon, the :ref:`RELOAD INDEXES<reload_indexes_syntax>` SphinxQL command can be used.
 
-Refreshing a plain index already loaded by daemon requires running *indexer* with *--rotate* parameter. 
+Refreshing a plain index already loaded by daemon requires running *indexer* with *--rotate* parameter.
 In this case, a new version of the plain index is created and when ready, a HUP is send to daemon, which will load the new version of the index in the memory and discard the old one.
 
 Index changes
@@ -165,4 +172,3 @@ Change of tokenization settings requires a remaking in case of plain indexes. Fo
 :ref:`ALTER RECONFIGURE<alter_syntax>` but they will affect only new content added to index, as it's not possible yet to re-tokenize already indexed texts.
 
 Some settings like :ref:`mlock` and :ref:`ondisk_attrs`, which don't alter in any way the index, don't require an index rebuild, just a reload.
-

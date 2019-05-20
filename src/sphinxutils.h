@@ -39,6 +39,9 @@ inline bool sphIsDigital ( char c )
 /// pointer to the last number in the buf, touching it's end
 inline const char * sphFindLastNumeric ( const char * pBuf, int iLen )
 {
+	if ( !pBuf || !iLen )
+		return pBuf;
+
 	for ( auto pLast = pBuf + iLen - 1; pLast>=pBuf; --pLast )
 		if ( !sphIsDigital ( *pLast ) )
 			return pLast + 1;
@@ -197,7 +200,7 @@ void			sphConfDictionary ( const CSphConfigSection & hIndex, CSphDictSettings & 
 bool			sphConfFieldFilter ( const CSphConfigSection & hIndex, CSphFieldFilterSettings & tSettings, CSphString & sError );
 
 /// configure index from index definition section
-bool			sphConfIndex ( const CSphConfigSection & hIndex, CSphIndexSettings & tSettings, CSphString & sError );
+bool			sphConfIndex ( const CSphConfigSection & hIndex, CSphIndexSettings & tSettings, const char * szIndexName, CSphString & sError );
 
 /// try to set dictionary, tokenizer and misc settings for an index (if not already set)
 bool			sphFixupIndexSettings ( CSphIndex * pIndex, const CSphConfigSection & hIndex, CSphString & sError, bool bStripFile=false );
@@ -303,6 +306,9 @@ bool sphDetectChinese ( const BYTE * szBuffer, int iLength );
 /// returns ranker name as string
 const char * sphGetRankerName ( ESphRankMode eRanker );
 
+/// parses kill-list targets and their options
+bool ParseKillListTargets ( const CSphString & sTargets, CSphVector<KillListTarget_t> & dTargets, const char * szIndexName, CSphString & sError );
+
 class CSphDynamicLibrary : public ISphNoncopyable
 {
 	bool		m_bReady; // whether the lib is valid or not
@@ -359,5 +365,6 @@ public:
 
 // extract basename from path
 const char * GetBaseName ( const CSphString & sFullPath );
+bool HasMvaUpdated ( const CSphString & sIndexPath );
 
 #endif // _sphinxutils_

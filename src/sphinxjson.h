@@ -210,10 +210,19 @@ void sphJsonSkipNode ( ESphJsonType eType, const BYTE ** ppData );
 int sphJsonFieldLength ( ESphJsonType eType, const BYTE * pData );
 
 /// inplace JSON update, both for realtime and non-realtime indexes, returns true if update is possible
-bool sphJsonInplaceUpdate ( ESphJsonType eValueType, int64_t iValue, ISphExpr * pExpr, BYTE * pStrings, const CSphRowitem * pRow, bool bUpdate );
+bool sphJsonInplaceUpdate ( ESphJsonType eValueType, int64_t iValue, ISphExpr * pExpr, BYTE * pBlobPool, const CSphRowitem * pRow, bool bUpdate );
 
 /// converts string to number
 bool sphJsonStringToNumber ( const char * s, int iLen, ESphJsonType & eType, int64_t & iVal, double & fVal );
+
+/// unpack json data offset from uint64_t
+uint64_t sphJsonUnpackOffset ( uint64_t uPacked );
+
+/// unpack json data type from uint64_t
+ESphJsonType sphJsonUnpackType ( uint64_t uPacked );
+
+/// pack json type and offset to uint64_t
+uint64_t sphJsonPackTypeOffset ( ESphJsonType eType, uint64_t uOffset );
 
 /// internal cJSON init
 void sphInitCJson();
@@ -239,8 +248,10 @@ public:
 
 	void			AddStr ( const char * szName, const char * szValue );
 	void			AddStr ( const char * szName, const CSphString & sValue );
-	void			AddNum ( const char * szName, int64_t iValue );
+	void			AddInt ( const char * szName, int64_t iValue );
+	void			AddFlt ( const char * szName, float fValue );
 	void			AddBool ( const char * szName, bool bValue );
+	void			AddNull ( const char * szName );
 	void			AddItem ( const char * szName, JsonObj_c & tObj );
 	void			AddItem ( JsonObj_c & tObj );
 	void			DelItem ( const char * szName );
@@ -258,6 +269,7 @@ public:
 	bool			FetchStrItem ( CSphString & sValue, const char * szName, CSphString & sError, bool bIgnoreMissing=false ) const;
 	bool			HasItem ( const char * szName ) const;
 
+	static JsonObj_c CreateInt ( int64_t iInt );
 	static JsonObj_c CreateStr ( const CSphString & sStr );
 
 	bool			IsInt() const;

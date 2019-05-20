@@ -18,6 +18,8 @@ In the current version, indexes use a schema like a normal database table. The s
 * fulltext fields - they contain indexed content. There can be multiple fulltext fields per index. Fulltext searches can be made on all fields or selective. Currently the original text is not stored, so if it’s required to show their content in search results, a trip to the origin source must be made using the ids (or other identifier) obtained from the search
 * attributes - their values are stored and are not used in fulltext matching. Instead they can be used for regular filtering, grouping, sorting. They can be also used in expressions of score ranking.
 
+Field and attribute names must start with a letter and can contain letters, digits and underscore.
+
 The following types can be stored in attributes:
 
 * unsigned 32 bit and signed 64 bit integers
@@ -127,3 +129,46 @@ Now we added mirrors, each shard is found on 2 servers. By default, the master (
 The mode used for picking mirrors can be set with ha_strategy. In addition to random, another simple method is to do a round-robin selection ( ha_strategy= roundrobin).
 
 The more interesting strategies are the latency-weighted probabilities based ones. noerrors and nodeads not only that take out mirrors with issues, but also monitor the response times and do a balancing. If a mirror responds slower (for example due to some operations running on it), it will receive less requests. When the mirror recovers and provides better times, it will get more requests.
+
+
+Replication and cluster
+~~~~~~~~~~~~~~~~~~~~~~~
+
+To use replication define one :ref:`listen <listen>` port for SphinxAPI protocol and one :ref:`listen <listen>` for
+replication address and port range in the config. Define :ref:`data_dir <data_dir>` folder for incoming indexes.
+
+.. code-block::  none
+
+  searchd {
+    listen = 9312
+    listen = 192.168.1.101:9360-9370:replication
+    data_dir = /var/lib/manticore/
+    ...
+   }
+
+Create a cluster (via SphinxQL) at the daemon that has local indexes that need to be replicated 
+
+.. code-block:: sql
+
+    CREATE CLUSTER posts
+	
+Add these local indexes to cluster
+
+.. code-block:: sql
+
+    ALTER CLUSTER posts ADD pq_title
+    ALTER CLUSTER posts ADD pq_clicks
+	
+All other nodes that want replica of cluster's indexes should join cluster as
+
+.. code-block:: sql
+
+    JOIN CLUSTER posts AT '192.168.1.101:9312'
+
+When running queries prepend the index name with the cluster name (``posts:``).
+
+.. code-block:: sql
+
+    INSERT INTO posts:pq_title VALUES ( 3, 'test me' )
+
+Now all such queries that modify indexes in the cluster are replicated to all nodes in the cluster.

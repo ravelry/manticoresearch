@@ -46,6 +46,7 @@ ALPHA				[a-zA-Z_]+
 "ANY"				{ YYSTOREBOUNDS; return TOK_ANY; }
 "AS"				{ YYSTOREBOUNDS; return TOK_AS; }
 "ASC"				{ YYSTOREBOUNDS; return TOK_ASC; }
+"AT"				{ YYSTOREBOUNDS; return TOK_AT; }
 "ATTACH"			{ YYSTOREBOUNDS; return TOK_ATTACH; }
 "ATTRIBUTES"		{ YYSTOREBOUNDS; return TOK_ATTRIBUTES; }
 "AVG"				{ YYSTOREBOUNDS; return TOK_AVG; }
@@ -58,7 +59,7 @@ ALPHA				[a-zA-Z_]+
 "CHARACTER"			{ YYSTOREBOUNDS; return TOK_CHARACTER; }
 "CHUNK"				{ YYSTOREBOUNDS; return TOK_CHUNK; }
 "CLUSTER"			{ YYSTOREBOUNDS; return TOK_CLUSTER; }
-"COLLATE"                       { YYSTOREBOUNDS; return TOK_COLLATE; }
+"COLLATE"			{ YYSTOREBOUNDS; return TOK_COLLATE; }
 "COLLATION"			{ YYSTOREBOUNDS; return TOK_COLLATION; }
 "COLUMN"			{ YYSTOREBOUNDS; return TOK_COLUMN; }
 "COMMIT"			{ YYSTOREBOUNDS; return TOK_COMMIT; }
@@ -79,6 +80,7 @@ ALPHA				[a-zA-Z_]+
 "FLOAT"				{ YYSTOREBOUNDS; return TOK_FLOAT; }
 "FLUSH"				{ YYSTOREBOUNDS; return TOK_FLUSH; }
 "FOR"				{ YYSTOREBOUNDS; return TOK_FOR; }
+"FORCE"				{ YYSTOREBOUNDS; return TOK_FORCE; }
 "FROM"				{ YYSTOREBOUNDS; return TOK_FROM; }
 "FUNCTION"			{ YYSTOREBOUNDS; return TOK_FUNCTION; }
 "GLOBAL"			{ YYSTOREBOUNDS; return TOK_GLOBAL; }
@@ -87,7 +89,7 @@ ALPHA				[a-zA-Z_]+
 "GROUP_CONCAT"		{ YYSTOREBOUNDS; return TOK_GROUP_CONCAT; }
 "HAVING"			{ YYSTOREBOUNDS; return TOK_HAVING; }
 "HOSTNAMES"			{ YYSTOREBOUNDS; return TOK_HOSTNAMES; }
-"ID"				{ YYSTOREBOUNDS; return TOK_ID; }
+"IGNORE"			{ YYSTOREBOUNDS; return TOK_IGNORE; }
 "IN"				{ YYSTOREBOUNDS; return TOK_IN; }
 "INDEX"				{ YYSTOREBOUNDS; return TOK_INDEX; }
 "INDEXES"			{ YYSTOREBOUNDS; return TOK_INDEXES; }
@@ -100,6 +102,7 @@ ALPHA				[a-zA-Z_]+
 "ISOLATION"			{ YYSTOREBOUNDS; return TOK_ISOLATION; }
 "JOIN"				{ YYSTOREBOUNDS; return TOK_JOIN; }
 "JSON"				{ YYSTOREBOUNDS; return TOK_JSON; }
+"KILLLIST_TARGET"	{ YYSTOREBOUNDS; return TOK_KILLLIST_TARGET; }
 "LEVEL"				{ YYSTOREBOUNDS; return TOK_LEVEL; }
 "LIKE"				{ YYSTOREBOUNDS; return TOK_LIKE; }
 "LOGS"				{ YYSTOREBOUNDS; return TOK_LOGS; }
@@ -156,6 +159,7 @@ ALPHA				[a-zA-Z_]+
 "TYPE"				{ YYSTOREBOUNDS; return TOK_TYPE; }
 "UNCOMMITTED"		{ YYSTOREBOUNDS; return TOK_UNCOMMITTED; }
 "UPDATE"			{ YYSTOREBOUNDS; return TOK_UPDATE; }
+"USE"				{ YYSTOREBOUNDS; return TOK_USE; }
 "VALUES"			{ YYSTOREBOUNDS; return TOK_VALUES; }
 "VARIABLES"			{ YYSTOREBOUNDS; return TOK_VARIABLES; }
 "WAIT_TIMEOUT"		{ YYSTOREBOUNDS; return TOK_SYSVAR; }
@@ -187,9 +191,8 @@ ALPHA				[a-zA-Z_]+
 @{ID}				{ YYSTOREBOUNDS; return TOK_USERVAR; }
 @@{ID}				{ YYSTOREBOUNDS; return TOK_SYSVAR; }
 @@{ID}\.{ID}		{ YYSTOREBOUNDS; return TOK_SYSVAR; }
-"`ID`"				{ YYSTOREBOUNDS; lvalp->m_iStart++; lvalp->m_iEnd--; return TOK_ID; }
 `{ID}`				{ YYSTOREBOUNDS; lvalp->m_iStart++; lvalp->m_iEnd--; return TOK_IDENT; }
-`{DIGIT}+{ID}`		{ YYSTOREBOUNDS; lvalp->m_iStart++; lvalp->m_iEnd--; return TOK_IDENT; } // allow `123xyz` column names
+`{DIGIT}+{ID}`		{ YYSTOREBOUNDS; return TOK_IDENT; } // allow `123xyz` column names
 {ID}:{ID}			{ YYSTOREBOUNDS; return TOK_IDENT; }
 
 {SPACE}+			{ ; }

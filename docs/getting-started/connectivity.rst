@@ -18,6 +18,9 @@ Officially, we support API client libraries for:
 * PHP
 * Java
 * Ruby
+* Go
+
+The Go client has it's own repository on `github <https://github.com/manticoresoftware/go-sdk>`_ , while the rest of the clients can be found in `/api <https://github.com/manticoresoftware/manticoresearch/tree/master/api>`_ directory.
 
 For other languages, 3rd party APi clients exists. 
 Older API client libraries, including versions for Sphinx Search, should work with newer daemons, however they will not be able to access new features.
@@ -47,7 +50,7 @@ MySQL Connectors
 The official MySQL connectors can be used to connect to Manticore Search, however they might require certain settings passed in the DSN string as the connector 
 can try running certain SQL commands not implemented yet in Manticore. 
 
-JDBC Connector 6.x and above require Manticore Search 2.8.1 or greater and the DSN string should contain the following options:
+JDBC Connector 6.x and above require Manticore Search 2.8.2 or greater and the DSN string should contain the following options:
 
 .. code-block:: none
 
@@ -55,6 +58,14 @@ JDBC Connector 6.x and above require Manticore Search 2.8.1 or greater and the D
 		
 
 In case mysql_version_string is used to suppress the Manticore version, the override version should be smaller than **5.1.1**.
+
+.NET MySQL connector uses connection pools by default. To correctly get the statistics of SHOW META, queries along with SHOW META command should be send as one multistatement  (``SELECT ...;SHOW META``). 
+With pooling enabled option ``Allow Batch=True`` is required to be added to connection string to allow multistatements. 
+
+.. code-block:: none
+
+		Server=127.0.0.1;Port=9306;Database=somevalue;Uid=somevalue;Pwd=;Allow Batch=True;
+		
 
 ODBC
 ^^^^

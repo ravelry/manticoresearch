@@ -50,6 +50,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <time.h>
 
 #ifdef __cplusplus
@@ -645,7 +646,7 @@ struct wsrep_stats_var
     const char*      name;     //!< variable name
     wsrep_var_type_t type;     //!< variable value type
     union {
-        int64_t     i64;
+        int64_t     _int64;
         double      _double;
         const char* _string;
     } value;                   //!< variable value

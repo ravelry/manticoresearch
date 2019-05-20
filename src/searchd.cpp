@@ -52,7 +52,8 @@ extern "C"
 #define SEARCHD_BACKLOG			5
 #define SPHINXAPI_PORT			9312
 #define SPHINXQL_PORT			9306
-#define MVA_UPDATES_POOL		1048576
+#define SPH_ADDRESS_SIZE		sizeof("000.000.000.000")
+#define SPH_ADDRPORT_SIZE		sizeof("000.000.000.000:00000")
 #define NETOUTBUF				8192
 #define PING_INTERVAL			1000
 #define QLSTATE_FLUSH_MSEC		50
@@ -448,6 +449,7 @@ static ServiceThread_t						g_tRotationServiceThread;
 static volatile bool						g_bInvokeRotationService = false;
 static volatile bool						g_bNeedRotate = false;		// true if there were pending HUPs to handle (they could fly in during previous rotate)
 static volatile bool						g_bInRotate = false;		// true while we are rotating
+static volatile bool						g_bReloadForced = false;	// true in case reload issued via SphinxQL
 
 static ServiceThread_t						g_tPingThread;
 
@@ -2271,6 +2273,7 @@ ListenerDesc_t ParseListener ( const char * sSpec )
 	tRes.m_sUnix = "";
 	tRes.m_uIP = htonl ( INADDR_ANY );
 	tRes.m_iPort = SPHINXAPI_PORT;
+	tRes.m_iPortsCount = 0;
 	tRes.m_bVIP = false;
 
 	// split by colon
@@ -2368,12 +2371,29 @@ ListenerDesc_t ParseListener ( const char * sSpec )
 		tRes.m_uIP = sParts[0].IsEmpty()
 			? htonl ( INADDR_ANY )
 			: sphGetAddress ( sParts[0].cstr(), GETADDR_STRICT );
+
+		if ( tRes.m_eProto==PROTO_REPLICATION )
+		{
+			const char * sPorts = sParts[1].cstr();
+			const char * sDelimiter = strchr ( sPorts, '-' );
+			if ( sDelimiter && sDelimiter+1-sPorts<sParts[1].Length() )
+			{
+				int iPortsEnd = atol ( sDelimiter+1 );
+				CheckPort ( iPortsEnd );
+				if ( iPortsEnd<=tRes.m_iPort )
+					sphFatal ( "ports range invalid %d-%d", iPort, iPortsEnd );
+				if ( ( iPortsEnd - tRes.m_iPort )<2 )
+					sphFatal ( "ports range %d-%d count should be at least 2, got %d", iPort, iPortsEnd, iPortsEnd-iPort );
+					
+				tRes.m_iPortsCount = iPortsEnd - tRes.m_iPort;
+			}
+		}
 	}
 	return tRes;
 }
 
 
-void AddListener ( const CSphString & sListen, bool bHttpAllowed )
+void AddListener ( const CSphString & sListen, bool bHttpAllowed, CSphVector<ListenerDesc_t> & dDesc )
 {
 	ListenerDesc_t tDesc = ParseListener ( sListen.cstr() );
 
@@ -2387,6 +2407,10 @@ void AddListener ( const CSphString & sListen, bool bHttpAllowed )
 		sphWarning ( "thread_pool disabled, can not listen for http interface, port=%d, use workers=thread_pool", tDesc.m_iPort );
 		return;
 	}
+
+	dDesc.Add ( tDesc );
+	if ( tDesc.m_eProto==PROTO_REPLICATION )
+		return;
 
 #if !USE_WINDOWS
 	if ( !tDesc.m_sUnix.IsEmpty() )
@@ -3001,10 +3025,12 @@ bool NetInputBuffer_c::ReadFrom ( int iLen, int iTimeout, bool bIntr, bool bAppe
 	if ( iLen<=0 || iLen>g_iMaxPacketSize || m_iSock<0 )
 		return false;
 
+	int iOff = m_pCur - m_pBuf;
 	Resize ( m_iLen );
 	Reserve ( iTail + iLen );
 	BYTE * pBuf = m_pData + iTail;
-	m_pCur = m_pBuf = pBuf;
+	m_pBuf = m_pData;
+	m_pCur = bAppend ? m_pData + iOff : m_pData;
 	int iGot = sphSockRead ( m_iSock, pBuf , iLen, iTimeout, bIntr );
 	if ( g_bGotSigterm )
 	{
@@ -3192,8 +3218,8 @@ void SearchRequestBuilder_t::SendQuery ( const char * sIndexes, ISphOutputBuffer
 		tOut.SendInt ( q.m_dWeights[j] ); // weights
 	tOut.SendString ( sIndexes ); // indexes
 	tOut.SendInt ( 1 ); // id range bits
-	tOut.SendDocid ( 0 ); // default full id range (any client range must be in filters at this stage)
-	tOut.SendDocid ( DOCID_MAX );
+	tOut.SendUint64 ( uint64_t(0) ); // default full id range (any client range must be in filters at this stage)
+	tOut.SendUint64 ( UINT64_MAX );
 	tOut.SendInt ( q.m_dFilters.GetLength() );
 	ARRAY_FOREACH ( j, q.m_dFilters )
 	{
@@ -3284,24 +3310,7 @@ void SearchRequestBuilder_t::SendQuery ( const char * sIndexes, ISphOutputBuffer
 		tOut.SendInt ( q.m_dFieldWeights[i].m_iValue );
 	}
 	tOut.SendString ( q.m_sComment.cstr() );
-	tOut.SendInt ( q.m_dOverrides.GetLength() );
-	ARRAY_FOREACH ( i, q.m_dOverrides )
-	{
-		const CSphAttrOverride & tEntry = q.m_dOverrides[i];
-		tOut.SendString ( tEntry.m_sAttr.cstr() );
-		tOut.SendDword ( tEntry.m_eAttrType );
-		tOut.SendInt ( tEntry.m_dValues.GetLength() );
-		ARRAY_FOREACH ( j, tEntry.m_dValues )
-		{
-			tOut.SendUint64 ( tEntry.m_dValues[j].m_uDocID );
-			switch ( tEntry.m_eAttrType )
-			{
-				case SPH_ATTR_FLOAT:	tOut.SendFloat ( tEntry.m_dValues[j].m_fValue ); break;
-				case SPH_ATTR_BIGINT:	tOut.SendUint64 ( tEntry.m_dValues[j].m_uValue ); break;
-				default:				tOut.SendDword ( (DWORD)tEntry.m_dValues[j].m_uValue ); break;
-			}
-		}
-	}
+	tOut.SendInt ( 0 ); // WAS: overrides
 	tOut.SendString ( q.m_sSelect.cstr() );
 	if ( q.m_iMaxPredictedMsec>0 )
 		tOut.SendInt ( q.m_iMaxPredictedMsec );
@@ -3348,6 +3357,13 @@ void SearchRequestBuilder_t::SendQuery ( const char * sIndexes, ISphOutputBuffer
 		tOut.SendDword ( tItem.m_eAggrFunc );
 	}
 	tOut.SendDword ( q.m_eExpandKeywords );
+
+	tOut.SendInt ( q.m_dIndexHints.GetLength() );
+	for ( const auto & i : q.m_dIndexHints )
+	{
+		tOut.SendDword ( i.m_eHint );
+		tOut.SendString ( i.m_sIndex.cstr() );
+	}
 }
 
 
@@ -3383,7 +3399,13 @@ struct cSearchResult : public iQueryResult
 void SearchReplyParser_c::ParseMatch ( CSphMatch & tMatch, MemInputBuffer_c & tReq, const CSphSchema & tSchema, bool bAgent64 ) const
 {
 	tMatch.Reset ( tSchema.GetRowSize() );
-	tMatch.m_uDocID = bAgent64 ? (SphDocID_t)tReq.GetUint64() : tReq.GetDword();
+
+	// WAS: docids
+	if ( bAgent64 )
+		tReq.GetUint64();
+	else
+		tReq.GetDword();
+
 	tMatch.m_iWeight = tReq.GetInt ();
 	for ( int i=0; i<tSchema.GetAttrsCount(); i++ )
 	{
@@ -3791,10 +3813,6 @@ static void FixupQuerySettings ( CSphQuery & tQuery )
 	for ( auto & i : tQuery.m_dFilters )
 		i.m_dValues.Sort();
 
-	// sort overrides
-	for ( auto & i : tQuery.m_dOverrides )
-		i.m_dValues.Sort();
-
 	if ( !tQuery.m_bHasOuter )
 	{
 		tQuery.m_sOuterOrderBy = "";
@@ -3867,6 +3885,19 @@ static bool ParseSearchFilter ( CSphFilterSettings & tFilter, InputBuffer_c & tR
 		return false;
 	}
 
+	if ( tFilter.m_sAttrName=="@id" )
+	{
+		// request coming from old master, need to fix attribute name
+		tFilter.m_sAttrName = "id";
+
+		// and clamp values from uint64_t to int64_t
+		if ( (uint64_t)tFilter.m_iMinValue > (uint64_t)LLONG_MAX )
+			tFilter.m_iMinValue = LLONG_MAX;
+
+		if ( (uint64_t)tFilter.m_iMaxValue > (uint64_t)LLONG_MAX )
+			tFilter.m_iMaxValue = LLONG_MAX;
+	}
+
 	tFilter.m_bExclude = !!tReq.GetDword ();
 
 	if ( iMasterVer>=15 )
@@ -3924,16 +3955,14 @@ bool ParseSearchQuery ( InputBuffer_c & tReq, CachedOutputBuffer_c & tOut, CSphQ
 	}
 
 	tQuery.m_sIndexes = tReq.GetString ();
+
+	// legacy id range filter
 	bool bIdrange64 = tReq.GetInt()!=0;
+	DocID_t tMinDocID = bIdrange64 ? (DocID_t)tReq.GetUint64 () : tReq.GetDword ();
+	DocID_t tMaxDocID = bIdrange64 ? (DocID_t)tReq.GetUint64 () : tReq.GetDword ();
 
-	SphDocID_t uMinID = bIdrange64 ? (SphDocID_t)tReq.GetUint64 () : tReq.GetDword ();
-	SphDocID_t uMaxID = bIdrange64 ? (SphDocID_t)tReq.GetUint64 () : tReq.GetDword ();
-
-	if ( uVer<0x108 && uMaxID==0xffffffffUL )
-		uMaxID = 0; // fixup older clients which send 32-bit UINT_MAX by default
-
-	if ( uMaxID==0 )
-		uMaxID = DOCID_MAX;
+	if ( tMaxDocID==0 || (uint64_t)tMaxDocID==UINT64_MAX )
+		tMaxDocID = INT64_MAX;
 
 	int iAttrFilters = tReq.GetInt ();
 	if ( iAttrFilters>g_iMaxFilters )
@@ -3948,13 +3977,13 @@ bool ParseSearchQuery ( InputBuffer_c & tReq, CachedOutputBuffer_c & tOut, CSphQ
 			return false;
 
 	// now add id range filter
-	if ( uMinID!=0 || uMaxID!=DOCID_MAX )
+	if ( tMinDocID!=0 || tMaxDocID!=INT64_MAX )
 	{
 		CSphFilterSettings & tFilter = tQuery.m_dFilters.Add();
-		tFilter.m_sAttrName = "@id";
+		tFilter.m_sAttrName = sphGetDocidName();
 		tFilter.m_eType = SPH_FILTER_RANGE;
-		tFilter.m_iMinValue = uMinID;
-		tFilter.m_iMaxValue = uMaxID;
+		tFilter.m_iMinValue = tMinDocID;
+		tFilter.m_iMaxValue = tMaxDocID;
 	}
 
 	tQuery.m_eGroupFunc = (ESphGroupBy) tReq.GetDword ();
@@ -3996,21 +4025,11 @@ bool ParseSearchQuery ( InputBuffer_c & tReq, CachedOutputBuffer_c & tOut, CSphQ
 
 	tQuery.m_sComment = tReq.GetString ();
 
-	tQuery.m_dOverrides.Resize ( tReq.GetInt() ); // FIXME! add sanity check
-	for ( CSphAttrOverride &tOverride : tQuery.m_dOverrides )
+	int nOverrides = tReq.GetInt();
+	if ( nOverrides>0 )
 	{
-		tOverride.m_sAttr = tReq.GetString ();
-		tOverride.m_eAttrType = (ESphAttr) tReq.GetDword ();
-
-		tOverride.m_dValues.Resize ( tReq.GetInt() ); // FIXME! add sanity check
-		for ( auto& tEntry : tOverride.m_dValues )
-		{
-			tEntry.m_uDocID = (SphDocID_t) tReq.GetUint64 ();
-
-			if ( tOverride.m_eAttrType==SPH_ATTR_FLOAT )		tEntry.m_fValue = tReq.GetFloat ();
-			else if ( tOverride.m_eAttrType==SPH_ATTR_BIGINT )	tEntry.m_uValue = tReq.GetUint64 ();
-			else												tEntry.m_uValue = tReq.GetDword ();
-		}
+		SendErrorReply ( tOut, "overrides are now deprecated" );
+		return false;
 	}
 
 	tQuery.m_sSelect = tReq.GetString ();
@@ -4138,9 +4157,35 @@ bool ParseSearchQuery ( InputBuffer_c & tReq, CachedOutputBuffer_c & tOut, CSphQ
 	if ( uMasterVer>=16 )
 		tQuery.m_eExpandKeywords = (QueryOption_e)tReq.GetDword();
 
+	if ( uMasterVer>=17 )
+	{
+		tQuery.m_dIndexHints.Resize ( tReq.GetDword() );
+		for ( auto & i : tQuery.m_dIndexHints )
+		{
+			i.m_eHint = (IndexHint_e)tReq.GetDword();
+			i.m_sIndex = tReq.GetString();
+		}
+	}
+
 	/////////////////////
 	// additional checks
 	/////////////////////
+
+	// queries coming from API may not request docids
+	// but we still need docids when sending result sets
+	if ( tQuery.m_dItems.GetLength() )
+	{
+		bool bHaveDocID = false;
+		for ( const auto & i : tQuery.m_dItems )
+			bHaveDocID |= i.m_sExpr==sphGetDocidName() || i.m_sExpr=="*";
+
+		if ( !bHaveDocID )
+		{
+			CSphQueryItem tId;
+			tId.m_sExpr = sphGetDocidName();
+			tQuery.m_dItems.Insert ( 0, tId );
+		}
+	}
 
 	if ( tReq.GetError() )
 	{
@@ -4450,9 +4495,57 @@ static void FormatOption ( const CSphQuery & tQuery, StringBuilder_c & tBuf )
 	if ( tQuery.m_bStrict )
 		tBuf << "strict=1";
 
-	if ( tQuery.m_eExpandKeywords!=QUERY_OPT_DEFAULT )
+	if ( tQuery.m_eExpandKeywords!=QUERY_OPT_DEFAULT && tQuery.m_eExpandKeywords!=QUERY_OPT_MORPH_NONE )
 		tBuf.Appendf ( "expand_keywords=%d", ( tQuery.m_eExpandKeywords==QUERY_OPT_ENABLED ? 1 : 0 ) );
+	if ( tQuery.m_eExpandKeywords==QUERY_OPT_MORPH_NONE )
+		tBuf.Appendf ( "morphology=none" );
 }
+
+
+static void AppendHint ( const char * szHint, const StrVec_t & dIndexes, StringBuilder_c & tBuf )
+{
+	if ( !dIndexes.GetLength() )
+		return;
+
+	tBuf.Appendf ( " %s INDEX (", szHint );
+	ARRAY_FOREACH ( i, dIndexes )
+	{
+		if ( i )
+			tBuf.Appendf ( "%s", dIndexes[i].cstr() );
+		else
+			tBuf.Appendf ( ",%s", dIndexes[i].cstr() );
+	}
+
+	tBuf += ")";
+}
+
+
+static void FormatIndexHints ( const CSphQuery & tQuery, StringBuilder_c & tBuf )
+{
+	StrVec_t dUse, dForce, dIgnore;
+	for ( const auto & i : tQuery.m_dIndexHints )
+	{
+		switch ( i.m_eHint )
+		{
+		case INDEX_HINT_USE:
+			dUse.Add(i.m_sIndex);
+			break;
+		case INDEX_HINT_FORCE:
+			dForce.Add(i.m_sIndex);
+			break;
+		case INDEX_HINT_IGNORE:
+			dIgnore.Add(i.m_sIndex);
+			break;
+		default:
+			break;
+		}
+	}
+
+	AppendHint ( "USE", dUse, tBuf );
+	AppendHint ( "FORCE", dForce, tBuf );
+	AppendHint ( "IGNORE", dIgnore, tBuf );
+}
+
 
 static void LogQuerySphinxql ( const CSphQuery & q, const CSphQueryResult & tRes, const CSphVector<int64_t> & dAgentTimes, int iCid )
 {
@@ -4586,6 +4679,8 @@ void FormatSphinxql ( const CSphQuery & q, int iCompactIN, QuotationEscapedBuild
 	// OPTION clause
 	FormatOption ( q, tBuf );
 
+	FormatIndexHints ( q, tBuf );
+
 	// outer order by, limit
 	if ( q.m_bHasOuter )
 	{
@@ -4663,23 +4758,23 @@ void ReportIndexesName ( int iSpanStart, int iSpandEnd, const CSphVector<SearchF
 
 //////////////////////////////////////////////////////////////////////////
 
-// internals attributes are last no need to send them
-int sphSendGetAttrCount ( const ISphSchema & tSchema, bool bAgentMode )
+void sphGetAttrsToSend ( const ISphSchema & tSchema, bool bAgentMode, bool bNeedId, CSphBitvec & tAttrs )
 {
 	int iCount = tSchema.GetAttrsCount();
-
-	if ( bAgentMode )
-		return iCount;
-
-	if ( iCount && sphIsSortStringInternal ( tSchema.GetAttr ( iCount-1 ).m_sName.cstr() ) )
+	tAttrs.Init ( iCount );
+	if ( !bAgentMode && iCount && sphIsSortStringInternal ( tSchema.GetAttr ( iCount-1 ).m_sName.cstr() ) )
 	{
 		for ( int i=iCount-1; i>=0 && sphIsSortStringInternal ( tSchema.GetAttr(i).m_sName.cstr() ); --i )
-		{
 			iCount = i;
-		}
 	}
 
-	return iCount;
+	for ( int i = 0; i < iCount; i++ )
+		if ( !sphIsInternalAttr ( tSchema.GetAttr(i) ) )
+			tAttrs.BitSet(i);
+
+	int iId = tSchema.GetAttrIndex ( sphGetDocidName() );
+	if ( !bAgentMode && iId!=-1 && !bNeedId )
+		tAttrs.BitClear(iId);
 }
 
 static int SendDataPtrAttr ( ISphOutputBuffer * pOut, const BYTE * pData )
@@ -4759,27 +4854,34 @@ static int SendJsonField ( ISphOutputBuffer * pOut, const BYTE * pJSON, bool bSe
 	if ( bSendJsonField )
 	{
 		int iLen = sphUnpackPtrAttr ( pJSON, &pJSON );
-		if ( iLen )
-		{
-			ESphJsonType eJson = (ESphJsonType)*pJSON++;
-			iLen--;
-
-			if ( pOut )
-			{
-				pOut->SendByte ( (BYTE)eJson );
-				pOut->SendArray ( pJSON, iLen );
-			}
-
-			return iLen+1;
-		}
-		else
+		if ( !iLen )
 		{
 			if ( pOut )
 				pOut->SendByte ( JSON_EOF );
 
 			return -3; // 4 bytes by default, and we send only 1. this useless magic should be fixed
 		}
-	} else
+
+		ESphJsonType eJson = (ESphJsonType)*pJSON++;
+		if ( eJson==JSON_EOF )
+		{
+			if ( pOut )
+				pOut->SendByte ( (BYTE)eJson );
+
+			return -3;
+		}
+
+		iLen--;
+
+		if ( pOut )
+		{
+			pOut->SendByte ( (BYTE)eJson );
+			pOut->SendArray ( pJSON, iLen );
+		}
+
+		return iLen+1;
+	}
+	else
 		return SendJsonFieldAsString ( pOut, pJSON );
 }
 
@@ -4855,15 +4957,18 @@ static ESphAttr FixupAttrForNetwork ( ESphAttr eAttr, WORD uMasterVer, bool bAge
 }
 
 
-static void SendSchema ( ISphOutputBuffer & tOut, const CSphQueryResult & tRes, int iAttrsCount, WORD uMasterVer, bool bAgentMode )
+static void SendSchema ( ISphOutputBuffer & tOut, const CSphQueryResult & tRes, const CSphBitvec & tAttrsToSend, WORD uMasterVer, bool bAgentMode )
 {
 	tOut.SendInt ( tRes.m_tSchema.GetFieldsCount() );
 	for ( int i=0; i < tRes.m_tSchema.GetFieldsCount(); ++i )
 		tOut.SendString ( tRes.m_tSchema.GetFieldName(i) );
 
-	tOut.SendInt ( iAttrsCount );
-	for ( int i=0; i<iAttrsCount; ++i )
+	tOut.SendInt ( tAttrsToSend.BitCount() );
+	for ( int i=0; i<tRes.m_tSchema.GetAttrsCount(); ++i )
 	{
+		if ( !tAttrsToSend.BitGet(i) )
+			continue;
+
 		const CSphColumnInfo & tCol = tRes.m_tSchema.GetAttr(i);
 		tOut.SendString ( tCol.m_sName.cstr() );
 
@@ -4950,10 +5055,11 @@ void SendResult ( int iVer, ISphOutputBuffer & tOut, const CSphQueryResult * pRe
 	} else
 		tOut.SendDword ( SEARCHD_OK );
 
-	int iAttrsCount = sphSendGetAttrCount ( pRes->m_tSchema, bAgentMode );
+	CSphBitvec tAttrsToSend;
+	sphGetAttrsToSend ( pRes->m_tSchema, bAgentMode, false, tAttrsToSend );
 
 	// send schema
-	SendSchema ( tOut, *pRes, iAttrsCount, uMasterVer, bAgentMode );
+	SendSchema ( tOut, *pRes, tAttrsToSend, uMasterVer, bAgentMode );
 
 	// send matches
 	tOut.SendInt ( pRes->m_iCount );
@@ -4964,7 +5070,9 @@ void SendResult ( int iVer, ISphOutputBuffer & tOut, const CSphQueryResult * pRe
 	for ( int i=0; i<pRes->m_iCount; ++i )
 	{
 		const CSphMatch & tMatch = pRes->m_dMatches [ pRes->m_iOffset+i ];
-		tOut.SendUint64 ( tMatch.m_uDocID );
+
+		Verify ( pRes->m_tSchema.GetAttr(sphGetDocidName()) );
+		tOut.SendUint64 ( sphGetDocID(tMatch.m_pDynamic) );
 		tOut.SendInt ( tMatch.m_iWeight );
 
 		assert ( tMatch.m_pStatic || !pRes->m_tSchema.GetStaticSize() );
@@ -4973,8 +5081,9 @@ void SendResult ( int iVer, ISphOutputBuffer & tOut, const CSphQueryResult * pRe
 		assert ( tMatch.m_pDynamic || !pRes->m_tSchema.GetDynamicSize() );
 		assert ( !tMatch.m_pDynamic || (int)tMatch.m_pDynamic[-1]==pRes->m_tSchema.GetDynamicSize() );
 #endif
-		for ( int j=0; j<iAttrsCount; ++j )
-			SendAttribute ( tOut, tMatch, pRes->m_tSchema.GetAttr(j), iVer, uMasterVer, bAgentMode );
+		for ( int j=0; j<pRes->m_tSchema.GetAttrsCount(); ++j )
+			if ( tAttrsToSend.BitGet(j) )
+				SendAttribute ( tOut, tMatch, pRes->m_tSchema.GetAttr(j), iVer, uMasterVer, bAgentMode );
 	}
 
 	if ( tQuery.m_bAgent && tQuery.m_iLimit )
@@ -5072,27 +5181,19 @@ void AggrResult_t::ClampMatches ( int iLimit, bool bCommonSchema )
 }
 
 
-struct TaggedMatchSorter_fn : public SphAccessor_T<CSphMatch>
+struct TaggedMatchSorter_fn : public MatchSortAccessor_t
 {
-	void CopyKey ( CSphMatch * pMed, CSphMatch * pVal ) const
+	bool IsLess ( const CSphMatch * a, const CSphMatch * b ) const
 	{
-		pMed->m_uDocID = pVal->m_uDocID;
-		pMed->m_iTag = pVal->m_iTag;
-	}
+		bool bDistA = ( ( a->m_iTag & 0x80000000 )==0x80000000 );
+		bool bDistB = ( ( b->m_iTag & 0x80000000 )==0x80000000 );
 
-	bool IsLess ( const CSphMatch & a, const CSphMatch & b ) const
-	{
-		bool bDistA = ( ( a.m_iTag & 0x80000000 )==0x80000000 );
-		bool bDistB = ( ( b.m_iTag & 0x80000000 )==0x80000000 );
+		DocID_t tDocidA = sphGetDocID ( a->m_pDynamic );
+		DocID_t tDocidB = sphGetDocID ( b->m_pDynamic );
+
 		// sort by doc_id, dist_tag, tag
-		return ( a.m_uDocID < b.m_uDocID ) ||
-			( a.m_uDocID==b.m_uDocID && ( ( !bDistA && bDistB ) || ( ( a.m_iTag & 0x7FFFFFFF )>( b.m_iTag & 0x7FFFFFFF ) ) ) );
-	}
-
-	// inherited swap does not work on gcc
-	void Swap ( CSphMatch * a, CSphMatch * b ) const
-	{
-		::Swap ( *a, *b );
+		return ( tDocidA < tDocidB ) ||
+			( tDocidA==tDocidB && ( ( !bDistA && bDistB ) || ( ( a->m_iTag & 0x7FFFFFFF )>( b->m_iTag & 0x7FFFFFFF ) ) ) );
 	}
 };
 
@@ -5116,7 +5217,6 @@ void RemapResult ( const ISphSchema * pTarget, AggrResult_t * pRes )
 			dMapFrom.Add ( iSrcCol );
 			dRowItems.Add ( tSrcCol.m_tLocator.m_iBitOffset / SIZE_OF_ROW );
 			assert ( dMapFrom[i]>=0
-				|| pTarget->GetAttr(i).m_tLocator.IsID()
 				|| sphIsSortStringInternal ( pTarget->GetAttr(i).m_sName.cstr() )
 				|| pTarget->GetAttr(i).m_sName=="@groupbystr"
 				);
@@ -5132,7 +5232,7 @@ void RemapResult ( const ISphSchema * pTarget, AggrResult_t * pRes )
 			// create new and shiny (and properly sized) match
 			CSphMatch tRow;
 			tRow.Reset ( pTarget->GetDynamicSize() );
-			tRow.m_uDocID = tMatch.m_uDocID;
+			tRow.m_tRowID = tMatch.m_tRowID;
 			tRow.m_iWeight = tMatch.m_iWeight;
 			tRow.m_iTag = tMatch.m_iTag;
 
@@ -5170,7 +5270,7 @@ void RemapResult ( const ISphSchema * pTarget, AggrResult_t * pRes )
 
 // rebuild the results itemlist expanding stars
 const CSphVector<CSphQueryItem> & ExpandAsterisk ( const ISphSchema & tSchema,
-	const CSphVector<CSphQueryItem> & tItems, CSphVector<CSphQueryItem> & tExpanded, bool bNoID, bool bOnlyPlain, bool & bHaveExprs )
+	const CSphVector<CSphQueryItem> & tItems, CSphVector<CSphQueryItem> & tExpanded, bool bOnlyPlain, bool & bHaveExprs )
 {
 	// the result schema usually is the index schema + calculated items + @-items
 	// we need to extract the index schema only
@@ -5213,23 +5313,22 @@ const CSphVector<CSphQueryItem> & ExpandAsterisk ( const ISphSchema & tSchema,
 			dItemsLeftInSchema.Add(i);
 	}
 
+	bool bExpandedAsterisk = false;
 	ARRAY_FOREACH ( i, tItems )
 	{
 		if ( tItems[i].m_sExpr=="*" )
-		{ // asterisk expands to 'id' + all the items from the schema
-			if ( tSchema.GetAttrIndex ( "id" )<0 && !bNoID )
-				tExpanded.Add().m_sExpr = "id";
+		{
+			if ( bExpandedAsterisk )
+				continue;
+
+			bExpandedAsterisk = true;
 
 			for ( auto j : dItemsLeftInSchema )
-			{
-				const CSphString & sName = tSchema.GetAttr(j).m_sName;
-				if ( !j && bNoID && sName=="id" )
-					continue;
-				
-				tExpanded.Add().m_sExpr = sName;
-			}
+				tExpanded.Add().m_sExpr = tSchema.GetAttr(j).m_sName;
 		} else
+		{
 			tExpanded.Add ( tItems[i] );
+		}
 	}
 
 	return tExpanded;
@@ -5244,8 +5343,7 @@ static int KillAllDupes ( ISphMatchSorter * pSorter, AggrResult_t & tRes )
 	if ( pSorter->IsGroupby () )
 	{
 		// groupby sorter does that automagically
-		pSorter->SetMVAPool ( NULL, false ); // because we must be able to group on @groupby anyway
-		pSorter->SetStringPool ( NULL );
+		pSorter->SetBlobPool ( nullptr );
 		int iMC = 0;
 		int iBound = 0;
 
@@ -5260,18 +5358,24 @@ static int KillAllDupes ( ISphMatchSorter * pSorter, AggrResult_t & tRes )
 		}
 	} else
 	{
+		Verify ( tRes.m_tSchema.GetAttr(0).m_sName==sphGetDocidName() );
+
 		// normal sorter needs massasging
 		// sort by docid and then by tag to guarantee the replacement order
 		TaggedMatchSorter_fn fnSort;
 		sphSort ( tRes.m_dMatches.Begin(), tRes.m_dMatches.GetLength(), fnSort, fnSort );
 
 		// by default, simply remove dupes (select first by tag)
+		DocID_t tPrevDocID = 0;
 		ARRAY_FOREACH ( i, tRes.m_dMatches )
 		{
-			if ( i==0 || tRes.m_dMatches[i].m_uDocID!=tRes.m_dMatches[i-1].m_uDocID )
+			DocID_t tDocID = sphGetDocID ( tRes.m_dMatches[i].m_pDynamic );
+			if ( tDocID!=tPrevDocID )
 				pSorter->Push ( tRes.m_dMatches[i] );
 			else
 				iDupes++;
+
+			tPrevDocID = tDocID;
 		}
 	}
 
@@ -5312,10 +5416,28 @@ struct GenericMatchSort_fn : public CSphMatchComparatorState
 		for ( int i=0; i<CSphMatchComparatorState::MAX_ATTRS; i++ )
 			switch ( m_eKeypart[i] )
 		{
-			case SPH_KEYPART_ID:
-				if ( a->m_uDocID==b->m_uDocID )
+			case SPH_KEYPART_ROWID:
+				if ( a->m_tRowID==b->m_tRowID )
 					continue;
-				return ( ( m_uAttrDesc>>i ) & 1 ) ^ ( a->m_uDocID < b->m_uDocID );
+				return ( ( m_uAttrDesc>>i ) & 1 ) ^ ( a->m_tRowID < b->m_tRowID );
+
+			case SPH_KEYPART_DOCID_S:
+			{
+				register DocID_t aa = sphGetDocID ( a->m_pStatic );
+				register DocID_t bb = sphGetDocID ( b->m_pStatic );
+				if ( aa==bb )
+					continue;
+				return ( ( m_uAttrDesc>>i ) & 1 ) ^ ( aa < bb );
+			}
+
+			case SPH_KEYPART_DOCID_D:
+			{
+				register DocID_t aa = sphGetDocID ( a->m_pDynamic );
+				register DocID_t bb = sphGetDocID ( b->m_pDynamic );
+				if ( aa==bb )
+					continue;
+				return ( ( m_uAttrDesc>>i ) & 1 ) ^ ( aa < bb );
+			}
 
 			case SPH_KEYPART_WEIGHT:
 				if ( a->m_iWeight==b->m_iWeight )
@@ -5412,10 +5534,6 @@ static void ProcessPostlimit ( const CSphVector<const CSphColumnInfo *> & dPostl
 		{
 			const CSphColumnInfo * pCol = dPostlimit[j];
 			assert ( pCol->m_pExpr );
-
-			// OPTIMIZE? only if the tag did not change?
-			pCol->m_pExpr->Command ( SPH_EXPR_SET_MVA_POOL, &tRes.m_dTag2Pools [ tMatch.m_iTag ] );
-			pCol->m_pExpr->Command ( SPH_EXPR_SET_STRING_POOL, (void*)tRes.m_dTag2Pools [ tMatch.m_iTag ].m_pStrings );
 
 			if ( pCol->m_eAttrType==SPH_ATTR_INTEGER )
 				tMatch.SetAttr ( pCol->m_tLocator, pCol->m_pExpr->IntEval(tMatch) );
@@ -5519,7 +5637,7 @@ bool MinimizeAggrResult ( AggrResult_t & tRes, const CSphQuery & tQuery, bool bH
 	// build a list of select items that the query asked for
 	bool bHaveExprs = false;
 	CSphVector<CSphQueryItem> tExtItems;
-	const CSphVector<CSphQueryItem> & tItems = ExpandAsterisk ( tRes.m_tSchema, dQueryItems, tExtItems, bQueryFromAPI, tQuery.m_bFacetHead, bHaveExprs );
+	const CSphVector<CSphQueryItem> & tItems = ExpandAsterisk ( tRes.m_tSchema, dQueryItems, tExtItems, tQuery.m_bFacetHead, bHaveExprs );
 
 	// api + index without attributes + select * case
 	// can not skip aggregate filtering
@@ -5663,24 +5781,10 @@ bool MinimizeAggrResult ( AggrResult_t & tRes, const CSphQuery & tQuery, bool bH
 	ARRAY_FOREACH ( i, dFrontend )
 	{
 		CSphColumnInfo & d = dFrontend[i];
-		if ( d.m_iIndex<0 && tItems[i].m_sExpr=="id" )
-		{
-			// handle one single exception to select-list-to-minimized-schema mapping loop above
-			// "id" is not a part of a schema, so we gotta handle it here
-			d.m_tLocator.m_bDynamic = true;
-			d.m_sName = tItems[i].m_sAlias.IsEmpty() ? "id" : tItems[i].m_sAlias;
-			d.m_eAttrType = SPH_ATTR_BIGINT;
-			d.m_tLocator.m_iBitOffset = -8*(int)sizeof(SphDocID_t); // FIXME? move to locator method?
-			d.m_tLocator.m_iBitCount = 8*sizeof(SphDocID_t);
-		} else
-		{
-			// everything else MUST have been mapped in the loop just above
-			// so use GetAttr(), and let it assert() at will
-			const CSphColumnInfo & s = tRes.m_tSchema.GetAttr ( d.m_iIndex );
-			d.m_tLocator = s.m_tLocator;
-			d.m_eAttrType = s.m_eAttrType;
-			d.m_eAggrFunc = s.m_eAggrFunc; // for a sort loop just below
-		}
+		const CSphColumnInfo & s = tRes.m_tSchema.GetAttr ( d.m_iIndex );
+		d.m_tLocator = s.m_tLocator;
+		d.m_eAttrType = s.m_eAttrType;
+		d.m_eAggrFunc = s.m_eAggrFunc; // for a sort loop just below
 		d.m_iIndex = i; // to make the aggr sort loop just below stable
 	}
 
@@ -5801,13 +5905,13 @@ bool MinimizeAggrResult ( AggrResult_t & tRes, const CSphQuery & tQuery, bool bH
 		GenericMatchSort_fn tReorder;
 
 		ESortClauseParseResult eRes = sphParseSortClause ( &tQuery, tQuery.m_sOuterOrderBy.cstr(),
-			tRes.m_tSchema, eFunc, tReorder, tRes.m_sError );
+			tRes.m_tSchema, eFunc, tReorder, true, tRes.m_sError );
 		if ( eRes==SORT_CLAUSE_RANDOM )
 			tRes.m_sError = "order by rand() not supported in outer select";
 		if ( eRes!=SORT_CLAUSE_OK )
 			return false;
 
-		assert ( eFunc==FUNC_GENERIC2 || eFunc==FUNC_GENERIC3 || eFunc==FUNC_GENERIC4 || eFunc==FUNC_GENERIC5 );
+		assert ( eFunc==FUNC_GENERIC1 ||eFunc==FUNC_GENERIC2 || eFunc==FUNC_GENERIC3 || eFunc==FUNC_GENERIC4 || eFunc==FUNC_GENERIC5 );
 		sphSort ( tRes.m_dMatches.Begin(), tRes.m_dMatches.GetLength(), tReorder, MatchSortAccessor_t() );
 	}
 
@@ -6106,13 +6210,13 @@ struct Expr_Snippet_c : public ISphStringExpr
 
 	void Command ( ESphExprCommand eCmd, void * pArg ) override
 	{
-		if ( eCmd!=SPH_EXPR_SET_STRING_POOL )
+		if ( eCmd!=SPH_EXPR_SET_BLOB_POOL )
 			return;
 
 		if ( m_pArgs )
-			m_pArgs->Command ( SPH_EXPR_SET_STRING_POOL, pArg );
+			m_pArgs->Command ( SPH_EXPR_SET_BLOB_POOL, pArg );
 		if ( m_pText )
-			m_pText->Command ( SPH_EXPR_SET_STRING_POOL, pArg );
+			m_pText->Command ( SPH_EXPR_SET_BLOB_POOL, pArg );
 	}
 
 	uint64_t GetHash ( const ISphSchema &, uint64_t, bool & ) override
@@ -6200,7 +6304,6 @@ struct LocalIndex_t
 	int			m_iOrderTag = 0;
 	int			m_iWeight = 1;
 	int64_t		m_iMass = 0;
-	bool		m_bKillBreak = false;
 };
 
 
@@ -6262,7 +6365,7 @@ public:
 
 	void							RunQueries () final;					///< run all queries, get all results
 	void							RunUpdates ( const CSphQuery & tQuery, const CSphString & sIndex, CSphAttrUpdateEx * pUpdates ); ///< run Update command instead of Search
-	void							RunDeletes ( const CSphQuery & tQuery, const CSphString & sIndex, CSphString * pErrors, CSphVector<SphDocID_t> * pDelDocs );
+	void							RunDeletes ( const CSphQuery & tQuery, const CSphString & sIndex, CSphString * pErrors, CSphVector<DocID_t> * pDelDocs );
 	void							SetQuery ( int iQuery, const CSphQuery & tQuery, ISphTableFunc * pTableFunc ) final;
 	void							SetQueryParser ( const QueryParser_i * pParser );
 	void							SetQueryType ( QueryType_e eQueryType );
@@ -6295,7 +6398,7 @@ protected:
 	CSphVector<LocalIndex_t>		m_dLocal;				///< local indexes for the current subset
 	mutable CSphVector<CSphVector<StrVec_t> > m_dExtraSchemas; 	///< the extra attrs for agents. One vec per thread
 	CSphAttrUpdateEx *				m_pUpdates = nullptr;	///< holder for updates
-	CSphVector<SphDocID_t> *		m_pDelDocs = nullptr;	///< this query is for deleting
+	CSphVector<DocID_t> *			m_pDelDocs = nullptr;	///< this query is for deleting
 
 	CSphQueryProfile *				m_pProfile = nullptr;
 	QueryType_e						m_eQueryType {QUERY_API}; ///< queries from sphinxql require special handling
@@ -6418,7 +6521,7 @@ void SearchHandler_c::RunUpdates ( const CSphQuery & tQuery, const CSphString & 
 	RunActionQuery ( tQuery, sIndex, pUpdates->m_pError );
 }
 
-void SearchHandler_c::RunDeletes ( const CSphQuery &tQuery, const CSphString &sIndex, CSphString * pErrors, CSphVector<SphDocID_t> * pDelDocs )
+void SearchHandler_c::RunDeletes ( const CSphQuery &tQuery, const CSphString &sIndex, CSphString * pErrors, CSphVector<DocID_t> * pDelDocs )
 {
 	m_pDelDocs = pDelDocs;
 	RunActionQuery ( tQuery, sIndex, pErrors );
@@ -6428,7 +6531,6 @@ void SearchHandler_c::RunActionQuery ( const CSphQuery & tQuery, const CSphStrin
 {
 	SetQuery ( 0, tQuery, nullptr );
 	m_dQueries[0].m_sIndexes = sIndex;
-	m_dResults[0].m_dTag2Pools.Resize ( 1 );
 	m_dLocal.Add ().m_sName = sIndex;
 
 	CheckQuery ( tQuery, *pErrors );
@@ -6629,18 +6731,8 @@ static void FlattenToRes ( ISphMatchSorter * pSorter, AggrResult_t & tRes, int i
 	{
 		CSphSchema & tNewSchema = tRes.m_dSchemas.Add();
 		tNewSchema = *pSorter->GetSchema();
-		PoolPtrs_t & tPoolPtrs = tRes.m_dTag2Pools[iTag];
-		assert ( !tPoolPtrs.m_pMva && !tPoolPtrs.m_pStrings );
-		tPoolPtrs.m_pMva = tRes.m_pMva;
-		tPoolPtrs.m_pStrings = tRes.m_pStrings;
-		tPoolPtrs.m_bArenaProhibit = tRes.m_bArenaProhibit;
 		int iCopied = sphFlattenQueue ( pSorter, &tRes, iTag );
 		tRes.m_dMatchCounts.Add ( iCopied );
-
-		// clean up for next index search
-		tRes.m_pMva = nullptr;
-		tRes.m_pStrings = nullptr;
-		tRes.m_bArenaProhibit = false;
 	}
 }
 
@@ -6795,9 +6887,7 @@ void SearchHandler_c::RunLocalSearchesParallel()
 			++tRes.m_iSuccesses;
 			tRes.m_iTotalMatches += pSorter->GetTotalCount();
 
-			tRes.m_pMva = tRaw.m_pMva;
-			tRes.m_pStrings = tRaw.m_pStrings;
-			tRes.m_bArenaProhibit = tRaw.m_bArenaProhibit;
+			tRes.m_pBlobPool = tRaw.m_pBlobPool;
 			MergeWordStats ( tRes, tRaw.m_hWordStats, &m_dFailuresSet[iQuery], sLocal, sParentIndex );
 
 			tRes.m_bHasPrediction |= tRaw.m_bHasPrediction;
@@ -6907,29 +6997,10 @@ void SearchHandler_c::RunLocalSearchMT ( LocalSearch_t &dWork, ThreadLocal_t &tT
 	if ( !iValidSorters )
 		return;
 
-	// setup kill-lists
-	KillListVector dKillist;
-	for ( int i=iLocal+1; i<m_dLocal.GetLength(); ++i )
-	{
-		if ( m_dLocal[i].m_bKillBreak )
-			break;
-
-		auto * pKillListIndex = m_dLocked.Get ( m_dLocal[i].m_sName );
-		if ( !pKillListIndex )
-			continue;
-
-		if ( pKillListIndex->m_pIndex->GetKillListSize() )
-		{
-			auto & tElem = dKillist.Add ();
-			tElem.m_pBegin = pKillListIndex->m_pIndex->GetKillList();
-			tElem.m_iLen = pKillListIndex->m_pIndex->GetKillListSize();
-		}
-	}
-
 	int iIndexWeight = m_dLocal[iLocal].m_iWeight;
 
 	// do the query
-	CSphMultiQueryArgs tMultiArgs ( dKillist, iIndexWeight );
+	CSphMultiQueryArgs tMultiArgs ( iIndexWeight );
 	tMultiArgs.m_uPackedFactorFlags = uFactorFlags;
 	if ( m_bGotLocalDF )
 	{
@@ -6943,6 +7014,7 @@ void SearchHandler_c::RunLocalSearchMT ( LocalSearch_t &dWork, ThreadLocal_t &tT
 		dWork.m_bResult = pServed->m_pIndex->MultiQuery ( &m_dQueries[m_iStart], ppResults[0], iQueries, ppSorters, tMultiArgs );
 	else
 		dWork.m_bResult = pServed->m_pIndex->MultiQueryEx ( iQueries, &m_dQueries[m_iStart], ppResults, ppSorters, tMultiArgs );
+
 	ppResults[0]->m_tIOStats.Stop();
 
 	iCpuTime += sphCpuTimer();
@@ -7072,27 +7144,8 @@ void SearchHandler_c::RunLocalSearches()
 		// me shortcuts
 		AggrResult_t tStats;
 
-		// set kill-list
-		KillListVector dKillist;
-		for ( int i=iLocal+1; i<m_dLocal.GetLength(); ++i )
-		{
-			if ( m_dLocal[i].m_bKillBreak )
-				break;
-
-			const auto * pKillListIndex = m_dLocked.Get ( m_dLocal[i].m_sName );
-			if ( !pKillListIndex )
-				continue;
-
-			if ( pKillListIndex->m_pIndex->GetKillListSize() )
-			{
-				KillListTrait_t & tElem = dKillist.Add ();
-				tElem.m_pBegin = pKillListIndex->m_pIndex->GetKillList();
-				tElem.m_iLen = pKillListIndex->m_pIndex->GetKillListSize();
-			}
-		}
-
 		// do the query
-		CSphMultiQueryArgs tMultiArgs ( dKillist, iIndexWeight );
+		CSphMultiQueryArgs tMultiArgs ( iIndexWeight );
 		tMultiArgs.m_uPackedFactorFlags = uTotalFactorFlags;
 		if ( m_bGotLocalDF )
 		{
@@ -7113,8 +7166,7 @@ void SearchHandler_c::RunLocalSearches()
 			ARRAY_FOREACH ( i, m_dResults )
 			{
 				dResults[i] = &m_dResults[i];
-				dResults[i]->m_pMva = nullptr;
-				dResults[i]->m_pStrings = nullptr;
+				dResults[i]->m_pBlobPool = nullptr;
 			}
 
 			dResults[m_iStart]->m_tIOStats.Start();
@@ -7156,9 +7208,7 @@ void SearchHandler_c::RunLocalSearches()
 					tRes.m_iQueryTime += tStats.m_iQueryTime / ( m_iEnd-m_iStart+1 );
 					tRes.m_iCpuTime += tStats.m_iCpuTime / ( m_iEnd-m_iStart+1 );
 					tRes.m_tIOStats.Add ( tStats.m_tIOStats );
-					tRes.m_pMva = tStats.m_pMva;
-					tRes.m_pStrings = tStats.m_pStrings;
-					tRes.m_bArenaProhibit = tStats.m_bArenaProhibit;
+					tRes.m_pBlobPool = tStats.m_pBlobPool;
 					MergeWordStats ( tRes, tStats.m_hWordStats, &m_dFailuresSet[iQuery], sLocal, sParentIndex );
 					tRes.m_iMultiplier = m_iEnd-m_iStart+1;
 					iQTimeForStats = tStats.m_iQueryTime / ( m_iEnd-m_iStart+1 );
@@ -7616,8 +7666,7 @@ void SearchHandler_c::RunSubset ( int iStart, int iEnd )
 					dLocal.m_iMass = GetIndexMass ( sLocalAgent );
 					dLocal.m_sParentIndex = sIndex;
 					iTagsCount += iTagStep;
-					if ( pDist->m_dKillBreak.GetBits() && pDist->m_dKillBreak.BitGet ( j ) )
-						dLocal.m_bKillBreak = true;
+					m_dLocal.Last().m_iMass = GetIndexMass ( pDist->m_dLocal[j].cstr() );
 				}
 
 				bDivideRemote |= pDist->m_bDivideRemoteRanges;
@@ -7655,11 +7704,6 @@ void SearchHandler_c::RunSubset ( int iStart, int iEnd )
 			m_dResults[iRes].m_sError.SetSprintf ( "no enabled %s to search", sIndexType );
 		return;
 	}
-
-	m_dQueryIndexStats.Resize ( m_dLocal.GetLength () );
-
-	for ( int iRes=iStart; iRes<=iEnd; ++iRes )
-		m_dResults[iRes].m_dTag2Pools.Resize ( iTagsCount );
 
  	// select lists must have no expressions
 	if ( m_bMultiQueue )
@@ -7773,23 +7817,20 @@ void SearchHandler_c::RunSubset ( int iStart, int iEnd )
 					tRes.m_iSuccesses++;
 					tRes.m_tSchema = tRemoteResult.m_tSchema;
 
-					assert ( !tRes.m_dTag2Pools[iOrderTag + iRes - iStart].m_pMva && !tRes.m_dTag2Pools[iOrderTag + iRes - iStart].m_pStrings );
 
-					tRes.m_dMatches.Reserve ( tRes.m_dMatches.GetLength() + tRemoteResult.m_dMatches.GetLength() );
-					ARRAY_FOREACH ( i, tRemoteResult.m_dMatches )
-					{
-						tRes.m_dMatches.Add();
-						tRemoteResult.m_tSchema.CloneWholeMatch ( &tRes.m_dMatches.Last(), tRemoteResult.m_dMatches[i] );
-						tRes.m_dMatches.Last().m_iTag = ( iOrderTag + iRes - iStart ) | 0x80000000;
-					}
 
-					tRes.m_pMva = nullptr;
-					tRes.m_pStrings = nullptr;
-					tRes.m_dTag2Pools[iOrderTag+iRes-iStart].m_pMva = nullptr;
-					tRes.m_dTag2Pools[iOrderTag+iRes-iStart].m_pStrings = nullptr;
-					tRes.m_dMatchCounts.Add ( tRemoteResult.m_dMatches.GetLength() );
-					tRes.m_dSchemas.Add ( tRemoteResult.m_tSchema );
-					// note how we do NOT add per-index weight here
+							tRes.m_dMatches.Reserve ( tRes.m_dMatches.GetLength() + tRemoteResult.m_dMatches.GetLength() );
+							ARRAY_FOREACH ( i, tRemoteResult.m_dMatches )
+							{
+								tRes.m_dMatches.Add();
+								tRemoteResult.m_tSchema.CloneWholeMatch ( &tRes.m_dMatches.Last(), tRemoteResult.m_dMatches[i] );
+								tRes.m_dMatches.Last().m_iTag = ( iOrderTag + iRes - iStart ) | 0x80000000;
+							}
+
+							tRes.m_pBlobPool = nullptr;
+							tRes.m_dMatchCounts.Add ( tRemoteResult.m_dMatches.GetLength() );
+							tRes.m_dSchemas.Add ( tRemoteResult.m_tSchema );
+							// note how we do NOT add per-index weight here
 
 					// merge this agent's stats
 					tRes.m_iTotalMatches += tRemoteResult.m_iTotalMatches;
@@ -8278,27 +8319,15 @@ public:
 		{
 			// get value, skip repeats
 			SphAttr_t iCur = dMatches[i].GetAttr ( pCol->m_tLocator );
-			if ( t==SPH_ATTR_STRING && iCur!=0 )
-				iCur = (SphAttr_t)( pResult->m_dTag2Pools [ dMatches[i].m_iTag ].m_pStrings + iCur );
-
 			if ( iCur==iLastValue )
 				continue;
+
 			if ( iCur && iLastValue && t==SPH_ATTR_STRINGPTR )
 			{
 				const BYTE * a = (const BYTE*) iCur;
 				const BYTE * b = (const BYTE*) iLastValue;
 				int iLen1 = sphUnpackPtrAttr ( a, &a );
 				int iLen2 = sphUnpackPtrAttr ( b, &b );
-				if ( iLen1==iLen2 && memcmp ( a, b, iLen1 )==0 )
-					continue;
-			}
-
-			if ( iCur && iLastValue && t==SPH_ATTR_STRING )
-			{
-				const BYTE * a = (const BYTE*) iCur;
-				const BYTE * b = (const BYTE*) iLastValue;
-				int iLen1 = sphUnpackStr ( a, &a );
-				int iLen2 = sphUnpackStr ( b, &b );
 				if ( iLen1==iLen2 && memcmp ( a, b, iLen1 )==0 )
 					continue;
 			}
@@ -8346,8 +8375,8 @@ static const char * g_dSqlStmts[] =
 	"show_index_status", "show_profile", "alter_add", "alter_drop", "show_plan",
 	"select_dual", "show_databases", "create_plugin", "drop_plugin", "show_plugins", "show_threads",
 	"facet", "alter_reconfigure", "show_index_settings", "flush_index", "reload_plugins", "reload_index",
-	"flush_hostnames", "flush_logs", "reload_indexes", "sysfilters", "debug",
-	"join_cluster", "cluster_create", "cluster_delete", "cluster_index_add", "cluster_index_delete"
+	"flush_hostnames", "flush_logs", "reload_indexes", "sysfilters", "debug", "alter_killlist_target",
+	"join_cluster", "cluster_create", "cluster_delete", "cluster_index_add", "cluster_index_delete", "cluster_update"
 };
 
 
@@ -8390,7 +8419,12 @@ SqlStmt_t::~SqlStmt_t()
 bool SqlStmt_t::AddSchemaItem ( const char * psName )
 {
 	m_dInsertSchema.Add ( psName );
-	m_dInsertSchema.Last().ToLower();
+	CSphString & sAttr = m_dInsertSchema.Last();
+	sAttr.ToLower();
+	int iLen = sAttr.Length();
+	if ( iLen>1 && sAttr.cstr()[0] == '`' && sAttr.cstr()[iLen-1]=='`' )
+		sAttr = sAttr.SubString ( 1, iLen-2 );
+
 	m_iSchemaSz = m_dInsertSchema.GetLength();
 	return true; // stub; check if the given field actually exists in the schema
 }
@@ -8414,22 +8448,21 @@ enum
 {
 	SPHINXQL_TOK_COUNT		= -1,
 	SPHINXQL_TOK_GROUPBY	= -2,
-	SPHINXQL_TOK_WEIGHT		= -3,
-	SPHINXQL_TOK_ID			= -4
+	SPHINXQL_TOK_WEIGHT		= -3
 };
 
 /// types of string-list filters.
-enum class STRLIST {
+enum class StrList_e {
 	// string matching: assume attr is a whole solid string
 	// attr MUST match any of variants provided, assuming collation applied
-	IN_, 	/// 'hello' OP ( 'hello', 'foo') true, OP ( 'foo', 'fee' ) false
+	STR_IN,
 
 	// tags matching: assume attr is string of space-separated tags, no collation
 	// any separate tag of attr MUST match any of variants provided
-	ANY,	/// 'hello world' OP ('hello', 'foo') true, OP ('foo', 'fee' ) false
+	STR_ANY,	/// 'hello world' OP ('hello', 'foo') true, OP ('foo', 'fee' ) false
 
 	// every separate tag of attr MUST match any of variants provided
-	ALL,    /// 'hello world' OP ('world', 'hello') true, OP ('a','world','hello') false
+	STR_ALL    /// 'hello world' OP ('world', 'hello') true, OP ('a','world','hello') false
 };
 
 struct SqlParser_c : ISphNoncopyable
@@ -8461,6 +8494,7 @@ public:
 	bool			AddOption ( const SqlNode_t & tIdent, const SqlNode_t & tValue, const SqlNode_t & sArg );
 	bool			AddOption ( const SqlNode_t & tIdent, CSphVector<CSphNamedInt> & dNamed );
 	bool			AddInsertOption ( const SqlNode_t & tIdent, const SqlNode_t & tValue );
+	void			AddIndexHint ( IndexHint_e eHint, const SqlNode_t & tValue );
 	void			AddItem ( SqlNode_t * pExpr, ESphAggrFunc eFunc=SPH_AGGR_NONE, SqlNode_t * pStart=NULL, SqlNode_t * pEnd=NULL );
 	bool			AddItem ( const char * pToken, SqlNode_t * pStart=NULL, SqlNode_t * pEnd=NULL );
 	bool			AddCount ();
@@ -8497,7 +8531,6 @@ public:
 			case SPHINXQL_TOK_COUNT:	sRes = "@count"; break;
 			case SPHINXQL_TOK_GROUPBY:	sRes = "@groupby"; break;
 			case SPHINXQL_TOK_WEIGHT:	sRes = "@weight"; break;
-			case SPHINXQL_TOK_ID:		sRes = "@id"; break;
 			default:					assert ( 0 && "INTERNAL ERROR: unknown parser ident code" );
 		}
 		return sRes;
@@ -8523,7 +8556,7 @@ public:
 	CSphFilterSettings *	AddFilter ( const SqlNode_t & tCol, ESphFilter eType );
 	bool					AddStringFilter ( const SqlNode_t & tCol, const SqlNode_t & tVal, bool bExclude );
 	CSphFilterSettings *	AddValuesFilter ( const SqlNode_t & tCol ) { return AddFilter ( tCol, SPH_FILTER_VALUES ); }
-	bool			AddStringListFilter ( const SqlNode_t & tCol, SqlNode_t & tVal, STRLIST eType, bool bInverse=false );
+	bool			AddStringListFilter ( const SqlNode_t & tCol, SqlNode_t & tVal, StrList_e eType, bool bInverse=false );
 	bool					AddNullFilter ( const SqlNode_t & tCol, bool bEqualsNull );
 	void			AddHaving ();
 
@@ -8557,9 +8590,15 @@ public:
 
 	void						AddUpdatedAttr ( const SqlNode_t & tName, ESphAttr eType ) const;
 	void						UpdateMVAAttr ( const SqlNode_t & tName, const SqlNode_t& dValues );
+	void						UpdateStringAttr ( const SqlNode_t & tCol, const SqlNode_t & tStr );
 	void						SetGroupbyLimit ( int iLimit );
 	void						SetLimit ( int iOffset, int iLimit );
 	void						SetIndex ( const SqlNode_t & tIndex );
+	void						SetIndex ( const SqlNode_t & tIndex, CSphString & sIndex ) const;
+	// split ident ( cluster:index ) to parts
+	static void					SplitClusterIndex ( CSphString & sIndex, CSphString * pCluster );
+
+	void						JoinClusterAt ( const SqlNode_t & tAt );
 
 private:
 	void						AutoAlias ( CSphQueryItem & tItem, SqlNode_t * pStart, SqlNode_t * pEnd );
@@ -8687,24 +8726,9 @@ public:
 		{
 			case TOK_QUOTED_STRING :	return strtoll ( tVal.m_sVal.cstr(), NULL, 10 ); // FIXME? report conversion error?
 			case TOK_CONST_INT:			return tVal.m_iVal;
-			case TOK_CONST_FLOAT:		return int(tVal.m_fVal); // FIXME? report conversion error?
+			case TOK_CONST_FLOAT:		return int64_t(tVal.m_fVal); // FIXME? report conversion error?
 		}
 		return 0;
-	}
-
-	inline static SphDocID_t ToDocid ( const SqlInsert_t & tVal )
-	{
-		// FIXME? report conversion errors?
-		SphDocID_t uRes = DOCID_MAX;
-		switch ( tVal.m_iType )
-		{
-			case TOK_QUOTED_STRING :	uRes = (SphDocID_t) strtoull ( tVal.m_sVal.cstr(), NULL, 10 ); break;
-			case TOK_CONST_INT:			uRes = (SphDocID_t) tVal.m_iVal; break;
-			case TOK_CONST_FLOAT:		uRes = (SphDocID_t) tVal.m_fVal; break;
-		}
-		if ( uRes==DOCID_MAX )
-			uRes = 0;
-		return uRes;
 	}
 
 	bool SetAttr ( const CSphAttrLocator & tLoc, const SqlInsert_t & tVal, ESphAttr eTargetType )
@@ -8963,6 +8987,17 @@ bool SqlParser_c::AddOption ( const SqlNode_t & tIdent, const SqlNode_t & tValue
 	{
 		m_pStmt->m_sThreadFormat = sVal;
 
+	} else if ( sOpt=="morphology" )
+	{
+		if ( sVal=="none" )
+		{
+			m_pQuery->m_eExpandKeywords = QUERY_OPT_MORPH_NONE;
+		} else
+		{
+			m_pParseError->SetSprintf ( "morphology could be only disabled with option none, got %s", sVal.cstr() );
+			return false;
+		}
+
 	} else
 	{
 		m_pParseError->SetSprintf ( "unknown option '%s' (or bad argument type)", sOpt.cstr() );
@@ -9038,6 +9073,22 @@ bool SqlParser_c::AddInsertOption ( const SqlNode_t & tIdent, const SqlNode_t & 
 		return false;
 	}
 	return true;
+}
+
+
+void SqlParser_c::AddIndexHint ( IndexHint_e eHint, const SqlNode_t & tValue )
+{
+	CSphString sIndexes;
+	ToString ( sIndexes, tValue );
+	StrVec_t dIndexes;
+	sphSplit ( dIndexes, sIndexes.cstr() );
+
+	for ( const auto & i : dIndexes )
+	{
+		IndexHint_t & tHint = m_pQuery->m_dIndexHints.Add();
+		tHint.m_sIndex = i;
+		tHint.m_eHint = eHint;
+	}
 }
 
 
@@ -9189,8 +9240,9 @@ void SqlParser_c::AddUpdatedAttr ( const SqlNode_t & tName, ESphAttr eType ) con
 {
 	CSphAttrUpdate & tUpd = m_pStmt->m_tUpdate;
 	CSphString sAttr;
-	tUpd.m_dAttrs.Add ( ToString ( sAttr, tName ).ToLower().Leak() );
-	tUpd.m_dTypes.Add ( eType ); // sorry, ints only for now, riding on legacy shit!
+	TypedAttribute_t & tNew = tUpd.m_dAttributes.Add();
+	tNew.m_sName = ToString ( sAttr, tName ).ToLower();
+	tNew.m_eType = eType;
 }
 
 
@@ -9204,17 +9256,11 @@ void SqlParser_c::UpdateMVAAttr ( const SqlNode_t & tName, const SqlNode_t & dVa
 		// got MVA values, let's process them
 		dValues.m_pValues->Uniq(); // don't need dupes within MVA
 		tUpd.m_dPool.Add ( dValues.m_pValues->GetLength()*2 );
-		SphAttr_t * pVal = dValues.m_pValues->Begin();
-		SphAttr_t * pValMax = pVal + dValues.m_pValues->GetLength();
-		for ( ;pVal<pValMax; pVal++ )
+		for ( auto uVal : *dValues.m_pValues )
 		{
-			SphAttr_t uVal = *pVal;
 			if ( uVal>UINT_MAX )
-			{
 				eType = SPH_ATTR_INT64SET;
-			}
-			tUpd.m_dPool.Add ( (DWORD)uVal );
-			tUpd.m_dPool.Add ( (DWORD)( uVal>>32 ) );
+			*(( int64_t* ) tUpd.m_dPool.AddN ( 2 )) = uVal;
 		}
 	} else
 	{
@@ -9227,6 +9273,30 @@ void SqlParser_c::UpdateMVAAttr ( const SqlNode_t & tName, const SqlNode_t & dVa
 	AddUpdatedAttr ( tName, eType );
 }
 
+
+void SqlParser_c::UpdateStringAttr ( const SqlNode_t & tCol, const SqlNode_t & tStr )
+{
+	CSphAttrUpdate & tUpd = m_pStmt->m_tUpdate;
+
+	CSphString sStr;
+	ToStringUnescape ( sStr, tStr );
+
+	int iLength = sStr.Length();
+	tUpd.m_dPool.Add ( tUpd.m_dBlobs.GetLength() );
+	tUpd.m_dPool.Add ( iLength );
+
+	if ( iLength )
+	{
+		BYTE * pBlob = tUpd.m_dBlobs.AddN ( iLength+2 );	// a couple of extra \0 for json parser to be happy
+		memcpy ( pBlob, sStr.cstr(), iLength );
+		pBlob[iLength] = 0;
+		pBlob[iLength+1] = 0;
+	}
+
+	AddUpdatedAttr ( tCol, SPH_ATTR_STRING );
+}
+
+
 CSphFilterSettings * SqlParser_c::AddFilter ( const SqlNode_t & tCol, ESphFilter eType )
 {
 	CSphString sCol;
@@ -9236,7 +9306,7 @@ CSphFilterSettings * SqlParser_c::AddFilter ( const SqlNode_t & tCol, ESphFilter
 	tElem.m_iFilterItem = m_pQuery->m_dFilters.GetLength();
 
 	CSphFilterSettings * pFilter = &m_pQuery->m_dFilters.Add();
-	pFilter->m_sAttrName = ( !strcasecmp ( sCol.cstr(), "id" ) ) ? "@id" : sCol;
+	pFilter->m_sAttrName = sCol;
 	pFilter->m_eType = eType;
 	sphColumnToLowercase ( const_cast<char *>( pFilter->m_sAttrName.cstr() ) );
 	return pFilter;
@@ -9271,8 +9341,8 @@ bool SqlParser_c::AddIntFilterGreater ( const SqlNode_t & tAttr, int64_t iVal, b
 	CSphFilterSettings * pFilter = AddFilter ( tAttr, SPH_FILTER_RANGE );
 	if ( !pFilter )
 		return false;
-	bool bId = ( pFilter->m_sAttrName=="@id" ) || ( pFilter->m_sAttrName=="id" );
-	pFilter->m_iMaxValue = bId ? (SphAttr_t)ULLONG_MAX : LLONG_MAX;
+
+	pFilter->m_iMaxValue = LLONG_MAX;
 	pFilter->m_iMinValue = iVal;
 	pFilter->m_bHasEqualMin = bHasEqual;
 	pFilter->m_bOpenRight = true;
@@ -9285,8 +9355,8 @@ bool SqlParser_c::AddIntFilterLesser ( const SqlNode_t & tAttr, int64_t iVal, bo
 	CSphFilterSettings * pFilter = AddFilter ( tAttr, SPH_FILTER_RANGE );
 	if ( !pFilter )
 		return false;
-	bool bId = ( pFilter->m_sAttrName=="@id" ) || ( pFilter->m_sAttrName=="id" );
-	pFilter->m_iMinValue = bId ? 0 : LLONG_MIN;
+
+	pFilter->m_iMinValue = LLONG_MIN;
 	pFilter->m_iMaxValue = iVal;
 	pFilter->m_bHasEqualMax = bHasEqual;
 	pFilter->m_bOpenLeft = true;
@@ -9299,6 +9369,7 @@ bool SqlParser_c::AddUservarFilter ( const SqlNode_t & tCol, const SqlNode_t & t
 	CSphFilterSettings * pFilter = AddFilter ( tCol, SPH_FILTER_USERVAR );
 	if ( !pFilter )
 		return false;
+
 	CSphString & sUserVar = pFilter->m_dStrings.Add();
 	ToString ( sUserVar, tVar ).ToLower();
 	pFilter->m_bExclude = bExclude;
@@ -9318,7 +9389,7 @@ bool SqlParser_c::AddStringFilter ( const SqlNode_t & tCol, const SqlNode_t & tV
 }
 
 
-bool SqlParser_c::AddStringListFilter ( const SqlNode_t & tCol, SqlNode_t & tVal, STRLIST eType, bool bInverse )
+bool SqlParser_c::AddStringListFilter ( const SqlNode_t & tCol, SqlNode_t & tVal, StrList_e eType, bool bInverse )
 {
 	CSphFilterSettings * pFilter = AddFilter ( tCol, SPH_FILTER_STRING_LIST );
 	if ( !pFilter || !tVal.m_pValues )
@@ -9335,9 +9406,9 @@ bool SqlParser_c::AddStringListFilter ( const SqlNode_t & tCol, SqlNode_t & tVal
 	tVal.m_pValues = nullptr;
 	pFilter->m_bExclude = bInverse;
 	assert ( pFilter->m_eMvaFunc == SPH_MVAFUNC_NONE ); // that is default for IN filter
-	if ( eType==STRLIST::ANY )
+	if ( eType==StrList_e::STR_ANY )
 		pFilter->m_eMvaFunc = SPH_MVAFUNC_ANY;
-	else if ( eType==STRLIST::ALL )
+	else if ( eType==StrList_e::STR_ALL )
 		pFilter->m_eMvaFunc = SPH_MVAFUNC_ALL;
 	return true;
 }
@@ -9482,6 +9553,37 @@ static void CreateFilterTree ( const CSphVector<FilterTreeItem_t> & dOps, int iS
 	tQuery.m_dFilterTree.SwapData ( dTree );
 }
 
+
+struct HintComp_fn
+{
+	bool IsLess ( const IndexHint_t & tA, const IndexHint_t & tB ) const
+	{
+		return strcasecmp ( tA.m_sIndex.cstr(), tB.m_sIndex.cstr() ) < 0;
+	}
+
+	bool IsEq ( const IndexHint_t & tA, const IndexHint_t & tB ) const
+	{
+		return tA.m_sIndex==tB.m_sIndex && tA.m_eHint==tB.m_eHint;
+	}
+};
+
+
+static bool CheckQueryHints ( CSphVector<IndexHint_t> & dHints, CSphString & sError )
+{
+	sphSort ( dHints.Begin(), dHints.GetLength(), HintComp_fn() );
+	sphUniq ( dHints.Begin(), dHints.GetLength(), HintComp_fn() );
+
+	for ( int i = 1; i < dHints.GetLength(); i++ )
+		if ( dHints[i-1].m_sIndex==dHints[i].m_sIndex )
+		{
+			sError.SetSprintf ( "conflicting hints specified for index '%s'", dHints[i-1].m_sIndex.cstr() );
+			return false;
+		}
+
+	return true;
+}
+
+
 bool sphParseSqlQuery ( const char * sQuery, int iLen, CSphVector<SqlStmt_t> & dStmt, CSphString & sError, ESphCollation eCollation )
 {
 	if ( !sQuery || !iLen )
@@ -9576,6 +9678,10 @@ bool sphParseSqlQuery ( const char * sQuery, int iLen, CSphVector<SqlStmt_t> & d
 		if ( iFilterCount && tParser.m_bGotFilterOr )
 			CreateFilterTree ( tParser.m_dFilterTree, iFilterStart, iFilterCount, tQuery );
 		iFilterStart += iFilterCount;
+
+		// fixup hints
+		if ( !CheckQueryHints ( tQuery.m_dIndexHints, sError ) )
+			return false;
 	}
 
 	if ( iRes!=0 || !dStmt.GetLength() )
@@ -9677,25 +9783,47 @@ bool sphParseSqlQuery ( const char * sQuery, int iLen, CSphVector<SqlStmt_t> & d
 	return true;
 }
 
+void SqlParser_c::SetIndex ( const SqlNode_t & tIndex, CSphString & sIndex ) const
+{
+	ToString ( sIndex, tIndex );
+	SplitClusterIndex ( sIndex, nullptr );
+}
+
 void SqlParser_c::SetIndex ( const SqlNode_t & tIndex )
 {
 	assert ( m_pStmt );
 	ToString ( m_pStmt->m_sIndex, tIndex );
+	SplitClusterIndex ( m_pStmt->m_sIndex, &m_pStmt->m_sCluster );
+}
 
-	// split ident ( cluster:index ) to parts
-	if ( !m_pStmt->m_sIndex.IsEmpty() )
+void SqlParser_c::SplitClusterIndex ( CSphString & sIndex, CSphString * pCluster )
+{
+	if ( sIndex.IsEmpty() )
+		return;
+
+	const char * sDelimiter = strchr ( sIndex.cstr(), ':' );
+	if ( sDelimiter )
 	{
-		const char * sDelimiter = strchr ( m_pStmt->m_sIndex.cstr(), ':' );
-		if ( sDelimiter )
-		{
-			CSphString sTmp = m_pStmt->m_sIndex; // m_sIndex.SetBinary can not accept this(m_sIndex) pointer
+		CSphString sTmp = sIndex; // m_sIndex.SetBinary can not accept this(m_sIndex) pointer
 
-			int iPos = sDelimiter - m_pStmt->m_sIndex.cstr();
-			int iLen = m_pStmt->m_sIndex.Length();
-			m_pStmt->m_sIndex.SetBinary ( sTmp.cstr() + iPos + 1, iLen - iPos - 1 );
-			m_pStmt->m_sCluster.SetBinary ( sTmp.cstr(), iPos );
-		}
+		int iPos = sDelimiter - sIndex.cstr();
+		int iLen = sIndex.Length();
+		sIndex.SetBinary ( sTmp.cstr() + iPos + 1, iLen - iPos - 1 );
+		if ( pCluster )
+			pCluster->SetBinary ( sTmp.cstr(), iPos );
 	}
+}
+
+void SqlParser_c::JoinClusterAt ( const SqlNode_t & tAt )
+{
+	assert ( m_pStmt );
+	m_pStmt->m_bClusterUpdateNodes = true;
+
+	m_pStmt->m_dCallOptNames.Add ( "at_node" );
+
+	SqlInsert_t & tVal = m_pStmt->m_dCallOptValues.Add();
+	tVal.m_iType = tAt.m_iType;
+	ToStringUnescape ( tVal.m_sVal, tAt );
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -10436,67 +10564,78 @@ protected:
 void UpdateRequestBuilder_t::BuildRequest ( const AgentConn_t & tAgent, CachedOutputBuffer_c & tOut ) const
 {
 	const char * sIndexes = tAgent.m_tDesc.m_sIndexes.cstr();
-	bool bMva = false;
-	ARRAY_FOREACH ( i, m_tUpd.m_dTypes )
+	bool bBlob = false;
+	for ( const auto & i : m_tUpd.m_dAttributes )
 	{
-		assert ( m_tUpd.m_dTypes[i]!=SPH_ATTR_INT64SET ); // mva64 goes only via SphinxQL (SphinxqlRequestBuilder_c)
-		bMva |= ( m_tUpd.m_dTypes[i]==SPH_ATTR_UINT32SET );
+		assert ( i.m_eType!=SPH_ATTR_INT64SET ); // mva64 goes only via SphinxQL (SphinxqlRequestBuilder_c)
+		bBlob |= sphIsBlobAttr ( i.m_eType );
 	}
 
 	// API header
 	APICommand_t tWr { tOut, SEARCHD_COMMAND_UPDATE, VER_COMMAND_UPDATE };
 
 	tOut.SendString ( sIndexes );
-	tOut.SendInt ( m_tUpd.m_dAttrs.GetLength() );
+	tOut.SendInt ( m_tUpd.m_dAttributes.GetLength() );
 	tOut.SendInt ( m_tUpd.m_bIgnoreNonexistent ? 1 : 0 );
-	ARRAY_FOREACH ( i, m_tUpd.m_dAttrs )
+	for ( const auto & i : m_tUpd.m_dAttributes )
 	{
-		tOut.SendString ( m_tUpd.m_dAttrs[i] );
-		tOut.SendInt ( ( m_tUpd.m_dTypes[i]==SPH_ATTR_UINT32SET ) ? 1 : 0 );
+		tOut.SendString ( i.m_sName.cstr() );
+
+		UpdateType_e eUpdate;
+		switch ( i.m_eType )
+		{
+		case SPH_ATTR_UINT32SET:	eUpdate = UPDATE_MVA32; break;
+		case SPH_ATTR_STRING:
+		case SPH_ATTR_JSON:			eUpdate = UPDATE_STRING; break;
+		default:					eUpdate = UPDATE_INT; break;
+		};
+
+		tOut.SendInt ( eUpdate );
 	}
+
 	tOut.SendInt ( m_tUpd.m_dDocids.GetLength() );
 
-	if ( !bMva )
+	ARRAY_FOREACH ( iDoc, m_tUpd.m_dDocids )
 	{
-		ARRAY_FOREACH ( iDoc, m_tUpd.m_dDocids )
+		tOut.SendUint64 ( m_tUpd.m_dDocids[iDoc] );
+
+		const DWORD * pPool = m_tUpd.m_dPool.Begin() + m_tUpd.m_dRowOffset[iDoc];
+		for ( const auto & i : m_tUpd.m_dAttributes )
 		{
-			tOut.SendUint64 ( m_tUpd.m_dDocids[iDoc] );
-			int iHead = m_tUpd.m_dRowOffset[iDoc];
-			int iTail = m_tUpd.m_dPool.GetLength ();
-			if ( (iDoc+1)<m_tUpd.m_dDocids.GetLength() )
-				iTail = m_tUpd.m_dRowOffset[iDoc+1];
+			DWORD uVal = *pPool++;
 
-			for ( int j=iHead; j<iTail; j++ )
-				tOut.SendDword ( m_tUpd.m_dPool[j] );
-		}
-	} else
-	{
-		// size down in case of MVA
-		// MVA stored as mva64 in pool but API could handle only mva32 due to HandleCommandUpdate
-		// SphinxQL only could work either mva32 or mva64 and only SphinxQL could receive mva64 updates
-		// SphinxQL master communicate to agent via SphinxqlRequestBuilder_c
-
-		ARRAY_FOREACH ( iDoc, m_tUpd.m_dDocids )
-		{
-			tOut.SendUint64 ( m_tUpd.m_dDocids[iDoc] );
-
-			const DWORD * pPool = m_tUpd.m_dPool.Begin() + m_tUpd.m_dRowOffset[iDoc];
-			ARRAY_FOREACH ( iAttr, m_tUpd.m_dTypes )
+			switch ( i.m_eType )
 			{
-				DWORD uVal = *pPool++;
-				if ( m_tUpd.m_dTypes[iAttr]!=SPH_ATTR_UINT32SET )
+			case SPH_ATTR_UINT32SET:
 				{
-					tOut.SendDword ( uVal );
-				} else
-				{
+					// size down in case of MVA
+					// MVA stored as mva64 in pool but API could handle only mva32 due to HandleCommandUpdate
+					// SphinxQL only could work either mva32 or mva64 and only SphinxQL could receive mva64 updates
+					// SphinxQL master communicate to agent via SphinxqlRequestBuilder_c
+
 					const DWORD * pEnd = pPool + uVal;
 					tOut.SendDword ( uVal/2 );
 					while ( pPool<pEnd )
 					{
-						tOut.SendDword ( *pPool );
+						auto iVal = *(int64_t*)pPool;
+						tOut.SendDword ( iVal&0xFFFFFFFF );
 						pPool += 2;
 					}
 				}
+				break;
+
+			case SPH_ATTR_STRING:
+			case SPH_ATTR_JSON:
+				{
+					DWORD uBlobLen = *pPool++;
+					tOut.SendDword ( uBlobLen );
+					tOut.SendBytes ( m_tUpd.m_dBlobs.Begin()+uVal, uBlobLen );
+				}
+				break;
+
+			default:
+				tOut.SendDword ( uVal );
+				break;
 			}
 		}
 	}
@@ -10513,7 +10652,10 @@ static void DoCommandUpdate ( const char * sIndex, const char * sDistributed, co
 	}
 
 	CSphString sError, sWarning;
-	int iUpd = pServed->m_pIndex->UpdateAttributes ( tUpd, -1, sError, sWarning );
+	bool bCritical = false;
+	int iUpd = pServed->m_pIndex->UpdateAttributes ( tUpd, -1, bCritical, sError, sWarning );
+	assert ( !bCritical );    // fixme! handle this
+
 	if ( iUpd<0 )
 	{
 		dFails.Submit ( sIndex, sDistributed, sError.cstr() );
@@ -10562,22 +10704,33 @@ void HandleCommandUpdate ( CachedOutputBuffer_c & tOut, int iVer, InputBuffer_c 
 	CSphAttrUpdate tUpd;
 	CSphVector<DWORD> dMva;
 
-	bool bMvaUpdate = false;
-
-	tUpd.m_dAttrs.Resize ( tReq.GetDword() ); // FIXME! check this
-	tUpd.m_dTypes.Resize ( tUpd.m_dAttrs.GetLength() );
+	tUpd.m_dAttributes.Resize ( tReq.GetDword() ); // FIXME! check this
 	if ( iVer>=0x103 )
 		tUpd.m_bIgnoreNonexistent = ( tReq.GetDword() & 1 )!=0;
-	ARRAY_FOREACH ( i, tUpd.m_dAttrs )
+
+	bool bBlobUpdate = false;
+	for ( auto & i : tUpd.m_dAttributes )
 	{
-		tUpd.m_dAttrs[i] = tReq.GetString().ToLower().Leak();
-		tUpd.m_dTypes[i] = SPH_ATTR_INTEGER;
+		i.m_sName = tReq.GetString();
+		i.m_eType = SPH_ATTR_INTEGER;
 		if ( iVer>=0x102 )
 		{
-			if ( tReq.GetDword() )
+			UpdateType_e eUpdate = (UpdateType_e)tReq.GetDword();
+			switch ( eUpdate )
 			{
-				tUpd.m_dTypes[i] = SPH_ATTR_UINT32SET;
-				bMvaUpdate = true;
+			case UPDATE_MVA32:
+				i.m_eType = SPH_ATTR_UINT32SET;
+				bBlobUpdate = true;
+				break;
+
+			case UPDATE_STRING:
+			case UPDATE_JSON:
+				i.m_eType = SPH_ATTR_STRING;
+				bBlobUpdate = true;
+				break;
+
+			default:
+				break;
 			}
 		}
 	}
@@ -10591,36 +10744,61 @@ void HandleCommandUpdate ( CachedOutputBuffer_c & tOut, int iVer, InputBuffer_c 
 		// v.1.0 always sends 32-bit ids; v.1.1+ always send 64-bit ones
 		uint64_t uDocid = ( iVer>=0x101 ) ? tReq.GetUint64 () : tReq.GetDword ();
 
-		tUpd.m_dDocids.Add ( (SphDocID_t)uDocid ); // FIXME! check this
+		tUpd.m_dDocids.Add ( uDocid );
 		tUpd.m_dRowOffset.Add ( tUpd.m_dPool.GetLength() );
 
-		ARRAY_FOREACH ( iAttr, tUpd.m_dAttrs )
+		for ( const auto & iAttr : tUpd.m_dAttributes )
 		{
-			if ( tUpd.m_dTypes[iAttr]==SPH_ATTR_UINT32SET )
+			switch ( iAttr.m_eType )
 			{
-				DWORD uCount = tReq.GetDword ();
-				if ( !uCount )
+			case SPH_ATTR_UINT32SET:
 				{
-					tUpd.m_dPool.Add ( 0 );
-					continue;
-				}
+					DWORD uCount = tReq.GetDword ();
+					if ( !uCount )
+					{
+						tUpd.m_dPool.Add ( 0 );
+						continue;
+					}
 
-				dMva.Resize ( uCount );
-				for ( DWORD j=0; j<uCount; j++ )
-				{
-					dMva[j] = tReq.GetDword();
-				}
-				dMva.Uniq(); // don't need dupes within MVA
+					dMva.Resize ( uCount );
+					for ( DWORD j=0; j<uCount; j++ )
+						dMva[j] = tReq.GetDword();
 
-				tUpd.m_dPool.Add ( dMva.GetLength()*2 );
-				ARRAY_FOREACH ( j, dMva )
-				{
-					tUpd.m_dPool.Add ( dMva[j] );
-					tUpd.m_dPool.Add ( 0 ); // dummy expander mva32 -> mva64
+					dMva.Uniq(); // don't need dupes within MVA
+
+					tUpd.m_dPool.Add ( dMva.GetLength()*2 );
+					ARRAY_FOREACH ( j, dMva )
+					{
+						*(int64_t*)tUpd.m_dPool.AddN(2) = dMva[j]; // dummy expander mva32 -> mva64
+					}
 				}
-			} else
-			{
+				break;
+
+			case SPH_ATTR_STRING:
+				{
+					DWORD uLen = tReq.GetDword();
+					tUpd.m_dPool.Add ( tUpd.m_dBlobs.GetLength() );
+					tUpd.m_dPool.Add ( uLen );
+
+					if ( uLen )
+					{
+						// extra zeroes for json parser
+						BYTE * pAdded = tUpd.m_dBlobs.AddN ( uLen+2 );
+						if ( !tReq.GetBytes ( pAdded, uLen ) )
+						{
+							SendErrorReply ( tOut, "error reading string" );
+							break;
+						}
+
+						pAdded[uLen] = 0;
+						pAdded[uLen+1] = 0;
+					}
+				}
+				break;
+
+			default:
 				tUpd.m_dPool.Add ( tReq.GetDword() );
+				break;
 			}
 		}
 	}
@@ -10654,9 +10832,6 @@ void HandleCommandUpdate ( CachedOutputBuffer_c & tOut, int iVer, InputBuffer_c 
 	SearchFailuresLog_c dFails;
 	int iSuccesses = 0;
 	int iUpdated = 0;
-	tUpd.m_dRows.Resize ( tUpd.m_dDocids.GetLength() );
-	for ( auto& pRow : tUpd.m_dRows )
-		pRow = nullptr;
 
 	ARRAY_FOREACH ( iIdx, dIndexNames )
 	{
@@ -10664,7 +10839,7 @@ void HandleCommandUpdate ( CachedOutputBuffer_c & tOut, int iVer, InputBuffer_c 
 		auto pLocal = GetServed ( sReqIndex );
 		if ( pLocal )
 		{
-			if ( bMvaUpdate )
+			if ( bBlobUpdate )
 				DoCommandUpdate ( sReqIndex, nullptr, tUpd, iSuccesses,
 					iUpdated, dFails, ServedDescWPtr_c ( pLocal ) );
 			else
@@ -10681,7 +10856,7 @@ void HandleCommandUpdate ( CachedOutputBuffer_c & tOut, int iVer, InputBuffer_c 
 				auto pServed = GetServed ( sLocal );
 				if ( pServed )
 				{
-					if ( bMvaUpdate )
+					if ( bBlobUpdate )
 						DoCommandUpdate ( sLocal.cstr (), sReqIndex, tUpd, iSuccesses,
 							iUpdated, dFails, ServedDescWPtr_c ( pServed ) );
 					else
@@ -11609,7 +11784,7 @@ void SendMysqlErrorPacket ( ISphOutputBuffer & tOut, BYTE uPacketID, const char 
 
 	LogSphinxqlError ( sStmt, sError, iCID );
 
-	int iErrorLen = strlen(sError)+1; // including the trailing zero
+	int iErrorLen = strlen(sError);
 
 	// cut the error message to fix isseue with long message for popular clients
 	if ( iErrorLen>SPH_MYSQL_ERROR_MAX_LENGTH )
@@ -11676,7 +11851,7 @@ void SendMysqlOkPacket ( ISphOutputBuffer & tOut, BYTE uPacketID, int iAffectedR
 
 	int iMsgLen = 0;
 	if ( sMessage )
-		iMsgLen = strlen(sMessage) + 1; // FIXME! does or doesn't the trailing zero necessary in Ok packet?
+		iMsgLen = strlen(sMessage);
 
 	tOut.SendLSBDword ( DWORD (uPacketID<<24) + iLen + iMsgLen + 5);
 	tOut.SendByte ( 0 );				// ok packet
@@ -11716,7 +11891,6 @@ public:
 
 IDataTupleter::~IDataTupleter() = default;
 
-#define SPH_MAX_NUMERIC_STR 64
 class SqlRowBuffer_c : public ISphNoncopyable, public IDataTupleter, private LazyVector_T<BYTE>
 {
 	using BaseVec = LazyVector_T<BYTE>;
@@ -12179,9 +12353,9 @@ bool PercolateParseFilters ( const char * sFilters, ESphCollation eCollation, co
 				sError.SetSprintf ( "unsupported filter column '%s'", tFilter.m_sAttrName.cstr() );
 				return false;
 			}
-	
+
 			const char * sAttrName = tFilter.m_sAttrName.cstr();
-			
+
 			// might be a JSON.field
 			CSphString sJsonField;
 			const char * sJsonDot = strchr ( sAttrName, '.' );
@@ -12277,21 +12451,16 @@ struct StringPtrTraits_t
 		m_dOff.Fill ( -1 );
 	}
 
-	BYTE* ReserveBlob ( int iBlobSize, int iOffset )
+	BYTE * ReserveBlob ( int iBlobSize, int iOffset )
 	{
 		if ( !iBlobSize )
 			return nullptr;
 
 		m_dOff[iOffset] = m_dPackedData.GetLength ();
 
-		m_dPackedData.ReserveGap ( iBlobSize + 4 );
-		sphPackStrlen ( m_dPackedData.AddN ( 4 ), iBlobSize );
-		return m_dPackedData.AddN ( iBlobSize );
-	}
-
-	void AddBlob ( const VecTraits_T<BYTE>& dBlob, int iOffset )
-	{
-		memcpy ( ReserveBlob ( dBlob.GetLength (), iOffset ), dBlob.begin (), dBlob.GetLength () );
+		BYTE * pPacked = m_dPackedData.AddN ( sphCalcPackedLength(iBlobSize) );
+		pPacked += sphZipToPtr ( iBlobSize, pPacked );
+		return pPacked;
 	}
 };
 
@@ -12312,102 +12481,58 @@ static void BsonToSqlInsert ( const bson::Bson_c& dBson, SqlInsert_t& tAttr )
 	}
 }
 
-// save bson array to 64 bit mvaint64 mva
-static int BsonArrayToMvaWide ( CSphVector<DWORD> &dMva, const bson::Bson_c &dBson )
+
+template<typename T>
+static int CopyBsonValues ( CSphVector<int64_t> & dMva, const bson::Bson_c & dBson )
 {
-	using namespace bson;
+	auto dValues = bson::Vector<T> ( dBson );
+	int64_t * pDst = dMva.AddN ( dValues.GetLength() );
+	ARRAY_FOREACH ( i, dValues )
+		pDst[i] = dValues[i];
+
+	return dValues.GetLength();
+}
+
+
+// save bson array to 64 bit mvaint64 mva
+static int BsonArrayToMva ( CSphVector<int64_t> & dMva, const bson::Bson_c & dBson )
+{
 	int iOff = dMva.GetLength ();
 	dMva.Add ();
-	int iStored = 0;
+	int iValues = 0;
 
-	// int64 may be processed natively; that is the fastest way!
 	if ( dBson.GetType ()==JSON_INT64_VECTOR )
-	{
-		auto dValues = Vector<int64_t> ( dBson );
-		iStored = 2 * dValues.GetLength ();
-		dMva.Append ( dValues.begin(), iStored );
-	} else if ( dBson.GetType ()==JSON_INT32_VECTOR )
-	{ // int32 may be easy shrinked
-		auto dValues = Vector<DWORD> ( dBson );
-		iStored = 2 * dValues.GetLength ();
-		auto pDst = ( int64_t * ) dMva.AddN ( iStored );
-		ARRAY_FOREACH ( i, dValues )
-			pDst[i] = dValues[i];
-	} else
+		iValues = CopyBsonValues<int64_t> ( dMva, dBson );
+	else if ( dBson.GetType ()==JSON_INT32_VECTOR )
+		iValues = CopyBsonValues<DWORD> ( dMva, dBson );
+	else
 	{ // slowest path - m.b. need conversion of every value
-		BsonIterator_c dIter ( dBson );
-		iStored = 2 * dIter.NumElems ();
-		auto pDst = ( int64_t * ) dMva.AddN ( iStored );
+		bson::BsonIterator_c dIter ( dBson );
+		iValues = dIter.NumElems();
+		int64_t * pDst = dMva.AddN(iValues);
 		for ( ; dIter; dIter.Next () )
 			*pDst++ = dIter.Int ();
 	}
 
-	if ( !iStored ) // empty mva; discard resize
+	if ( !iValues ) // empty mva; discard resize
 	{
 		dMva.Resize ( iOff );
 		return -1;
 	}
 
-	auto pDst = ( int64_t * ) &dMva[iOff + 1];
+	auto pDst = &dMva[iOff + 1];
 
-	sphSort ( pDst, iStored / 2 );
-	iStored = 2 * sphUniq ( pDst, iStored / 2 );
-	dMva[iOff] = iStored;
-	dMva.Resize ( iOff + iStored + 1 );
+	sphSort ( pDst, iValues );
+	iValues = sphUniq ( pDst, iValues );
+	dMva[iOff] = iValues;
+	dMva.Resize ( iOff + iValues + 1 );
 	return iOff;
 }
 
-// save bson array to mva (32- or 64-bit wide)
-static int BsonArrayToMva( CSphVector<DWORD> &dMva, const bson::Bson_c& dBson, bool bTargetWide )
-{
-	assert ( dBson.IsArray () );
-	if ( bTargetWide )
-		return BsonArrayToMvaWide ( dMva, dBson );
 
-	using namespace bson;
-	int iOff = dMva.GetLength();
-	dMva.Add();
-	int iStored = 0;
-
-	// int32 may be processed natively; that is the fastest way!
-	if ( dBson.GetType ()==JSON_INT32_VECTOR )
-	{
-		auto dValues = Vector<DWORD> (dBson);
-		iStored = dValues.GetLength ();
-		dMva.Append ( dValues );
-	} else if ( dBson.GetType()==JSON_INT64_VECTOR )
-	{ // int64 may be easy truncated
-		auto dValues = Vector<int64_t> ( dBson );
-		iStored = dValues.GetLength ();
-		dMva.ReserveGap ( iStored );
-		for ( auto& iValue : dValues )
-			dMva.Add ( ( DWORD ) iValue );
-	} else
-	{ // slowest path - m.b. need conversion of every value
-		BsonIterator_c dIter ( dBson );
-		iStored = dIter.NumElems ();
-		dMva.ReserveGap ( iStored );
-		for ( ; dIter; dIter.Next () )
-			dMva.Add ( dIter.Int() );
-	}
-
-	if ( !iStored ) // empty mva; discard resize
-	{
-		dMva.Resize ( iOff );
-		return -1;
-	}
-
-	auto dSlice = dMva.Slice ( iOff + 1 );
-	dSlice.Sort ();
-	iStored = sphUniq ( dSlice.begin (), dSlice.GetLength() );
-	dMva[iOff] = iStored;
-	dMva.Resize ( iOff + iStored + 1 );
-	return iOff;
-}
-
-static bool ParseBsonDocument ( const VecTraits_T<BYTE>& dDoc, const CSphHash<SchemaItemVariant_t> & tLoc,
+static bool ParseBsonDocument ( const VecTraits_T<BYTE>& dDoc, const SchemaItemHash_c &tLoc,
 	const CSphString & sIdAlias, int iRow, VecTraits_T<VecTraits_T<const char>>& dFields, CSphMatchVariant & tDoc,
-	StringPtrTraits_t & tStrings, CSphVector<DWORD> & dMva, Warner_c & sMsg )
+	StringPtrTraits_t & tStrings, CSphVector<int64_t> & dMva, const CSphSchema &tSchema, Warner_c & sMsg )
 {
 	using namespace bson;
 	Bson_c dBson ( dDoc );
@@ -12417,6 +12542,11 @@ static bool ParseBsonDocument ( const VecTraits_T<BYTE>& dDoc, const CSphHash<Sc
 	SqlInsert_t tAttr;
 
 	const SchemaItemVariant_t * pId = sIdAlias.IsEmpty () ? nullptr : tLoc.Find ( sphFNV64 ( sIdAlias.cstr() ) );
+	const CSphColumnInfo * pIdCol = tSchema.GetAttr ( sphGetDocidName () );
+	assert(pIdCol);
+	CSphAttrLocator tIdLoc = pIdCol->m_tLocator;
+	tIdLoc.m_bDynamic = true;
+
 	BsonIterator_c dChild ( dBson );
 	for ( ; dChild; dChild.Next () )
 	{
@@ -12454,56 +12584,56 @@ static bool ParseBsonDocument ( const VecTraits_T<BYTE>& dDoc, const CSphHash<Sc
 				BsonToSqlInsert ( dChild, tAttr );
 				tDoc.SetAttr ( pItem->m_tLoc, tAttr, pItem->m_eType );
 				if ( pId==pItem )
-					tDoc.m_uDocID = ( SphDocID_t ) dChild.Int ();
+					((CSphMatch &)tDoc).SetAttr ( tIdLoc, (DocID_t)dChild.Int() );
 
 				switch ( pItem->m_eType )
 				{
-					case SPH_ATTR_JSON:
-						assert ( pItem->m_iStr!=-1 );
+				case SPH_ATTR_JSON:
+					assert ( pItem->m_iStr!=-1 );
+					{
+						// just save bson blob
+						BYTE * pDst = tStrings.ReserveBlob ( dChild.StandaloneSize(), pItem->m_iStr );
+						dChild.BsonToBson ( pDst );
+					}
+					break;
+				case SPH_ATTR_STRING:
+					assert ( pItem->m_iStr!=-1 );
+					{
+						auto dStrBlob = RawBlob ( dChild );
+						if ( dStrBlob.second )
 						{
-							// just save bson blob
-							BYTE * pDst = tStrings.ReserveBlob ( dChild.StandaloneSize (), pItem->m_iStr );
-							dChild.BsonToBson ( pDst );
+							tStrings.m_dOff[pItem->m_iStr] = tStrings.m_dPackedData.GetLength ();
+							BYTE * sDst = tStrings.m_dPackedData.AddN ( 1 + dStrBlob.second + CSphString::GetGap () );
+							memcpy ( sDst, dStrBlob.first, dStrBlob.second );
+							memset ( sDst + dStrBlob.second, 0, 1 + CSphString::GetGap () );
 						}
-						break;
-					case SPH_ATTR_STRING:
-						assert ( pItem->m_iStr!=-1 );
-						{
-							auto dStrBlob = RawBlob ( dChild );
-							if ( dStrBlob.second )
-							{
-								tStrings.m_dOff[pItem->m_iStr] = tStrings.m_dPackedData.GetLength ();
-								BYTE * sDst = tStrings.m_dPackedData.AddN ( 1 + dStrBlob.second + CSphString::GetGap () );
-								memcpy ( sDst, dStrBlob.first, dStrBlob.second );
-								memset ( sDst + dStrBlob.second, 0, 1 + CSphString::GetGap () );
-							}
-						}
-						break;
-					case SPH_ATTR_UINT32SET:
-					case SPH_ATTR_INT64SET:
-						assert ( pItem->m_iMva!=-1 );
-						if ( dChild.IsArray() )
-						{
-							int iOff = BsonArrayToMva ( dMva, dChild, pItem->m_eType==SPH_ATTR_INT64SET );
-							if ( iOff>=0 )
-								dMva[pItem->m_iMva] = iOff;
-						} else
-						{
-							sMsg.Warn ( "MVA item should be array" );
-						}
-					default:
-						break;
+					}
+					break;
+				case SPH_ATTR_UINT32SET:
+				case SPH_ATTR_INT64SET:
+					assert ( pItem->m_iMva!=-1 );
+					if ( dChild.IsArray() )
+					{
+						int iOff = BsonArrayToMva ( dMva, dChild );
+						if ( iOff>=0 )
+							dMva[pItem->m_iMva] = iOff;
+					} else
+					{
+						sMsg.Warn ( "MVA item should be array" );
+					}
+				default:
+					break;
 				}
 			}
-		} else if ( !sIdAlias.IsEmpty() && sIdAlias==sName )
-		{
-			tDoc.m_uDocID = ( SphDocID_t ) dChild.Int ();
 		}
+		else if ( !sIdAlias.IsEmpty() && sIdAlias==sName )
+			((CSphMatch &)tDoc).SetAttr ( tIdLoc, (DocID_t)dChild.Int() );
 	}
 	return true;
 }
 
-static void FixParsedMva ( const CSphVector<DWORD> & dParsed, CSphVector<DWORD> & dMva, int iCount )
+
+static void FixParsedMva ( const CSphVector<int64_t> & dParsed, CSphVector<int64_t> & dMva, int iCount )
 {
 	if ( !iCount )
 		return;
@@ -12523,11 +12653,12 @@ static void FixParsedMva ( const CSphVector<DWORD> & dParsed, CSphVector<DWORD> 
 		}
 
 		DWORD uMvaCount = dParsed[iOff];
-		DWORD * pMva = dMva.AddN ( uMvaCount + 1 );
+		int64_t * pMva = dMva.AddN ( uMvaCount + 1 );
 		*pMva++ = uMvaCount;
 		memcpy ( pMva, dParsed.Begin() + iOff + 1, sizeof(dMva[0]) * uMvaCount );
 	}
 }
+
 
 class PqRequestBuilder_c : public IRequestBuilder_t
 {
@@ -12615,7 +12746,7 @@ struct PqReplyParser_t : public IReplyParser_t
 		dResult.m_bGetDocs = bDumpDocs;
 		dResult.m_bGetQuery = bQuery;
 		CSphVector<int> dDocs;
-		CSphVector<int64_t> dDocids;
+		CSphVector<DocID_t> dDocids;
 		dDocids.Add(0); // just to keep docids 1-based and so, simplify processing by avoid checks.
 
 		int iRows = tReq.GetInt ();
@@ -12691,7 +12822,7 @@ static void SendAPIPercolateReply ( CachedOutputBuffer_c &tOut, const CPqResult 
 	int iDocOff = -1;
 
 	const PercolateMatchResult_t &tRes = tResult.m_dResult;
-	const CSphFixedVector<int64_t> &dDocids = tResult.m_dDocids;
+	const CSphFixedVector<DocID_t> &dDocids = tResult.m_dDocids;
 	bool bHasDocids = !dDocids.IsEmpty ();
 	bool bDumpDocs = tRes.m_bGetDocs;
 	bool bQuery = tRes.m_bGetQuery;
@@ -12772,11 +12903,12 @@ static void SendAPIPercolateReply ( CachedOutputBuffer_c &tOut, const CPqResult 
 	tOut.SendString ( tRes.m_sMessages.sWarning () );
 }
 
-static void SendMysqlPercolateReply ( SqlRowBuffer_c &tOut, const CPqResult &tResult, int iShift=0 )
+static void SendMysqlPercolateReply ( SqlRowBuffer_c &tOut
+									  , const CPqResult &tResult, int iShift=0 )
 {
 	// shortcuts
 	const PercolateMatchResult_t &tRes = tResult.m_dResult;
-	const CSphFixedVector<int64_t> &dDocids = tResult.m_dDocids;
+	const CSphFixedVector<DocID_t> &dDocids = tResult.m_dDocids;
 
 	bool bDumpDocs = tRes.m_bGetDocs;
 	bool bQuery = tRes.m_bGetQuery;
@@ -12817,8 +12949,8 @@ static void SendMysqlPercolateReply ( SqlRowBuffer_c &tOut, const CPqResult &tRe
 				dTmpDocs.Resize ( iCount );
 				for ( int iDoc = 0; iDoc<iCount; ++iDoc )
 				{
-					int iRow = tRes.m_dDocs[++iDocOff];
-					dTmpDocs[iDoc] = dDocids[iRow];
+					RowID_t tRow = tRes.m_dDocs[++iDocOff];
+					dTmpDocs[iDoc] = dDocids[tRow];
 				}
 				dTmpDocs.Uniq ();
 				for ( auto dTmpDoc : dTmpDocs )
@@ -12827,8 +12959,8 @@ static void SendMysqlPercolateReply ( SqlRowBuffer_c &tOut, const CPqResult &tRe
 			{
 				for ( int iDoc = 0; iDoc<iCount; ++iDoc )
 				{
-					int iRow = tRes.m_dDocs[++iDocOff];
-					sDocs.Sprintf ( "%d", iRow + iShift );
+					RowID_t tRow = tRes.m_dDocs[++iDocOff];
+					sDocs.Sprintf ( "%u", tRow + iShift );
 				}
 			}
 
@@ -12907,7 +13039,8 @@ static void PQLocalMatch ( const BlobVec_t &dDocs, const CSphString& sIndex, con
 
 	int iStrCounter = 0;
 	int iMvaCounter = 0;
-	CSphHash<SchemaItemVariant_t> hSchemaLocators;
+	SchemaItemHash_c hSchemaLocators;
+
 	if ( tOpt.m_bJsonDocs )
 	{
 
@@ -12944,22 +13077,28 @@ static void PQLocalMatch ( const BlobVec_t &dDocs, const CSphString& sIndex, con
 		}
 	}
 
+	const CSphColumnInfo * pId = tSchema.GetAttr ( sphGetDocidName () );
+	assert( pId );
+	CSphAttrLocator tIdLoc = pId->m_tLocator;
+	tIdLoc.m_bDynamic = true;
+
 	int iDocsNoIdCount = 0;
 	bool bAutoId = tOpt.m_sIdAlias.IsEmpty ();
 	tResult.m_dDocids.Reset ( bAutoId ? 0 : iDocs + 1 );
-	SphDocID_t uSeqDocid = 1;
+	int64_t uSeqDocid = 1;
 
 	CSphFixedVector<const char *> dStrings ( iStrCounter );
 	StringPtrTraits_t tStrings;
 	tStrings.m_dOff.Reset ( iStrCounter );
-	CSphVector<DWORD> dMvaParsed ( iMvaCounter );
-	CSphVector<DWORD> dMva;
+	CSphVector<int64_t> dMvaParsed ( iMvaCounter );
+	CSphVector<int64_t> dMva;
 
 	CSphString sTokenFilterOpts;
+	RowID_t tRowID = 0;
 	for ( auto iDoc = iStart; iDoc<iStart+iDocs; ++iDoc )
 	{
 		// doc-id
-		tDoc.m_uDocID = 0;
+		((CSphMatch &)tDoc).SetAttr ( tIdLoc, 0 );
 		dFields[0] = dDocs[iDoc];
 
 		dMvaParsed.Resize ( iMvaCounter );
@@ -12976,10 +13115,11 @@ static void PQLocalMatch ( const BlobVec_t &dDocs, const CSphString& sIndex, con
 				tLoc.m_bDynamic = true;
 				tDoc.SetDefaultAttr ( tLoc, tCol.m_eAttrType );
 			}
+
 			tStrings.Reset ();
 
 			if ( !ParseBsonDocument ( dDocs[iDoc], hSchemaLocators, tOpt.m_sIdAlias, iDoc,
-						dFields, tDoc, tStrings, dMvaParsed, sMsg ) )
+						dFields, tDoc, tStrings, dMvaParsed, tSchema, sMsg ) )
 			{
 				// for now the only case of fail - if provided bson is empty (null) document.
 				if ( tOpt.m_bSkipBadJson )
@@ -13011,25 +13151,28 @@ static void PQLocalMatch ( const BlobVec_t &dDocs, const CSphString& sIndex, con
 			break;
 
 
+		tDoc.m_tRowID = ( RowID_t ) tRowID++;
+
 		if ( !bAutoId )
 		{
 			// in user-provides-id mode let's skip all docs without id
-			if ( !tDoc.m_uDocID )
+			if ( !sphGetDocID ( tDoc.m_pDynamic ) )
 			{
 				++iDocsNoIdCount;
 				continue;
 			}
 
 			// store provided doc-id for result set sending
-			tResult.m_dDocids[uSeqDocid] = ( int64_t ) tDoc.m_uDocID;
-			tDoc.m_uDocID = uSeqDocid++;
+			tResult.m_dDocids[uSeqDocid] = ( int64_t ) sphGetDocID ( tDoc.m_pDynamic );
+			( ( CSphMatch & ) tDoc ).SetAttr ( tIdLoc, uSeqDocid++ );
 		} else
-			// PQ work with sequential document numbers, 0 element unused
-			tDoc.m_uDocID = iDoc+1; // +1 since docid is 1-based
+			( ( CSphMatch & ) tDoc ).SetAttr ( tIdLoc, iDoc + 1 ); // +1 since docid is 1-based
+
+		// PQ work with sequential document numbers, 0 element unused
+
 
 		// add document
-		pIndex->AddDocument ( dFields, tDoc, true, sTokenFilterOpts, dStrings.Begin(), dMva, sError, sWarning, pAccum );
-		sMsg.Err ( sError );
+		pIndex->AddDocument ( dFields, tDoc, true, sTokenFilterOpts, dStrings.Begin (), dMva, sError, sWarning, pAccum );sMsg.Err ( sError );
 		sMsg.Warn ( sWarning );
 
 		if ( !sMsg.ErrEmpty () )
@@ -13227,6 +13370,7 @@ static void HandleMysqlCallPQ ( SqlRowBuffer_c & tOut, SqlStmt_t & tStmt, CSphSe
 	CSphString sError;
 	PercolateOptions_t tOpts;
 	tOpts.m_sIndex = dStmtIndex.m_sVal;
+	SqlParser_c::SplitClusterIndex ( tOpts.m_sIndex, nullptr );
 	bool bSkipEmpty = false;
 	ARRAY_FOREACH ( i, tStmt.m_dCallOptNames )
 	{
@@ -13427,13 +13571,17 @@ void sphHandleMysqlInsert ( StmtErrorReporter_i & tOut, SqlStmt_t & tStmt, bool 
 
 	bool bPq = pServed->m_eType==IndexType_e::PERCOLATE;
 
-	auto * pIndex = (ISphRtIndex *)pServed->m_pIndex;
+	auto * pIndex = (RtIndex_i *)pServed->m_pIndex;
 
 	// get schema, check values count
 	const CSphSchema & tSchema = pIndex->GetMatchSchema ();
-	int iSchemaSz = tSchema.GetAttrsCount() + tSchema.GetFieldsCount() + 1;
+	int iSchemaSz = tSchema.GetAttrsCount() + tSchema.GetFieldsCount();
 	if ( pIndex->GetSettings().m_bIndexFieldLens )
 		iSchemaSz -= tSchema.GetFieldsCount();
+
+	if ( tSchema.GetAttr ( sphGetBlobLocatorName() ) )
+		iSchemaSz--;
+
 	int iExp = tStmt.m_iSchemaSz;
 	int iGot = tStmt.m_dInsertValues.GetLength();
 	if ( !tStmt.m_dInsertSchema.GetLength()
@@ -13469,19 +13617,30 @@ void sphHandleMysqlInsert ( StmtErrorReporter_i & tOut, SqlStmt_t & tStmt, bool 
 	if ( !tStmt.m_dInsertSchema.GetLength() )
 	{
 		// no columns list, use index schema
+		assert ( tSchema.GetAttr(0).m_sName==sphGetDocidName() );
+
 		ARRAY_FOREACH ( i, dFieldSchema )
-			dFieldSchema[i] = i + 1;
-		int iFields = dFieldSchema.GetLength ();
-		ARRAY_FOREACH ( j, dAttrSchema )
-			dAttrSchema[j] = j + iFields + 1;
+			dFieldSchema[i] = i+1;
+
+		dAttrSchema[0]=0;
+		int iAttrId = dFieldSchema.GetLength()+1;
+		for ( int i = 1; i < dAttrSchema.GetLength(); i++ )
+		{
+			if ( sphIsInternalAttr( tSchema.GetAttr(i) ) )
+				dAttrSchema[i]=-1;
+			else
+				dAttrSchema[i] = iAttrId++;
+		}
 
 		// schemaless pq - expect either just 'query', or 'query' and 'tags'. And no id.
 		if ( bPq )
 		{
+			for ( auto & i : dAttrSchema )
+				i = -1;
+
 			iIdIndex	   = -1;
-			dAttrSchema[0] = 0; // query
-			dAttrSchema[1] = ( 1==tStmt.m_iSchemaSz ) ? -1 : 1; // tags
-			dAttrSchema[2] = -1; // filters
+			dAttrSchema[1] = 0; // query
+			dAttrSchema[2] = ( tStmt.m_iSchemaSz==1 ) ? -1 : 1; // tags
 		}
 	} else
 	{
@@ -13489,7 +13648,7 @@ void sphHandleMysqlInsert ( StmtErrorReporter_i & tOut, SqlStmt_t & tStmt, bool 
 		StrVec_t dCheck = tStmt.m_dInsertSchema;
 		ARRAY_FOREACH ( i, dCheck )
 			// OPTIMIZE! GetAttrIndex and GetFieldIndex use the linear searching. M.b. hash instead?
-			if ( dCheck[i]!="id" && tSchema.GetAttrIndex ( dCheck[i].cstr() )==-1 && tSchema.GetFieldIndex ( dCheck[i].cstr() )==-1 )
+			if ( tSchema.GetAttrIndex ( dCheck[i].cstr() )==-1 && tSchema.GetFieldIndex ( dCheck[i].cstr() )==-1 )
 			{
 				sError.SetSprintf ( "unknown column: '%s'", dCheck[i].cstr() );
 				tOut.Error ( tStmt.m_sStmt, sError.cstr(), MYSQL_ERR_PARSE_ERROR );
@@ -13511,8 +13670,7 @@ void sphHandleMysqlInsert ( StmtErrorReporter_i & tOut, SqlStmt_t & tStmt, bool 
 		ARRAY_FOREACH ( i, tStmt.m_dInsertSchema )
 			dInsertSchema.Add ( i, tStmt.m_dInsertSchema[i] );
 
-		// get id index
-		if ( !dInsertSchema.Exists("id") )
+		if ( !dInsertSchema.Exists(sphGetDocidName()) )
 		{
 			if ( !bPq )
 			{
@@ -13524,59 +13682,41 @@ void sphHandleMysqlInsert ( StmtErrorReporter_i & tOut, SqlStmt_t & tStmt, bool 
 			iIdIndex = dInsertSchema["id"];
 
 		// map fields
-		bool bIdDupe = false;
 		ARRAY_FOREACH ( i, dFieldSchema )
 		{
-			if ( dInsertSchema.Exists ( tSchema.GetFieldName(i) ) )
+			const char * szFieldName = tSchema.GetFieldName(i);
+			if ( dInsertSchema.Exists(szFieldName) )
 			{
-				int iField = dInsertSchema[tSchema.GetFieldName(i)];
-				if ( iField==iIdIndex )
-				{
-					bIdDupe = true;
-					break;
-				}
-				dFieldSchema[i] = iField;
+				dFieldSchema[i] = dInsertSchema[szFieldName];
 
 				// does an attribute with the same name exist?
-				if ( tSchema.GetAttr ( tSchema.GetFieldName(i) ) )
+				if ( tSchema.GetAttr(szFieldName) )
 					dFieldAttrs[i] = true;
 			} else
 				dFieldSchema[i] = -1;
-		}
-		if ( bIdDupe )
-		{
-			tOut.Error ( tStmt.m_sStmt, "fields must never be named 'id' (fix your config)" );
-			return;
 		}
 
 		// map attrs
 		ARRAY_FOREACH ( j, dAttrSchema )
 		{
-			if ( dInsertSchema.Exists ( tSchema.GetAttr(j).m_sName ) )
-			{
-				int iField = dInsertSchema[tSchema.GetAttr(j).m_sName];
-				if ( iField==iIdIndex )
-				{
-					bIdDupe = true;
-					break;
-				}
-				dAttrSchema[j] = iField;
-			} else
+			const char * szAttrName = tSchema.GetAttr(j).m_sName.cstr();
+			if ( dInsertSchema.Exists(szAttrName) )
+				dAttrSchema[j] = dInsertSchema[szAttrName];
+			else
 				dAttrSchema[j] = -1;
-		}
-		if ( bIdDupe )
-		{
-			sError.SetSprintf ( "attributes must never be named 'id' (fix your config)" );
-			tOut.Error ( tStmt.m_sStmt, sError.cstr() );
-			return;
 		}
 	}
 
-	CSphVector<DWORD> dMvas;
+	CSphVector<int64_t> dMvas;
 	CSphVector<const char *> dStrings;
 	StringPtrTraits_t tStrings;
 	tStrings.m_dOff.Reset ( tSchema.GetAttrsCount() );
 	ISphRtAccum* pAccum = tAcc.GetAcc ( pIndex, sError );
+
+	const CSphColumnInfo * pDocid = tSchema.GetAttr(sphGetDocidName());
+	assert ( pDocid );
+	CSphAttrLocator tIdLoc = pDocid->m_tLocator;
+	tIdLoc.m_bDynamic = true;
 
 	// convert attrs
 	for ( int c=0; c<tStmt.m_iRowsAffected; ++c )
@@ -13593,10 +13733,11 @@ void sphHandleMysqlInsert ( StmtErrorReporter_i & tOut, SqlStmt_t & tStmt, bool 
 		CSphMatchVariant tDoc;
 		tDoc.Reset ( tSchema.GetRowSize() );
 		if ( iIdIndex>=0 )
-			tDoc.m_uDocID = CSphMatchVariant::ToDocid ( tStmt.m_dInsertValues[iIdIndex + c * iExp] );
-		else {
+			tDoc.SetAttr ( tIdLoc, tStmt.m_dInsertValues[iIdIndex + c * iExp], SPH_ATTR_BIGINT );
+		else
+		{
 			assert ( bPq );
-			assert ( tDoc.m_uDocID == 0 );
+			assert ( tDoc.GetAttr(tIdLoc)==0 );
 		}
 		dStrings.Resize ( 0 );
 		tStrings.Reset();
@@ -13659,23 +13800,10 @@ void sphHandleMysqlInsert ( StmtErrorReporter_i & tOut, SqlStmt_t & tStmt, bool 
 						tVal.m_pVals->Uniq();
 						iLen = tVal.m_pVals->GetLength();
 					}
-					if ( tCol.m_eAttrType==SPH_ATTR_INT64SET )
-					{
-						dMvas.Add ( iLen*2 );
-						for ( int j=0; j<iLen; j++ )
-						{
-							uint64_t uVal = ( *tVal.m_pVals )[j];
-							DWORD uLow = (DWORD)uVal;
-							DWORD uHi = (DWORD)( uVal>>32 );
-							dMvas.Add ( uLow );
-							dMvas.Add ( uHi );
-						}
-					} else
-					{
-						dMvas.Add ( iLen );
-						for ( int j=0; j<iLen; j++ )
-							dMvas.Add ( (DWORD)( *tVal.m_pVals )[j] );
-					}
+
+					dMvas.Add ( iLen );
+					for ( int j=0; j<iLen; j++ )
+						dMvas.Add ( (*tVal.m_pVals)[j] );
 				}
 
 				// FIXME? index schema is lawfully static, but our temp match obviously needs to be dynamic
@@ -13700,7 +13828,13 @@ void sphHandleMysqlInsert ( StmtErrorReporter_i & tOut, SqlStmt_t & tStmt, bool 
 						if ( !String2JsonPack ( (char *)tVal.m_sVal.cstr(), tStrings.m_dParserBuf, sError, sWarning ) )
 							break;
 
-						tStrings.AddBlob ( tStrings.m_dParserBuf, iStrCount );
+						int iParsedLength = tStrings.m_dParserBuf.GetLength();
+						if ( iParsedLength )
+						{
+							tStrings.m_dOff[iStrCount] = tStrings.m_dPackedData.GetLength();
+							BYTE * pPacked = tStrings.m_dPackedData.AddN ( sphCalcPackedLength ( iParsedLength ) );
+							sphPackPtrAttr ( pPacked, tStrings.m_dParserBuf.Begin(), iParsedLength );
+						}
 					}
 				}
 			}
@@ -13753,7 +13887,7 @@ void sphHandleMysqlInsert ( StmtErrorReporter_i & tOut, SqlStmt_t & tStmt, bool 
 		// do add
 		if ( bPq )
 		{
-			if ( iIdIndex >= 0 && !tDoc.m_uDocID )
+			if ( iIdIndex >= 0 && !tDoc.GetAttr(tIdLoc) )
 			{
 				sError.SetSprintf ( "'id' column parsed as 0. Omit the column to enable auto-id" );
 				break;
@@ -13769,7 +13903,7 @@ void sphHandleMysqlInsert ( StmtErrorReporter_i & tOut, SqlStmt_t & tStmt, bool 
 				PercolateQueryArgs_t tArgs ( dFilters, dFilterTree );
 				tArgs.m_sQuery   = dStrings[0];
 				tArgs.m_sTags	= dStrings[1];
-				tArgs.m_uQUID	= tDoc.m_uDocID;
+				tArgs.m_uQUID	= tDoc.GetAttr(tIdLoc);
 				tArgs.m_bReplace = bReplace;
 				tArgs.m_bQL		 = true;
 
@@ -13790,8 +13924,7 @@ void sphHandleMysqlInsert ( StmtErrorReporter_i & tOut, SqlStmt_t & tStmt, bool 
 
 		}
 		else
-			pIndex->AddDocument ( dFields, tDoc, bReplace, tStmt.m_sStringParam, dStrings.Begin(),
-				  dMvas, sError, sWarning, pAccum );
+			pIndex->AddDocument ( dFields, tDoc, bReplace, tStmt.m_sStringParam, dStrings.Begin(), dMvas, sError, sWarning, pAccum );
 
 		if ( !sError.IsEmpty() )
 			break;
@@ -14513,35 +14646,38 @@ void HandleMysqlDescribe ( SqlRowBuffer_c & tOut, SqlStmt_t & tStmt )
 		tOut.HeadTuplet ( "Field", "Type" );
 
 		// data
-		dCondOut.MatchDataTuplet ( "id", "bigint" );
-
 		const CSphSchema *pSchema = &pServed->m_pIndex->GetMatchSchema ();
-		if ( tStmt.m_iIntParam==42 ) // user wants internal schema instead
+		if ( tStmt.m_iIntParam==TOK_TABLE ) // user wants internal schema instead
 		{
 			if ( pServed->IsMutable () )
 			{
-				auto pRtIndex = (ISphRtIndex*)pServed->m_pIndex;
+				auto pRtIndex = (RtIndex_i*)pServed->m_pIndex;
 				pSchema = &pRtIndex->GetInternalSchema ();
 			}
 		}
 
 		const CSphSchema &tSchema = *pSchema;
+		assert ( tSchema.GetAttr(0).m_sName==sphGetDocidName() );
+
+		// id comes before fields
+		dCondOut.MatchDataTuplet ( "id", "bigint" );
+
 		for ( int i = 0; i<tSchema.GetFieldsCount (); i++ )
 			dCondOut.MatchDataTuplet ( tSchema.GetFieldName ( i ), "field" );
 
 		char sTmp[SPH_MAX_WORD_LEN];
-		for ( int i = 0; i<tSchema.GetAttrsCount (); i++ )
+		for ( int i=1; i<tSchema.GetAttrsCount(); i++ )
 		{
-			const CSphColumnInfo &tCol = tSchema.GetAttr ( i );
+			const CSphColumnInfo & tCol = tSchema.GetAttr(i);
+			if ( sphIsInternalAttr ( tCol ) )
+				continue;
+
 			if ( tCol.m_eAttrType==SPH_ATTR_INTEGER && tCol.m_tLocator.m_iBitCount!=ROWITEM_BITS )
 			{
-				snprintf ( sTmp, sizeof ( sTmp ), "%s:%d", sphTypeName ( tCol.m_eAttrType )
-						   , tCol.m_tLocator.m_iBitCount );
-				dCondOut.MatchDataTuplet ( tCol.m_sName.cstr (), sTmp );
+				snprintf ( sTmp, sizeof(sTmp), "%s:%d", sphTypeName ( tCol.m_eAttrType ), tCol.m_tLocator.m_iBitCount );
+				dCondOut.MatchDataTuplet ( tCol.m_sName.cstr(), sTmp );
 			} else
-			{
-				dCondOut.MatchDataTuplet ( tCol.m_sName.cstr (), sphTypeName ( tCol.m_eAttrType ) );
-			}
+				dCondOut.MatchDataTuplet ( tCol.m_sName.cstr(), sphTypeName ( tCol.m_eAttrType ) );
 		}
 		tOut.Eof ();
 		return;
@@ -14800,6 +14936,7 @@ void HandleMysqlFlushLogs ( SqlRowBuffer_c &tOut )
 
 void HandleMysqlReloadIndexes ( SqlRowBuffer_c &tOut )
 {
+	g_bReloadForced = true;
 	sighup(1);
 	tOut.Ok ();
 }
@@ -15194,8 +15331,9 @@ void sphHandleMysqlUpdate ( StmtErrorReporter_i & tOut, const QueryParserFactory
 	int iUpdated = 0;
 	int iWarns = 0;
 
-	bool bMvaUpdate = tStmt.m_tUpdate.m_dTypes.FindFirst (
-		[] ( ESphAttr iFoo ) { return iFoo==SPH_ATTR_UINT32SET || iFoo==SPH_ATTR_INT64SET; } );
+	bool bBlobUpdate = false;
+	for ( const auto & i : tStmt.m_tUpdate.m_dAttributes )
+		bBlobUpdate |= sphIsBlobAttr ( i.m_eType );
 
 	ARRAY_FOREACH ( iIdx, dIndexNames )
 	{
@@ -15203,7 +15341,7 @@ void sphHandleMysqlUpdate ( StmtErrorReporter_i & tOut, const QueryParserFactory
 		auto pLocked = GetServed ( sReqIndex );
 		if ( pLocked )
 		{
-			if ( bMvaUpdate )
+			if ( bBlobUpdate )
 				DoExtendedUpdate ( sReqIndex, tQueryParserFactory, nullptr, tStmt, iSuccesses,
 					iUpdated, dFails, ServedDescWPtr_c ( pLocked ), sWarning, tThd );
 			else
@@ -15218,7 +15356,7 @@ void sphHandleMysqlUpdate ( StmtErrorReporter_i & tOut, const QueryParserFactory
 			{
 				const char * sLocal = dLocal[i].cstr();
 				auto pServed = GetServed ( sLocal );
-				if ( bMvaUpdate )
+				if ( bBlobUpdate )
 					DoExtendedUpdate ( sLocal, tQueryParserFactory, sReqIndex, tStmt, iSuccesses,
 						iUpdated, dFails, ServedDescWPtr_c ( pServed ), sWarning, tThd );
 				else
@@ -15372,11 +15510,14 @@ void sphFormatFactors ( StringBuilder_c & sOut, const unsigned int * pFactors, b
 }
 
 
-static void ReturnZeroCount ( const CSphSchema & tSchema, int iAttrsCount, const StrVec_t & dCounts,
+static void ReturnZeroCount ( const CSphSchema & tSchema, const CSphBitvec & tAttrsToSend, const StrVec_t & dCounts,
 	SqlRowBuffer_c & dRows )
 {
-	for ( int i=0; i<iAttrsCount; ++i )
+	for ( int i=0; i<tSchema.GetAttrsCount(); ++i )
 	{
+		if ( !tAttrsToSend.BitGet(i) )
+			continue;
+
 		const CSphColumnInfo & tCol = tSchema.GetAttr ( i );
 
 		// @count or its alias or count(distinct attr_name)
@@ -15415,28 +15556,6 @@ static void ReturnZeroCount ( const CSphSchema & tSchema, int iAttrsCount, const
 	dRows.Commit();
 }
 
-template <typename T>
-static void MVA2Str ( const T * pMVA, int iLengthBytes, StringBuilder_c & dStr)
-{
-	dStr.GrowEnough ( (SPH_MAX_NUMERIC_STR+1)*iLengthBytes/sizeof(DWORD) );
-	int nValues = iLengthBytes / sizeof(T);
-	Comma_c sComma ( "," );
-	for ( int i = 0; i < nValues; ++i )
-	{
-		dStr << sComma;
-		dStr.GrowEnough ( SPH_MAX_NUMERIC_STR );
-		dStr += sph::NtoA ( dStr.end (), pMVA[i] );
-	}
-}
-
-void sphPackedMVA2Str ( const BYTE * pMVA, bool b64bit, StringBuilder_c & dStr )
-{
-	int iLengthBytes = sphUnpackPtrAttr ( pMVA, &pMVA );
-	if ( b64bit )
-		MVA2Str ( (const int64_t *)pMVA, iLengthBytes, dStr );
-	else
-		MVA2Str ( (const DWORD *)pMVA, iLengthBytes, dStr );
-}
 
 void SendMysqlSelectResult ( SqlRowBuffer_c & dRows, const AggrResult_t & tRes, bool bMoreResultsFollow, bool bAddQueryColumn, const CSphString * pQueryColumn, CSphQueryProfile * pProfile )
 {
@@ -15451,29 +15570,30 @@ void SendMysqlSelectResult ( SqlRowBuffer_c & dRows, const AggrResult_t & tRes, 
 
 	// empty result sets just might carry the full uberschema
 	// bummer! lets protect ourselves against that
-	int iSchemaAttrsCount = 0;
-	int iAttrsCount = 1;
+	CSphBitvec tAttrsToSend;
 	bool bReturnZeroCount = !tRes.m_dZeroCount.IsEmpty();
 	if ( tRes.m_dMatches.GetLength() || bReturnZeroCount )
-	{
-		iSchemaAttrsCount = sphSendGetAttrCount ( tRes.m_tSchema );
-		iAttrsCount = iSchemaAttrsCount;
-	}
-	if ( bAddQueryColumn )
-		iAttrsCount++;
-
-	// result set header packet. We will attach EOF manually at the end.
-	dRows.HeadBegin ( iAttrsCount );
+		sphGetAttrsToSend ( tRes.m_tSchema, false, true, tAttrsToSend );
 
 	// field packets
 	if ( tRes.m_dMatches.IsEmpty() && !bReturnZeroCount )
 	{
 		// in case there are no matches, send a dummy schema
+		// result set header packet. We will attach EOF manually at the end.
+		dRows.HeadBegin ( bAddQueryColumn ? 2 : 1 );
 		dRows.HeadColumn ( "id", MYSQL_COL_LONGLONG, MYSQL_COL_UNSIGNED_FLAG );
 	} else
 	{
-		for ( int i=0; i<iSchemaAttrsCount; ++i )
+		int iAttrsToSend = tAttrsToSend.BitCount();
+		if ( bAddQueryColumn )
+			iAttrsToSend++;
+
+		dRows.HeadBegin ( iAttrsToSend );
+		for ( int i=0; i<tRes.m_tSchema.GetAttrsCount(); ++i )
 		{
+			if ( !tAttrsToSend.BitGet(i) )
+				continue;
+
 			const CSphColumnInfo & tCol = tRes.m_tSchema.GetAttr(i);
 			MysqlColumnType_e eType = MYSQL_COL_STRING;
 			switch ( tCol.m_eAttrType )
@@ -15507,8 +15627,11 @@ void SendMysqlSelectResult ( SqlRowBuffer_c & dRows, const AggrResult_t & tRes, 
 	for ( int iMatch = tRes.m_iOffset; iMatch < tRes.m_iOffset + tRes.m_iCount; ++iMatch )
 	{
 		const CSphMatch & tMatch = tRes.m_dMatches [ iMatch ];
-		for ( int i=0; i<iSchemaAttrsCount; ++i )
+		for ( int i=0; i<tRes.m_tSchema.GetAttrsCount(); ++i )
 		{
+			if ( !tAttrsToSend.BitGet(i) )
+				continue;
+
 			const CSphColumnInfo & dAttr = tSchema.GetAttr(i);
 			CSphAttrLocator tLoc = dAttr.m_tLocator;
 			ESphAttr eAttrType = dAttr.m_eAttrType;
@@ -15525,14 +15648,8 @@ void SendMysqlSelectResult ( SqlRowBuffer_c & dRows, const AggrResult_t & tRes, 
 				break;
 
 			case SPH_ATTR_BIGINT:
-				{
-					// how to get rid of this if?
-					if ( dAttr.m_sName == "id" )
-						dRows.PutNumAsString ( tMatch.m_uDocID ); // uint64_t
-					else
-						dRows.PutNumAsString ( tMatch.GetAttr ( tLoc ) ); // int64_t
-					break;
-				}
+				dRows.PutNumAsString( tMatch.GetAttr(tLoc) );
+				break;
 
 			case SPH_ATTR_FLOAT:
 				dRows.PutFloatAsString ( tMatch.GetAttrFloat(tLoc) );
@@ -15625,7 +15742,7 @@ void SendMysqlSelectResult ( SqlRowBuffer_c & dRows, const AggrResult_t & tRes, 
 	}
 
 	if ( bReturnZeroCount )
-		ReturnZeroCount ( tRes.m_tSchema, iSchemaAttrsCount, tRes.m_dZeroCount, dRows );
+		ReturnZeroCount ( tRes.m_tSchema, tAttrsToSend, tRes.m_dZeroCount, dRows );
 
 	// eof packet
 	dRows.Eof ( bMoreResultsFollow, iWarns );
@@ -15709,7 +15826,7 @@ static int PercolateDeleteDocuments ( const CSphString & sIndex, const CSphStrin
 	{
 		const CSphFilterSettings * pFilter = tQuery.m_dFilters.Begin();
 		if ( ( pFilter->m_bHasEqualMin || pFilter->m_bHasEqualMax ) && !pFilter->m_bExclude && pFilter->m_eType==SPH_FILTER_VALUES
-			&& ( pFilter->m_sAttrName=="@id" || pFilter->m_sAttrName=="uid" ) )
+			&& ( pFilter->m_sAttrName=="@id" || pFilter->m_sAttrName=="id" || pFilter->m_sAttrName=="uid" ) )
 		{
 			tCmd.m_dDeleteQueries.Reserve ( pFilter->GetNumValues() );
 			const SphAttr_t * pA = pFilter->GetValueArray();
@@ -15740,8 +15857,9 @@ static int PercolateDeleteDocuments ( const CSphString & sIndex, const CSphStrin
 	return iDeleted;
 }
 
+
 static int LocalIndexDoDeleteDocuments ( const CSphString & sName, const CSphString & sCluster, const QueryParserFactory_i & tQueryParserFactory, const char * sDistributed, const SqlStmt_t & tStmt,
-	const SphDocID_t * pDocs, int iCount, SearchFailuresLog_c & dErrors, bool bCommit, CSphSessionAccum & tAcc, const ThdDesc_t & tThd )
+	const DocID_t * pDocs, int iCount, SearchFailuresLog_c & dErrors, bool bCommit, CSphSessionAccum & tAcc, const ThdDesc_t & tThd )
 {
 	CSphString sError;
 
@@ -15755,7 +15873,7 @@ static int LocalIndexDoDeleteDocuments ( const CSphString & sName, const CSphStr
 			return 0;
 		}
 
-		auto * pIndex = static_cast<ISphRtIndex *> ( pLocked->m_pIndex );
+		auto * pIndex = static_cast<RtIndex_i *> ( pLocked->m_pIndex );
 		if ( !pLocked->IsMutable () )
 		{
 			sError.SetSprintf ( "does not support DELETE" );
@@ -15783,7 +15901,7 @@ static int LocalIndexDoDeleteDocuments ( const CSphString & sName, const CSphStr
 		}
 
 		CSphScopedPtr<SearchHandler_c> pHandler ( nullptr );
-		CSphVector<SphDocID_t> dValues;
+		CSphVector<DocID_t> dValues;
 		if ( !pDocs ) // needs to be deleted via query
 		{
 		pHandler = new SearchHandler_c ( 1, tQueryParserFactory.CreateQueryParser(), tStmt.m_tQuery.m_eQueryType, false, tThd );
@@ -15854,9 +15972,9 @@ void sphHandleMysqlDelete ( StmtErrorReporter_i & tOut, const QueryParserFactory
 		}
 	}
 
-	const SphDocID_t * pDocs = nullptr;
+	const DocID_t * pDocs = nullptr;
 	int iDocsCount = 0;
-	CSphVector<SphDocID_t> dDeleteIds;
+	CSphVector<DocID_t> dDeleteIds;
 
 	// now check the short path - if we have clauses 'id=smth' or 'id in (xx,yy)' or 'id in @uservar' - we know
 	// all the values list immediatelly and don't have to run the heavy query here.
@@ -15868,19 +15986,8 @@ void sphHandleMysqlDelete ( StmtErrorReporter_i & tOut, const QueryParserFactory
 		if ( ( pFilter->m_bHasEqualMin || pFilter->m_bHasEqualMax ) && pFilter->m_eType==SPH_FILTER_VALUES
 			&& pFilter->m_sAttrName=="@id" && !pFilter->m_bExclude )
 		{
-			if_const ( sizeof(SphAttr_t)==sizeof(SphDocID_t) ) // avoid copying in this case
-			{
-				pDocs = (SphDocID_t *)pFilter->GetValueArray();
-				iDocsCount = pFilter->GetNumValues();
-			} else
-			{
-				dDeleteIds.Reserve ( pFilter->GetNumValues() );
-				const SphAttr_t* pA = pFilter->GetValueArray();
-				for ( int i=0; i<pFilter->GetNumValues(); ++i )
-					dDeleteIds.Add ( pA[i] );
-				pDocs = dDeleteIds.Begin();
-				iDocsCount = dDeleteIds.GetLength();
-			}
+			pDocs = (DocID_t *)pFilter->GetValueArray();
+			iDocsCount = pFilter->GetNumValues();
 		}
 	}
 
@@ -16153,7 +16260,7 @@ void HandleMysqlSet ( SqlRowBuffer_c & tOut, SqlStmt_t & tStmt, SessionVars_t & 
 			// commit all pending changes
 			if ( tVars.m_bAutoCommit )
 			{
-				ISphRtIndex * pIndex = tAcc.GetIndex();
+				RtIndex_i * pIndex = tAcc.GetIndex();
 				if ( pIndex )
 				{
 					ISphRtAccum * pAccum = tAcc.GetAcc ( pIndex, sError );
@@ -16296,7 +16403,7 @@ void HandleMysqlSet ( SqlRowBuffer_c & tOut, SqlStmt_t & tStmt, SessionVars_t & 
 
 	case SET_CLUSTER_UVAR:
 	{
-		if ( !ReplicateSetOption ( tStmt.m_sIndex, tStmt.m_sSetValue, sError ) )
+		if ( !ReplicateSetOption ( tStmt.m_sIndex, tStmt.m_sSetName, tStmt.m_sSetValue, sError ) )
 		{
 			tOut.Error ( tStmt.m_sStmt, sError.cstr() );
 			return;
@@ -16353,10 +16460,9 @@ void HandleMysqlAttach ( SqlRowBuffer_c & tOut, const SqlStmt_t & tStmt )
 	ServedDescWPtr_c pFrom ( pServedFrom ); // write-lock
 	ServedDescWPtr_c pTo ( pServedTo ) ; // write-lock
 
-	auto * pRtTo = ( ISphRtIndex * ) pTo->m_pIndex;
+	auto * pRtTo = ( RtIndex_i * ) pTo->m_pIndex;
 
-	if ( ( bTruncate && !pRtTo->Truncate ( sError ) ) ||
-		!pRtTo->AttachDiskIndex ( pFrom->m_pIndex, sError ) )
+	if ( !pRtTo->AttachDiskIndex ( pFrom->m_pIndex, bTruncate, sError ) )
 	{
 		tOut.Error ( tStmt.m_sStmt, sError.cstr () );
 		return;
@@ -16380,7 +16486,7 @@ void HandleMysqlFlushRtindex ( SqlRowBuffer_c & tOut, const SqlStmt_t & tStmt )
 		return;
 	}
 
-	ISphRtIndex * pRt = (ISphRtIndex*)pIndex->m_pIndex;
+	auto * pRt = ( RtIndex_i * ) pIndex->m_pIndex;
 	pRt->ForceRamFlush();
 	tOut.Ok();
 }
@@ -16397,7 +16503,7 @@ void HandleMysqlFlushRamchunk ( SqlRowBuffer_c & tOut, const SqlStmt_t & tStmt )
 		return;
 	}
 
-	ISphRtIndex * pRt = (ISphRtIndex*)pIndex->m_pIndex;
+	auto * pRt = (RtIndex_i*)pIndex->m_pIndex;
 	pRt->ForceDiskChunk();
 	tOut.Ok();
 }
@@ -16638,7 +16744,8 @@ void HandleMysqlOptimize ( SqlRowBuffer_c & tOut, const SqlStmt_t & tStmt )
 	if ( tStmt.m_tQuery.m_bSync )
 	{
 		if ( pIndex->m_pIndex )
-			static_cast<ISphRtIndex *>( pIndex->m_pIndex )->Optimize ( );
+			static_cast<RtIndex_i *>( pIndex->m_pIndex )->Optimize();
+
 		return;
 	}
 
@@ -17055,7 +17162,6 @@ void DumpKey ( StringBuilder_c & tBuf, const char * sKey, int iVal, bool bCond )
 void DumpIndexSettings ( StringBuilder_c & tBuf, CSphIndex * pIndex )
 {
 	const CSphIndexSettings & tSettings = pIndex->GetSettings();
-	DumpKey ( tBuf, "docinfo",				"inline",								tSettings.m_eDocinfo==SPH_DOCINFO_INLINE );
 	DumpKey ( tBuf, "min_prefix_len",		tSettings.m_iMinPrefixLen,				tSettings.m_iMinPrefixLen!=0 );
 	DumpKey ( tBuf, "min_infix_len",		tSettings.m_iMinInfixLen,				tSettings.m_iMinInfixLen!=0 );
 	DumpKey ( tBuf, "max_substring_len",	tSettings.m_iMaxSubstringLen,			tSettings.m_iMaxSubstringLen!=0 );
@@ -17078,6 +17184,29 @@ void DumpIndexSettings ( StringBuilder_c & tBuf, CSphIndex * pIndex )
 	ARRAY_FOREACH ( i, tFieldFilter.m_dRegexps )
 		DumpKey ( tBuf, "regexp_filter",	tFieldFilter.m_dRegexps[i].cstr(),		!tFieldFilter.m_dRegexps[i].IsEmpty() );
 
+	CSphVector<KillListTarget_t> dKlistTargets;
+	CSphString sError;
+	if ( pIndex->LoadKillList ( nullptr, dKlistTargets, sError ) )
+	{
+		for ( const auto & tTarget : dKlistTargets )
+		{
+			CSphString sTarget, sFlags;
+
+			DWORD uMask = KillListTarget_t::USE_KLIST | KillListTarget_t::USE_DOCIDS;
+			if ( (tTarget.m_uFlags & uMask) != uMask )
+			{
+				if ( tTarget.m_uFlags & KillListTarget_t::USE_KLIST )
+					sFlags=":kl";
+
+				if ( tTarget.m_uFlags & KillListTarget_t::USE_DOCIDS )
+					sFlags=":id";
+			} else
+				sFlags = "";
+
+			sTarget.SetSprintf ( "%s%s", tTarget.m_sIndex.cstr(), sFlags.cstr() );
+			DumpKey ( tBuf, "killlist_target",		sTarget.cstr(),						true );
+		}
+	}
 
 	if ( pIndex->GetTokenizer() )
 	{
@@ -17121,7 +17250,7 @@ void HandleMysqlShowIndexSettings ( SqlRowBuffer_c & tOut, const SqlStmt_t & tSt
 	CSphIndex * pIndex = pServed ? pServed->m_pIndex : nullptr;
 
 	if ( iChunk>=0 && pServed && pIndex && pIndex->IsRT() )
-		pIndex = static_cast<ISphRtIndex *>( pIndex )->GetDiskChunk ( iChunk );
+		pIndex = static_cast<RtIndex_i *>( pIndex )->GetDiskChunk ( iChunk );
 
 	if ( !pServed || !pIndex )
 	{
@@ -17213,9 +17342,16 @@ static void RemoveAttrFromIndex ( const SqlStmt_t & tStmt, const ServedDesc_t * 
 	CSphString sAttrToRemove = tStmt.m_sAlterAttr;
 	sAttrToRemove.ToLower();
 
-	if ( !pServed->m_pIndex->GetMatchSchema().GetAttr ( sAttrToRemove.cstr() ) )
+	const CSphColumnInfo * pAttr = pServed->m_pIndex->GetMatchSchema().GetAttr ( sAttrToRemove.cstr() );
+	if ( !pAttr )
 	{
 		sError.SetSprintf ( "attribute '%s' does not exist", sAttrToRemove.cstr() );
+		return;
+	}
+
+	if ( sAttrToRemove==sphGetDocidName() || sphIsInternalAttr ( *pAttr ) )
+	{
+		sError.SetSprintf ( "unable to remove built-in attribute '%s'", sAttrToRemove.cstr() );
 		return;
 	}
 
@@ -17225,7 +17361,7 @@ static void RemoveAttrFromIndex ( const SqlStmt_t & tStmt, const ServedDesc_t * 
 		return;
 	}
 
-	pServed->m_pIndex->AddRemoveAttribute ( false, sAttrToRemove, SPH_ATTR_NONE, sError );
+	pServed->m_pIndex->AddRemoveAttribute ( false, sAttrToRemove, pAttr->m_eAttrType, sError );
 }
 
 
@@ -17270,19 +17406,13 @@ static void HandleMysqlAlter ( SqlRowBuffer_c & tOut, const SqlStmt_t & tStmt, b
 			continue;
 		}
 
-		ServedDescWPtr_c dWriteLocked ( pLocal ); // write-lock
-		if ( dWriteLocked->m_pIndex->GetSettings().m_eDocinfo==SPH_DOCINFO_INLINE )
-		{
-			dErrors.Submit ( sName, nullptr, "docinfo is inline: ALTER disabled" );
-			continue;
-		}
-
+		ServedDescWPtr_c pWriteLocked ( pLocal ); // write-lock
 		CSphString sAddError;
 
 		if ( bAdd )
-			AddAttrToIndex ( tStmt, dWriteLocked, sAddError );
+			AddAttrToIndex ( tStmt, pWriteLocked, sAddError );
 		else
-			RemoveAttrFromIndex ( tStmt, dWriteLocked, sAddError );
+			RemoveAttrFromIndex ( tStmt, pWriteLocked, sAddError );
 
 		if ( !sAddError.IsEmpty() )
 			dErrors.Submit ( sName, nullptr, sAddError.cstr() );
@@ -17326,14 +17456,14 @@ bool PrepareReconfigure ( const CSphString & sIndex, CSphReconfigureSettings & t
 	sphConfDictionary ( hIndex, tSettings.m_tDict );
 	sphConfFieldFilter ( hIndex, tSettings.m_tFieldFilter, sError );
 
-	if ( !sphConfIndex ( hIndex, tSettings.m_tIndex, sError ) )
+	if ( !sphConfIndex ( hIndex, tSettings.m_tIndex, sIndex.cstr(), sError ) )
 	{
 		sError.SetSprintf ( "'%s' failed to parse index settings, error '%s'", sIndex.cstr(), sError.cstr() );
 		return false;
 	}
 
-	sphRTSchemaConfigure ( hIndex, &tSettings.m_tSchema, &sError, true );
-	
+	sphRTSchemaConfigure ( hIndex, tSettings.m_tSchema, sError, true );
+
 	return true;
 }
 
@@ -17356,7 +17486,11 @@ static void HandleMysqlReconfigure ( SqlRowBuffer_c & tOut, const SqlStmt_t & tS
 	auto pServed = GetServed ( tStmt.m_sIndex );
 	if ( !pServed )
 	{
-		sError.SetSprintf ( "ALTER is only supported on local (not distributed) indexes" );
+		if ( g_pDistIndexes->Contains ( tStmt.m_sIndex ) )
+			sError.SetSprintf ( "ALTER is only supported on local (not distributed) indexes" );
+		else
+			sError.SetSprintf ( "index '%s' not found", tStmt.m_sIndex.cstr () );
+
 		tOut.Error ( tStmt.m_sStmt, sError.cstr () );
 		return;
 	}
@@ -17369,9 +17503,63 @@ static void HandleMysqlReconfigure ( SqlRowBuffer_c & tOut, const SqlStmt_t & tS
 		return;
 	}
 
-	bool bSame = ( ( const ISphRtIndex * ) dWLocked->m_pIndex )->IsSameSettings ( tSettings, tSetup, sError );
+	bool bSame = ( (const RtIndex_i *) dWLocked->m_pIndex )->IsSameSettings ( tSettings, tSetup, sError );
 	if ( !bSame && sError.IsEmpty() )
-		( (ISphRtIndex *) dWLocked->m_pIndex )->Reconfigure ( tSetup );
+		( (RtIndex_i *) dWLocked->m_pIndex )->Reconfigure(tSetup);
+
+	if ( sError.IsEmpty() )
+		tOut.Ok();
+	else
+		tOut.Error ( tStmt.m_sStmt, sError.cstr() );
+}
+
+
+static bool ApplyIndexKillList ( CSphIndex * pIndex, CSphString & sWarning, CSphString & sError, bool bShowMessage = false );
+
+static void HandleMysqlAlterKlist ( SqlRowBuffer_c & tOut, const SqlStmt_t & tStmt, CSphString & sWarning )
+{
+	MEMORY ( MEM_SQL_ALTER );
+
+	CSphString sError;
+
+	CSphVector<KillListTarget_t> dNewTargets;
+	if ( !ParseKillListTargets ( tStmt.m_sAlterOption, dNewTargets, tStmt.m_sIndex.cstr(), sError ) )
+	{
+		tOut.Error ( tStmt.m_sStmt, sError.cstr() );
+		return;
+	}
+
+	auto pServed = GetServed ( tStmt.m_sIndex.cstr () );
+	ServedDescWPtr_c pWriteLocked ( pServed );
+
+	if ( !pServed )
+	{
+		if ( g_pDistIndexes->Contains ( tStmt.m_sIndex ) )
+			sError.SetSprintf ( "ALTER is only supported on local (not distributed) indexes" );
+		else
+			sError.SetSprintf ( "index '%s' not found", tStmt.m_sIndex.cstr () );
+	}
+	else if ( pWriteLocked->IsMutable () )
+		sError.SetSprintf ( "'%s' does not support ALTER (RT or percolate)", tStmt.m_sIndex.cstr () );
+
+	if ( !sError.IsEmpty () )
+	{
+		tOut.Error ( tStmt.m_sStmt, sError.cstr () );
+		return;
+	}
+
+	if ( !pWriteLocked->m_pIndex->AlterKillListTarget ( dNewTargets, sError ) )
+	{
+		tOut.Error ( tStmt.m_sStmt, sError.cstr() );
+		return;
+	}
+
+	// apply killlist to new targets
+	if ( !ApplyIndexKillList ( pWriteLocked->m_pIndex, sWarning, sError ) )
+	{
+		tOut.Error ( tStmt.m_sStmt, sError.cstr() );
+		return;
+	}
 
 	if ( sError.IsEmpty() )
 		tOut.Ok();
@@ -17465,7 +17653,7 @@ CSphSessionAccum::~CSphSessionAccum()
 	SafeDelete ( m_pAcc );
 }
 
-ISphRtAccum * CSphSessionAccum::GetAcc ( ISphRtIndex * pIndex, CSphString & sError )
+ISphRtAccum * CSphSessionAccum::GetAcc ( RtIndex_i * pIndex, CSphString & sError )
 {
 	if ( !m_bManage )
 		return nullptr;
@@ -17478,7 +17666,7 @@ ISphRtAccum * CSphSessionAccum::GetAcc ( ISphRtIndex * pIndex, CSphString & sErr
 	return m_pAcc;
 }
 
-ISphRtIndex * CSphSessionAccum::GetIndex ()
+RtIndex_i * CSphSessionAccum::GetIndex ()
 {
 	if ( !m_bManage )
 		return sphGetCurrentIndexRT();
@@ -17661,7 +17849,7 @@ public:
 				MEMORY ( MEM_SQL_BEGIN );
 
 				m_tVars.m_bInTransaction = true;
-				ISphRtIndex * pIndex = m_tAcc.GetIndex();
+				RtIndex_i * pIndex = m_tAcc.GetIndex();
 				if ( pIndex )
 				{
 					ISphRtAccum * pAccum = m_tAcc.GetAcc ( pIndex, m_sError );
@@ -17681,7 +17869,7 @@ public:
 				MEMORY ( MEM_SQL_COMMIT );
 
 				m_tVars.m_bInTransaction = false;
-				ISphRtIndex * pIndex = m_tAcc.GetIndex();
+				RtIndex_i * pIndex = m_tAcc.GetIndex();
 				if ( pIndex )
 				{
 					ISphRtAccum * pAccum = m_tAcc.GetAcc ( pIndex, m_sError );
@@ -17890,6 +18078,14 @@ public:
 			HandleMysqlReconfigure ( tOut, *pStmt );
 			return true;
 
+		case STMT_ALTER_KLIST_TARGET:
+			m_tLastMeta = CSphQueryResultMeta();
+			m_tLastMeta.m_sError = m_sError;
+			m_tLastMeta.m_sWarning = "";
+
+			HandleMysqlAlterKlist ( tOut, *pStmt, m_tLastMeta.m_sWarning );
+			return true;
+
 		case STMT_FLUSH_INDEX:
 			HandleMysqlFlush ( tOut, *pStmt );
 			return true;
@@ -17913,7 +18109,7 @@ public:
 			return true;
 
 		case STMT_JOIN_CLUSTER:
-			if ( ClusterJoin ( pStmt->m_sIndex, pStmt->m_dCallOptNames, pStmt->m_dCallOptValues, m_sError ) )
+			if ( ClusterJoin ( pStmt->m_sIndex, pStmt->m_dCallOptNames, pStmt->m_dCallOptValues, pStmt->m_bClusterUpdateNodes, m_sError ) )
 				tOut.Ok();
 			else
 				tOut.Error ( sQuery.cstr(), m_sError.cstr() );
@@ -17942,6 +18138,17 @@ public:
 			if ( ClusterAlter ( pStmt->m_sCluster, pStmt->m_sIndex, ( eStmt==STMT_CLUSTER_ALTER_ADD ), m_tLastMeta.m_sError, m_tLastMeta.m_sWarning ) )
 			{
 				tOut.Ok ( 0, m_tLastMeta.m_sWarning.IsEmpty() ? 0 : 1 );
+			} else
+			{
+				tOut.Error ( sQuery.cstr(), m_tLastMeta.m_sError.cstr() );
+			}
+			return true;
+
+		case STMT_CLUSTER_ALTER_UPDATE:
+			m_tLastMeta = CSphQueryResultMeta();
+			if ( ClusterAlterUpdate ( pStmt->m_sCluster, pStmt->m_sSetName, m_tLastMeta.m_sError ) )
+			{
+				tOut.Ok();
 			} else
 			{
 				tOut.Error ( sQuery.cstr(), m_tLastMeta.m_sError.cstr() );
@@ -17992,7 +18199,6 @@ void HandleCommandJson ( CachedOutputBuffer_c & tOut, WORD uVer, InputBuffer_c &
 	CSphString sCommand = tReq.GetString ();
 	
 	ESphHttpEndpoint eEndpoint = sphStrToHttpEndpoint ( sEndpoint );
-	assert ( eEndpoint!=SPH_HTTP_ENDPOINT_TOTAL );
 
 	CSphVector<BYTE> dResult;
 	SmallStringHash_T<CSphString> tOptions;
@@ -18312,12 +18518,90 @@ void HandleClient ( ProtocolType_e eProto, int iSock, ThdDesc_t & tThd ) REQUIRE
 /////////////////////////////////////////////////////////////////////////////
 // INDEX ROTATION
 /////////////////////////////////////////////////////////////////////////////
-inline bool HasFiles ( const CSphString & sPath, const char * sType = "", DWORD uVersion = INDEX_FORMAT_VERSION )
+static bool ApplyIndexKillList ( CSphIndex * pIndex, CSphString & sWarning, CSphString & sError, bool bShowMessage )
 {
-	return IndexFiles_c ( sPath, uVersion ).HasAllFiles ( sType );
+	CSphFixedVector<DocID_t> dKillList(0);
+	CSphVector<KillListTarget_t> dTargets;
+	if ( !pIndex->LoadKillList ( &dKillList, dTargets, sError ) )
+		return false;
+
+	if ( !dTargets.GetLength() )
+		return true;
+
+	if ( bShowMessage )
+		sphInfo ( "applying killlist of index '%s'", pIndex->GetName() );
+
+	for ( const auto & tIndex : dTargets )
+	{
+		// just in case; otherwise we'll be rlocking an already rlocked index
+		if ( tIndex.m_sIndex==pIndex->GetName() )
+		{
+			sWarning.SetSprintf ( "index '%s': appying killlist to itself", tIndex.m_sIndex.cstr() );
+			continue;
+		}
+
+		ServedDescRPtr_c pTarget ( GetServed ( tIndex.m_sIndex ) );
+		if ( pTarget )
+		{
+			// kill the docids provided by sql_query_killlist and similar
+			if ( tIndex.m_uFlags & KillListTarget_t::USE_KLIST )
+				pTarget->m_pIndex->KillMulti ( dKillList.Begin(), dKillList.GetLength() );
+
+			// kill all the docids present in this index
+			if ( tIndex.m_uFlags & KillListTarget_t::USE_DOCIDS )
+				pIndex->KillExistingDocids ( pTarget->m_pIndex );
+		}
+		else
+			sWarning.SetSprintf ( "index '%s' from killlist_target not found", tIndex.m_sIndex.cstr() );
+	}
+
+	return true;
 }
 
-enum class ROTATE_FROM
+
+// we don't rlock/wlock the index because we assume that we are being called from a place that already did that for us
+bool ApplyKillListsTo ( ServedDesc_t & tLockedServed, CSphString & sError )
+{
+	CSphIndex * pKillListTarget = tLockedServed.m_pIndex;
+
+	CSphVector<KillListTarget_t> dTargets;
+
+	for ( RLockedServedIt_c it ( g_pLocalIndexes ); it.Next(); )
+	{
+		if ( it.GetName ()==pKillListTarget->GetName () )
+			continue;
+
+		ServedDescRPtr_c tServedWithKlist ( it.Get () );
+		if ( !tServedWithKlist)
+			continue;
+
+		CSphIndex * pIndexWithKillList = tServedWithKlist->m_pIndex;
+		CSphFixedVector<DocID_t> dKillList(0);
+		dTargets.Resize(0);
+		if ( !pIndexWithKillList->LoadKillList ( &dKillList, dTargets, sError ) )
+			return false;
+
+		if ( !dKillList.GetLength() )
+			continue;
+
+		// if this index has 'our' index as its killlist_target, apply the killlist
+		for ( const auto & tIndex : dTargets )
+			if ( tIndex.m_sIndex==tLockedServed.m_pIndex->GetName() )
+			{
+				if ( tIndex.m_uFlags & KillListTarget_t::USE_KLIST )
+					pKillListTarget->KillMulti ( dKillList.Begin(), dKillList.GetLength() );
+
+				// kill all the docids present in this index
+				if ( tIndex.m_uFlags & KillListTarget_t::USE_DOCIDS )
+					pKillListTarget->KillExistingDocids ( pIndexWithKillList );
+			}
+	}
+
+	return true;
+}
+
+
+enum class RotateFrom_e
 {
 	NONE,
 	NEW,
@@ -18326,7 +18610,30 @@ enum class ROTATE_FROM
 	PATH_COPY
 };
 
-ROTATE_FROM CheckIndexHeaderRotate ( const ServedDesc_t & dServed )
+
+static bool PreloadKlistTarget ( const ServedDesc_t & tServed, RotateFrom_e eFrom, StrVec_t & dKlistTarget )
+{
+	switch ( eFrom )
+	{
+	case RotateFrom_e::NEW:
+		return IndexFiles_c ( tServed.m_sIndexPath ).ReadKlistTargets ( dKlistTarget, ".new" );
+
+	case RotateFrom_e::REENABLE:
+		return IndexFiles_c ( tServed.m_sIndexPath ).ReadKlistTargets ( dKlistTarget );
+
+	case RotateFrom_e::PATH_NEW:
+		return IndexFiles_c ( tServed.m_sNewPath ).ReadKlistTargets ( dKlistTarget, ".new" );
+
+	case RotateFrom_e::PATH_COPY:
+		return IndexFiles_c ( tServed.m_sNewPath ).ReadKlistTargets ( dKlistTarget );
+
+	default:
+		return false;
+	}
+}
+
+
+RotateFrom_e CheckIndexHeaderRotate ( const ServedDesc_t & tServed )
 {
 	// check order:
 	// current_path/idx.new.sph		- rotation of current index
@@ -18334,35 +18641,35 @@ ROTATE_FROM CheckIndexHeaderRotate ( const ServedDesc_t & dServed )
 	// new_path/idx.new.sph			- rotation of current index but with new path via indexer --rotate
 	// new_path/idx.sph				- rotation of current index but with new path via files copy
 
-	if ( IndexFiles_c ( dServed.m_sIndexPath ).ReadVersion (".new") )
-		return ROTATE_FROM::NEW;
+	if ( IndexFiles_c ( tServed.m_sIndexPath ).ReadVersion (".new") )
+		return RotateFrom_e::NEW;
 
-	if ( dServed.m_bOnlyNew && IndexFiles_c ( dServed.m_sIndexPath ).ReadVersion() )
-		return ROTATE_FROM::REENABLE;
+	if ( tServed.m_bOnlyNew && IndexFiles_c ( tServed.m_sIndexPath ).ReadVersion() )
+		return RotateFrom_e::REENABLE;
 
-	if ( dServed.m_sNewPath.IsEmpty () || dServed.m_sNewPath==dServed.m_sIndexPath )
-		return ROTATE_FROM::NONE;
+	if ( tServed.m_sNewPath.IsEmpty () || tServed.m_sNewPath==tServed.m_sIndexPath )
+		return RotateFrom_e::NONE;
 
-	if ( IndexFiles_c ( dServed.m_sNewPath ).ReadVersion ( ".new" ) )
-		return ROTATE_FROM::PATH_NEW;
+	if ( IndexFiles_c ( tServed.m_sNewPath ).ReadVersion ( ".new" ) )
+		return RotateFrom_e::PATH_NEW;
 
-	if ( IndexFiles_c ( dServed.m_sNewPath ).ReadVersion () )
-		return ROTATE_FROM::PATH_COPY;
+	if ( IndexFiles_c ( tServed.m_sNewPath ).ReadVersion () )
+		return RotateFrom_e::PATH_COPY;
 
-	return ROTATE_FROM::NONE;
+	return RotateFrom_e::NONE;
 }
 
 /// returns true if any version of the index (old or new one) has been preread
-bool RotateIndexGreedy ( const ServedIndex_c * pIndex, ServedDesc_t &tWlockedIndex, const char * sIndex, CSphString & sError ) REQUIRES (pIndex->rwlock ())
+bool RotateIndexGreedy ( const ServedIndex_c * pIndex, ServedDesc_t &tWlockedIndex, const char * szIndex, CSphString & sError ) REQUIRES (pIndex->rwlock ())
 {
-	sphLogDebug ( "RotateIndexGreedy for '%s' invoked", sIndex );
+	sphLogDebug ( "RotateIndexGreedy for '%s' invoked", szIndex );
 	IndexFiles_c dFiles ( tWlockedIndex.m_sIndexPath );
-	dFiles.SetName ( sIndex );
-	ROTATE_FROM eRot = CheckIndexHeaderRotate ( tWlockedIndex );
-	bool bReEnable = ( eRot==ROTATE_FROM::REENABLE );
-	if ( eRot==ROTATE_FROM::PATH_NEW || eRot==ROTATE_FROM::PATH_COPY )
+	dFiles.SetName ( szIndex );
+	RotateFrom_e eRot = CheckIndexHeaderRotate ( tWlockedIndex );
+	bool bReEnable = ( eRot==RotateFrom_e::REENABLE );
+	if ( eRot==RotateFrom_e::PATH_NEW || eRot==RotateFrom_e::PATH_COPY )
 	{
-		sError.SetSprintf ( "rotating index '%s': can not rotate from new path, switch to seamless_rotate=1; using old index", sIndex );
+		sError.SetSprintf ( "rotating index '%s': can not rotate from new path, switch to seamless_rotate=1; using old index", szIndex );
 		return false;
 	}
 
@@ -18376,7 +18683,7 @@ bool RotateIndexGreedy ( const ServedIndex_c * pIndex, ServedDesc_t &tWlockedInd
 
 	if ( !dFiles.HasAllFiles ( sFromSuffix ) )
 	{
-		sphWarning ( "rotating index '%s': unreadable: %s; %s", sIndex, strerrorm ( errno ),
+		sphWarning ( "rotating index '%s': unreadable: %s; %s", szIndex, strerrorm ( errno ),
 			tWlockedIndex.m_bOnlyNew ? "NOT SERVING" : "using old index" );
 		return false;
 	}
@@ -18387,11 +18694,12 @@ bool RotateIndexGreedy ( const ServedIndex_c * pIndex, ServedDesc_t &tWlockedInd
 		{
 			if ( dFiles.IsFatal () )
 				sphFatal ( "%s", dFiles.FatalMsg ( "rotating" ).cstr () );
-			sError.SetSprintf ( "rotating index '%s': %s; using old index", sIndex, dFiles.ErrorMsg() );
+			sError.SetSprintf ( "rotating index '%s': %s; using old index", szIndex, dFiles.ErrorMsg() );
 			return false;
 		}
 		sphLogDebug ( "RotateIndexGreedy: Current index renamed to .old" );
 	}
+
 
 	// rename new to current
 	if ( !bReEnable )
@@ -18409,9 +18717,10 @@ bool RotateIndexGreedy ( const ServedIndex_c * pIndex, ServedDesc_t &tWlockedInd
 				return false;
 			}
 
-			sError.SetSprintf ( "rotating index '%s': %s; using old index", sIndex, dFiles.ErrorMsg () );
+			sError.SetSprintf ( "rotating index '%s': %s; using old index", szIndex, dFiles.ErrorMsg () );
 			return false;
 		}
+
 		sphLogDebug ( "RotateIndexGreedy: New renamed to current" );
 	}
 
@@ -18425,10 +18734,10 @@ bool RotateIndexGreedy ( const ServedIndex_c * pIndex, ServedDesc_t &tWlockedInd
 	{
 		if ( tWlockedIndex.m_bOnlyNew )
 		{
-			sError.SetSprintf ( "rotating index '%s': .new preload failed: %s; NOT SERVING", sIndex, tWlockedIndex.m_pIndex->GetLastError().cstr() );
+			sError.SetSprintf ( "rotating index '%s': .new preload failed: %s; NOT SERVING", szIndex, tWlockedIndex.m_pIndex->GetLastError().cstr() );
 			return false;
 		}
-		sphWarning ( "rotating index '%s': .new preload failed: %s", sIndex, tWlockedIndex.m_pIndex->GetLastError().cstr() );
+		sphWarning ( "rotating index '%s': .new preload failed: %s", szIndex, tWlockedIndex.m_pIndex->GetLastError().cstr() );
 		// try to recover: rollback cur to .new, .old to cur.
 		if ( !dFiles.RollbackSuff ( "", ".new" ) )
 			sphFatal ( "%s", dFiles.FatalMsg ( "rotating" ).cstr () );
@@ -18438,12 +18747,12 @@ bool RotateIndexGreedy ( const ServedIndex_c * pIndex, ServedDesc_t &tWlockedInd
 		sphLogDebug ( "RotateIndexGreedy: has recovered. Prelloc it." );
 		bPreallocSuccess = tWlockedIndex.m_pIndex->Prealloc ( g_bStripPath );
 		if ( !bPreallocSuccess )
-			sError.SetSprintf ( "rotating index '%s': .new preload failed; ROLLBACK FAILED; INDEX UNUSABLE", sIndex );
+			sError.SetSprintf ( "rotating index '%s': .new preload failed; ROLLBACK FAILED; INDEX UNUSABLE", szIndex );
 //		bRolledBack = true;
 	}
 
 	if ( !tWlockedIndex.m_pIndex->GetLastWarning().IsEmpty() )
-		sphWarning ( "rotating index '%s': %s", sIndex, tWlockedIndex.m_pIndex->GetLastWarning().cstr() );
+		sphWarning ( "rotating index '%s': %s", szIndex, tWlockedIndex.m_pIndex->GetLastWarning().cstr() );
 
 	if ( !tWlockedIndex.m_pIndex->GetTokenizer () )
 		tWlockedIndex.m_pIndex->SetTokenizer ( pTokenizer );
@@ -18461,9 +18770,29 @@ bool RotateIndexGreedy ( const ServedIndex_c * pIndex, ServedDesc_t &tWlockedInd
 		sphLogDebug ( "RotateIndexGreedy: the old index unlinked" );
 	}
 
+	sphLogDebug ( "rotating index '%s': applying other indexes' killlists", szIndex );
+
+	// apply other indexes' killlists to THIS index
+	if ( !ApplyKillListsTo ( tWlockedIndex, sError ) )
+		return false;
+
+	sphLogDebug ( "rotating index '%s': applying other indexes' killlists... DONE", szIndex );
+
+	sphLogDebug ( "rotating index '%s': apply killlist from this index to other indexes (killlist_target)", szIndex );
+
+	// apply killlist from this index to other indexes (killlist_target)
+	CSphString sWarning;
+	if ( !ApplyIndexKillList ( tWlockedIndex.m_pIndex, sWarning, sError ) )
+		return false;
+
+	if ( sWarning.Length() )
+		sphWarning ( "rotating index '%s': %s", szIndex, sWarning.cstr() );
+
+	sphLogDebug ( "rotating index '%s': apply killlist from this index to other indexes (killlist_target)... DONE", szIndex );
+
 	// uff. all done
 	tWlockedIndex.m_bOnlyNew = false;
-	sphInfo ( "rotating index '%s': success", sIndex );
+	sphInfo ( "rotating index '%s': success", szIndex );
 	return bPreallocSuccess;
 }
 
@@ -18543,7 +18872,7 @@ static void RtFlushThreadFunc ( void * )
 				continue;
 
 			dRtIndexes.Add().m_sName = it.GetName ();
-			ISphRtIndex * pRT = (ISphRtIndex *) pIdx->m_pIndex;
+			auto * pRT = (RtIndex_i *) pIdx->m_pIndex;
 			int64_t tmFlushed = pRT->GetFlushAge();
 			if ( tmFlushed==0 )
 				dRtIndexes.Last().m_iValue = 0;
@@ -18561,7 +18890,7 @@ static void RtFlushThreadFunc ( void * )
 				continue;
 
 			ServedDescRPtr_c dReadLock ( pServed );
-			auto * pRT = (ISphRtIndex *) dReadLock->m_pIndex;
+			auto * pRT = (RtIndex_i *) dReadLock->m_pIndex;
 			pRT->CheckRamFlush();
 		}
 
@@ -18644,7 +18973,7 @@ static bool RotateIndexMT ( const CSphString & sIndex, CSphString & sError )
 
 	// get existing index. Look first to disabled hash.
 	auto pRotating = GetDisabled ( sIndex );
-	if ( !pRotating )
+	if ( !pRotating || !ServedDescRPtr_c(pRotating)->m_pIndex )
 	{
 		pRotating = GetServed ( sIndex );
 		if ( !pRotating )
@@ -18665,7 +18994,7 @@ static bool RotateIndexMT ( const CSphString & sIndex, CSphString & sError )
 	tNewIndex.m_pIndex->m_iExpansionLimit = g_iExpansionLimit;
 
 	IndexFiles_c dActivePath, dNewPath;
-	ROTATE_FROM eRot = ROTATE_FROM::NONE;
+	RotateFrom_e eRot = RotateFrom_e::NONE;
 	{
 		ServedDescRPtr_c pCurrentlyServed ( pRotating );
 		if ( !pCurrentlyServed->m_pIndex )
@@ -18693,7 +19022,7 @@ static bool RotateIndexMT ( const CSphString & sIndex, CSphString & sError )
 		eRot = CheckIndexHeaderRotate ( *pCurrentlyServed );
 	}
 
-	if ( eRot==ROTATE_FROM::NONE )
+	if ( eRot==RotateFrom_e::NONE )
 	{
 		sphWarning ( "nothing to rotate for index '%s'", sIndex.cstr() );
 		return false;
@@ -18702,20 +19031,20 @@ static bool RotateIndexMT ( const CSphString & sIndex, CSphString & sError )
 	CSphString sPathTo;
 	switch ( eRot )
 	{
-	case ROTATE_FROM::PATH_NEW: // move from new_path/idx.new.sph -> new_path/idx.sph
+	case RotateFrom_e::PATH_NEW: // move from new_path/idx.new.sph -> new_path/idx.sph
 		tNewIndex.m_pIndex->SetBase ( dNewPath.MakePath (".new").cstr() );
 		sPathTo = dNewPath.GetBase();
 		break;
 
-	case ROTATE_FROM::PATH_COPY: // load from new_path/idx.sph
+	case RotateFrom_e::PATH_COPY: // load from new_path/idx.sph
 		tNewIndex.m_pIndex->SetBase ( dNewPath.GetBase ().cstr() );
 		break;
 
-	case ROTATE_FROM::REENABLE: // load from current_path/idx.sph
+	case RotateFrom_e::REENABLE: // load from current_path/idx.sph
 		tNewIndex.m_pIndex->SetBase ( dActivePath.GetBase ().cstr() );
 		break;
 
-	//case ROTATE_FROM::NEW:  // move from current_path/idx.new.sph -> current_path/idx.sph
+	//case RotateFrom_e::NEW:  // move from current_path/idx.new.sph -> current_path/idx.sph
 	default:
 		tNewIndex.m_pIndex->SetBase ( dActivePath.MakePath ( ".new" ).cstr () );
 		sPathTo = dActivePath.GetBase ();
@@ -18778,6 +19107,14 @@ static bool RotateIndexMT ( const CSphString & sIndex, CSphString & sError )
 			pCurrentlyServed->m_sUnlink = dActivePath.MakePath ( ".old" );
 	}
 
+	sphLogDebug ( "rotating index '%s': applying other indexes' killlists", sIndex.cstr() );
+
+	// apply other indexes' killlists to THIS index
+	if ( !ApplyKillListsTo ( tNewIndex, sError ) )
+		return false;
+
+	sphLogDebug ( "rotating index '%s': applying other indexes' killlists... DONE", sIndex.cstr() );
+
 	// all went fine; swap them
 	sphLogDebug ( "all went fine; swap them" );
 
@@ -18790,6 +19127,26 @@ static bool RotateIndexMT ( const CSphString & sIndex, CSphString & sError )
 	g_pLocalIndexes->AddOrReplace ( new ServedIndex_c ( tNewIndex ), sIndex );
 	sphInfo ( "rotating index '%s': success", sIndex.cstr() );
 	tNewIndex.m_pIndex = nullptr;
+
+	sphLogDebug ( "rotating index '%s': apply killlist from this index to other indexes (killlist_target)", sIndex.cstr() );
+
+	auto pServedForKlist = GetServed ( sIndex );
+	if ( pServedForKlist )
+	{
+		ServedDescRPtr_c pIndexForKlist ( pServedForKlist );
+
+		// apply killlist from this index to other indexes (killlist_target)
+		// if this fails, only show a warning
+		CSphString sWarning;
+		if ( !ApplyIndexKillList ( pIndexForKlist->m_pIndex, sWarning, sError ) )
+			sphWarning ( "rotating index '%s': %s", sIndex.cstr(), sError.cstr() );
+
+		if ( sWarning.Length() )
+			sphWarning ( "rotating index '%s': %s", sIndex.cstr(), sWarning.cstr() );
+
+		sphLogDebug ( "rotating index '%s': apply killlist from this index to other indexes (killlist_target)... DONE", sIndex.cstr() );
+	}
+
 	return true;
 }
 
@@ -18811,37 +19168,41 @@ void RotationThreadFunc ( void * )
 		bool bMutable = false;
 		{
 			ServedIndexRefPtr_c pIndex ( nullptr );
-			// scope for g_pDisabledIndexes
+
+			// find the index with the best (least) rotation priority
+			int iMinPriority = INT_MAX;
+			for ( RLockedServedIt_c it ( g_pDisabledIndexes ); it.Next(); )
 			{
-				RLockedServedIt_c it ( g_pDisabledIndexes );
-				it.Next();
-				sIndex = it.GetName ();
-				pIndex = it.Get();
+				ServedDescRPtr_c rLocked(it.Get());
+
+				if ( rLocked->m_iRotationPriority < iMinPriority )
+				{
+					sIndex = it.GetName();
+					pIndex = it.Get();
+					iMinPriority = rLocked->m_iRotationPriority;
+				}
 			}
 
-			if ( pIndex ) // that is rt/percolate. Plain locals has just name and nullptr index
 			{
-				{
-					ServedDescRPtr_c tLocked ( pIndex );
-					bMutable = tLocked->IsMutable ();
-					// cluster indexes got managed by different path
-					if ( tLocked->IsCluster() )
-						continue;
-				}
+				ServedDescRPtr_c tLocked ( pIndex );
+				bMutable = tLocked->IsMutable();
+				// cluster indexes got managed by different path
+				if ( tLocked->IsCluster() )
+					continue;
+			}
 
-				// prealloc RT and percolate here
-				if ( bMutable )
+			// prealloc RT and percolate here
+			if ( bMutable )
+			{
+				ServedDescWPtr_c wLocked ( pIndex );
+				if ( PreallocNewIndex ( *wLocked, sIndex.cstr() ) )
 				{
-					ServedDescWPtr_c wLocked ( pIndex );
-					if ( PreallocNewIndex ( *wLocked, sIndex.cstr() ) )
-					{
-						wLocked->m_bOnlyNew = false;
-						g_pLocalIndexes->AddOrReplace ( pIndex, sIndex );
-						pIndex->AddRef ();
-					} else
-					{
-						g_pLocalIndexes->DeleteIfNull ( sIndex );
-					}
+					wLocked->m_bOnlyNew = false;
+					g_pLocalIndexes->AddOrReplace ( pIndex, sIndex );
+					pIndex->AddRef ();
+				} else
+				{
+					g_pLocalIndexes->DeleteIfNull ( sIndex );
 				}
 			}
 		}
@@ -19183,7 +19544,7 @@ void OptimizeThreadFunc ( void * )
 
 		// FIXME: MVA update would wait w-lock here for a very long time
 		assert ( dReadLock->m_eType==IndexType_e::RT );
-		static_cast<ISphRtIndex *>( dReadLock->m_pIndex )->Optimize ();
+		static_cast<RtIndex_i *>( dReadLock->m_pIndex )->Optimize ();
 	}
 }
 
@@ -19455,7 +19816,7 @@ ESphAddIndex AddRTIndex ( const char * szIndexName, const CSphConfigSection &hIn
 {
 	CSphString sError;
 	CSphSchema tSchema ( szIndexName );
-	if ( !sphRTSchemaConfigure ( hIndex, &tSchema, &sError, false ) )
+	if ( !sphRTSchemaConfigure ( hIndex, tSchema, sError, false ) )
 	{
 		sphWarning ( "index '%s': %s - NOT SERVING", szIndexName, sError.cstr () );
 		return ADD_ERROR;
@@ -19481,7 +19842,7 @@ ESphAddIndex AddRTIndex ( const char * szIndexName, const CSphConfigSection &hIn
 	// pick config settings
 	// they should be overriden later by Preload() if needed
 	CSphIndexSettings tSettings;
-	if ( !sphConfIndex ( hIndex, tSettings, sError ) )
+	if ( !sphConfIndex ( hIndex, tSettings, szIndexName, sError ) )
 	{
 		sphWarning ( "ERROR: index '%s': %s - NOT SERVING", szIndexName, sError.cstr () );
 		return ADD_ERROR;
@@ -19547,7 +19908,7 @@ ESphAddIndex AddPercolateIndex ( const char * szIndexName, const CSphConfigSecti
 {
 	CSphString sError;
 	CSphSchema tSchema ( szIndexName );
-	if ( !sphRTSchemaConfigure ( hIndex, &tSchema, &sError, true ) )
+	if ( !sphRTSchemaConfigure ( hIndex, tSchema, sError, true ) )
 	{
 		sphWarning ( "index '%s': %s - NOT SERVING", szIndexName, sError.cstr () );
 		return ADD_ERROR;
@@ -19574,7 +19935,7 @@ ESphAddIndex AddPercolateIndex ( const char * szIndexName, const CSphConfigSecti
 	// pick config settings
 	// they should be overriden later by Preload() if needed
 	CSphIndexSettings tSettings;
-	if ( !sphConfIndex ( hIndex, tSettings, sError ) )
+	if ( !sphConfIndex ( hIndex, tSettings, szIndexName, sError ) )
 	{
 		sphWarning ( "ERROR: index '%s': %s - NOT SERVING", szIndexName, sError.cstr () );
 		return ADD_ERROR;
@@ -19690,7 +20051,7 @@ ESphAddIndex AddTemplateIndex ( const char * szIndexName, const CSphConfigSectio
 
 	CSphIndexSettings s;
 	CSphString sError;
-	if ( !sphConfIndex ( hIndex, s, sError ) )
+	if ( !sphConfIndex ( hIndex, s, szIndexName, sError ) )
 	{
 		sphWarning ( "failed to configure index %s: %s", szIndexName, sError.cstr () );
 		return ADD_ERROR;
@@ -19912,7 +20273,15 @@ static void ReloadIndexSettings ( CSphConfigParser & tCP ) REQUIRES ( MainThread
 				if ( pServedWLocked->m_eType!=IndexType_e::TEMPLATE && hIndex.Exists ( "path" ) && hIndex["path"].strval ()!=pServedWLocked->m_sIndexPath )
 				{
 					pServedWLocked->m_sNewPath = hIndex["path"].strval ();
-					g_pDisabledIndexes->AddUniq ( nullptr, sIndexName );
+
+					ServedDesc_t tDesc;
+					tDesc.m_sIndexPath = pServedWLocked->m_sIndexPath;
+					tDesc.m_sNewPath = pServedWLocked->m_sNewPath;
+					tDesc.m_eType = pServedWLocked->m_eType;
+					if ( !PreloadKlistTarget ( tDesc, CheckIndexHeaderRotate(tDesc), tDesc.m_dKilllistTargets ) )
+						tDesc.m_dKilllistTargets.Reset();
+
+					g_pDisabledIndexes->AddUniq ( new ServedIndex_c(tDesc), sIndexName );
 				}
 			}
 
@@ -19998,6 +20367,223 @@ void RotationServiceThreadFunc ( void * )
 	}
 }
 
+
+struct IndexWithPriority_t
+{
+	CSphString	m_sIndex;
+	StrVec_t	m_dKilllistTargets;
+	int			m_iPriority {-1};
+	int			m_nReferences {0};
+};
+
+
+static void SetIndexPriority ( IndexWithPriority_t & tIndex, int iPriority, const SmallStringHash_T<IndexWithPriority_t> & tIndexHash )
+{
+	tIndex.m_iPriority = Max ( tIndex.m_iPriority, iPriority );
+	for ( const auto & i : tIndex.m_dKilllistTargets )
+	{
+		IndexWithPriority_t * pIdx = tIndexHash(i);
+		if ( pIdx )
+			SetIndexPriority ( *pIdx, iPriority+1, tIndexHash );
+	}
+}
+
+
+static void CalcRotationPriorities()
+{
+	SmallStringHash_T<IndexWithPriority_t> tIndexesToRotate;
+
+	// don't need wlock since rotation thread is already waiting for g_tRotateThreadMutex
+	for ( RLockedServedIt_c it ( g_pDisabledIndexes ); it.Next (); )
+	{
+		auto pIndex = it.Get();
+		assert(pIndex);
+
+		ServedDescRPtr_c pRlockedServedPtr(pIndex);
+
+		// check for rt/percolate. they don't need killlist_target
+		if ( !pRlockedServedPtr->IsMutable() && g_pLocalIndexes->Contains ( it.GetName() ) ) 
+		{
+			ServedDescRPtr_c pDesc ( GetServed ( it.GetName() ) );
+
+			IndexWithPriority_t tToRotate;
+			tToRotate.m_sIndex = it.GetName();
+			tToRotate.m_dKilllistTargets = pRlockedServedPtr->m_dKilllistTargets;
+
+			tIndexesToRotate.Add ( tToRotate, it.GetName() );
+		}
+	}
+
+	// set priorities
+	for ( tIndexesToRotate.IterateStart (); tIndexesToRotate.IterateNext (); )
+		for ( const auto & i : tIndexesToRotate.IterateGet().m_dKilllistTargets )
+		{
+			IndexWithPriority_t * pIdx = tIndexesToRotate(i);
+			if ( pIdx )
+				pIdx->m_nReferences++;
+		}
+
+	// start with the least-referenced index
+	IndexWithPriority_t * pMin;
+	do
+	{
+		pMin = nullptr;
+		for ( tIndexesToRotate.IterateStart (); tIndexesToRotate.IterateNext (); )
+		{
+			IndexWithPriority_t & tIdx = tIndexesToRotate.IterateGet();
+			if ( tIdx.m_iPriority==-1 && ( !pMin || tIdx.m_nReferences<pMin->m_nReferences ) )
+				pMin = &tIdx;
+		}
+
+		if ( pMin )
+			SetIndexPriority ( *pMin, 0, tIndexesToRotate );
+	}
+	while ( pMin );
+	
+	// copy priorities to disabled indexes
+	for ( tIndexesToRotate.IterateStart (); tIndexesToRotate.IterateNext (); )
+	{
+		const IndexWithPriority_t & tIdx = tIndexesToRotate.IterateGet();
+		assert ( tIdx.m_iPriority>=0 );
+		ServedDescWPtr_c pDisabled ( GetDisabled ( tIdx.m_sIndex ) );
+		if ( pDisabled )
+			pDisabled->m_iRotationPriority = tIdx.m_iPriority;
+	}
+}
+
+
+static void CheckIndexesForSeamless()
+{
+	// check what indexes need to be rotated
+	SmallStringHash_T<bool> dNotCapableForRotation;
+	for ( RLockedServedIt_c it ( g_pDisabledIndexes ); it.Next(); )
+	{
+		ServedDescRPtr_c rLocked ( it.Get() );
+		const CSphString & sIndex = it.GetName ();
+		assert ( rLocked );
+		if ( !rLocked->m_pIndex )
+			continue;
+
+		if ( CheckIndexHeaderRotate(*rLocked)==RotateFrom_e::NONE && !rLocked->IsMutable() )
+		{
+			dNotCapableForRotation.Add ( true, sIndex );
+			sphLogDebug ( "Index %s (%s) is not capable for seamless rotate. Skipping", sIndex.cstr ()
+				, rLocked->m_sIndexPath.cstr () );
+		}
+	}
+
+	if ( dNotCapableForRotation.GetLength () )
+	{
+		sphWarning ( "INTERNAL ERROR: non-empty queue on a rotation cycle start, got %d elements"
+			, dNotCapableForRotation.GetLength () );
+		for ( dNotCapableForRotation.IterateStart (); dNotCapableForRotation.IterateNext (); )
+		{
+			// need also to remove empty description from local index list
+			g_pLocalIndexes->DeleteIfNull ( dNotCapableForRotation.IterateGetKey() );
+			g_pDisabledIndexes->Delete ( dNotCapableForRotation.IterateGetKey() );
+			sphWarning ( "queue[] = %s", dNotCapableForRotation.IterateGetKey().cstr () );
+		}
+	}
+
+	if ( !g_pDisabledIndexes->GetLength () )
+	{
+		sphWarning ( "nothing to rotate after SIGHUP" );
+		g_bInvokeRotationService = false;
+		g_bInRotate = false;
+	}
+}
+
+
+static void DoGreedyRotation()
+{
+	ScRL_t tRotateConfigMutex { g_tRotateConfigMutex };
+
+	while ( g_pDisabledIndexes->GetLength() )
+	{
+		CSphString sIndex, sError;
+		ServedIndexRefPtr_c pIndex ( nullptr );
+
+		// find the index with the best (least) rotation priority
+		int iMinPriority = INT_MAX;
+		for ( RLockedServedIt_c it ( g_pDisabledIndexes ); it.Next(); )
+		{
+			ServedDescRPtr_c rLocked(it.Get());
+
+			if ( rLocked->m_iRotationPriority < iMinPriority )
+			{
+				sIndex = it.GetName();
+				pIndex = it.Get();
+				iMinPriority = rLocked->m_iRotationPriority;
+			}
+		}
+
+		assert ( pIndex );
+
+		// special processing for plain old rotation cur.new.* -> cur.*
+		if ( !ServedDescRPtr_c(pIndex)->m_pIndex )
+		{
+			auto pRotating = GetServed ( sIndex );
+			assert ( pRotating );
+			ServedDescWPtr_c pWRotating ( pRotating );
+			assert ( pWRotating->m_eType==IndexType_e::PLAIN );
+			if ( !RotateIndexGreedy ( pRotating, *pWRotating, sIndex.cstr(), sError ) )
+			{
+				sphWarning ( "%s", sError.cstr () );
+				g_pLocalIndexes->Delete ( sIndex );
+			}
+		}
+		else
+		{
+			ServedDescWPtr_c pWlockedServedPtr ( pIndex );
+
+			assert ( pWlockedServedPtr->m_pIndex );
+			assert ( g_pLocalIndexes->Contains ( sIndex ) );
+
+			// prealloc RT and percolate here
+			if ( pWlockedServedPtr->IsMutable () )
+			{
+				pWlockedServedPtr->m_bOnlyNew = false;
+				if ( PreallocNewIndex ( *pWlockedServedPtr, &g_pCfg.m_tConf["index"][sIndex], sIndex.cstr() ) )
+				{
+					g_pLocalIndexes->AddOrReplace ( pIndex, sIndex );
+					pIndex->AddRef ();
+				} else
+					g_pLocalIndexes->DeleteIfNull ( sIndex );
+			}
+			else if ( pWlockedServedPtr->m_eType==IndexType_e::PLAIN )
+			{
+				bool bWasAdded = pWlockedServedPtr->m_bOnlyNew;
+				bool bOk = RotateIndexGreedy ( pIndex, *pWlockedServedPtr, sIndex.cstr(), sError );
+				if ( !bOk )
+					sphWarning ( "%s", sError.cstr() );
+
+				if ( bWasAdded && bOk && !sphFixupIndexSettings ( pWlockedServedPtr->m_pIndex, g_pCfg.m_tConf["index"][sIndex], sError, g_bStripPath ) )
+				{
+					sphWarning ( "index '%s': %s - NOT SERVING", sIndex.cstr(), sError.cstr() );
+					bOk = false;
+				}
+
+				if ( bOk )
+				{
+					pWlockedServedPtr->m_pIndex->Preread();
+					g_pLocalIndexes->AddOrReplace ( pIndex, sIndex );
+					pIndex->AddRef ();
+				} else
+					g_pLocalIndexes->DeleteIfNull ( sIndex );
+			}
+		}
+
+		g_pDisabledIndexes->Delete ( sIndex );
+		g_pDistIndexes->Delete ( sIndex ); // postponed delete of same-named distributed (if any)
+	}
+
+	g_pDisabledIndexes->ReleaseAndClear ();
+	g_bInRotate = false;
+	g_bInvokeRotationService = true;
+	sphInfo ( "rotating finished" );
+}
+
+
 // ServiceMain() -> TickHead() -> CheckRotate()
 void CheckRotate () REQUIRES ( MainThread )
 {
@@ -20015,141 +20601,44 @@ void CheckRotate () REQUIRES ( MainThread )
 	g_pDisabledIndexes->ReleaseAndClear ();
 	{
 		ScWL_t dRotateConfigMutexWlocked { g_tRotateConfigMutex };
-		if ( CheckConfigChanges () )
+		if ( CheckConfigChanges () || g_bReloadForced )
 			ReloadIndexSettings ( g_pCfg );
+		g_bReloadForced = false;
 	}
 
-	// special pass for 'simple' rotation (i.e. *.new to current)
-	for ( RLockedServedIt_c it ( g_pLocalIndexes ); it.Next (); )
 	{
-		auto pIdx = it.Get();
-		if ( !pIdx )
-			continue;
-		ServedDescRPtr_c rLocked ( pIdx );
-		const CSphString &sIndex = it.GetName ();
-		assert ( rLocked->m_pIndex );
-		if ( rLocked->m_eType==IndexType_e::PLAIN && ROTATE_FROM::NEW==CheckIndexHeaderRotate ( *rLocked ) )
-			g_pDisabledIndexes->AddUniq ( nullptr, sIndex );
-	}
+		// we want rotation thread to wait until we're done with our new rotation priorities
+		ScopedMutex_t tBlockRotations ( g_tRotateThreadMutex );
 
-	/////////////////////
-	// RAM-greedy rotate
-	/////////////////////
-
-	if ( !g_bSeamlessRotate )
-	{
-		ScRL_t tRotateConfigMutex { g_tRotateConfigMutex };
-		for ( RLockedServedIt_c it ( g_pDisabledIndexes ); it.Next(); )
+		// special pass for 'simple' rotation (i.e. *.new to current)
+		for ( RLockedServedIt_c it ( g_pLocalIndexes ); it.Next (); )
 		{
-			auto pIndex = it.Get();
-			const char * sIndex = it.GetName ().cstr ();
-			CSphString sError;
-
-			// special processing for plain old rotation cur.new.* -> cur.*
-			if ( !pIndex )
-			{
-				auto pRotating = GetServed ( sIndex );
-				assert ( pRotating );
-				ServedDescWPtr_c pWRotating ( pRotating );
-				assert ( pWRotating->m_eType==IndexType_e::PLAIN );
-				if ( !RotateIndexGreedy ( pRotating, *pWRotating, sIndex, sError ) )
-				{
-					sphWarning ( "%s", sError.cstr () );
-					g_pLocalIndexes->Delete ( sIndex );
-				}
-				g_pDistIndexes->Delete ( sIndex ); // postponed delete of same-named distributed (if any)
+			auto pIdx = it.Get();
+			if ( !pIdx )
 				continue;
-			}
-
-			ServedDescWPtr_c pWlockedServedPtr ( pIndex );
-
-			assert ( pWlockedServedPtr->m_pIndex );
-			assert ( g_pLocalIndexes->Contains ( sIndex ) );
-
-			// prealloc RT and percolate here
-			if ( pWlockedServedPtr->IsMutable () )
+			ServedDescRPtr_c rLocked ( pIdx );
+			const CSphString & sIndex = it.GetName();
+			assert ( rLocked->m_pIndex );
+			if ( rLocked->m_eType==IndexType_e::PLAIN && CheckIndexHeaderRotate ( *rLocked )==RotateFrom_e::NEW )
 			{
-				pWlockedServedPtr->m_bOnlyNew = false;
-				if ( PreallocNewIndex ( *pWlockedServedPtr, &g_pCfg.m_tConf["index"][sIndex], sIndex ) )
-				{
-					g_pLocalIndexes->AddOrReplace ( pIndex, sIndex );
-					pIndex->AddRef ();
-				} else
-					g_pLocalIndexes->DeleteIfNull ( sIndex );
-				g_pDistIndexes->Delete ( sIndex ); // postponed delete of same-named distributed (if any)
+				ServedDesc_t tDesc;
+				tDesc.m_sIndexPath = rLocked->m_sIndexPath;
+				tDesc.m_sNewPath = rLocked->m_sNewPath;
+				tDesc.m_eType = rLocked->m_eType;
+				if ( !PreloadKlistTarget ( tDesc, RotateFrom_e::NEW, tDesc.m_dKilllistTargets ) )
+					tDesc.m_dKilllistTargets.Reset();
+
+				g_pDisabledIndexes->AddUniq ( new ServedIndex_c(tDesc), sIndex );
 			}
-
-			if ( pWlockedServedPtr->m_eType!=IndexType_e::PLAIN )
-				continue;
-
-			bool bWasAdded = pWlockedServedPtr->m_bOnlyNew;
-			bool bOk = RotateIndexGreedy ( pIndex, *pWlockedServedPtr, sIndex, sError );
-			if ( !bOk )
-				sphWarning ( "%s", sError.cstr() );
-
-			if ( bWasAdded && bOk && !sphFixupIndexSettings ( pWlockedServedPtr->m_pIndex, g_pCfg.m_tConf["index"][sIndex], sError, g_bStripPath ) )
-			{
-				sphWarning ( "index '%s': %s - NOT SERVING", sIndex, sError.cstr() );
-				bOk = false;
-			}
-
-			if ( bOk )
-			{
-				pWlockedServedPtr->m_pIndex->Preread();
-				g_pLocalIndexes->AddOrReplace ( pIndex, sIndex );
-				pIndex->AddRef ();
-			} else
-				g_pLocalIndexes->DeleteIfNull ( sIndex );
-			g_pDistIndexes->Delete ( sIndex ); // postponed delete of same-named distributed (if any)
 		}
 
-		g_pDisabledIndexes->ReleaseAndClear ();
-		g_bInRotate = false;
-		g_bInvokeRotationService = true;
-		sphInfo ( "rotating finished" );
-		return;
+		CalcRotationPriorities();
 	}
 
-	///////////////////
-	// seamless rotate
-	///////////////////
-
-	// check what indexes need to be rotated
-	SmallStringHash_T<bool> dNotCapableForRotation;
-	for ( RLockedServedIt_c it ( g_pDisabledIndexes ); it.Next(); )
-	{
-		ServedDescRPtr_c rLocked ( it.Get() );
-		const CSphString & sIndex = it.GetName ();
-		if ( !rLocked )
-			continue;
-
-		assert ( rLocked->m_pIndex );
-		if ( ROTATE_FROM::NONE==CheckIndexHeaderRotate ( *rLocked ) && !rLocked->IsMutable() )
-		{
-			dNotCapableForRotation.Add ( true, sIndex );
-			sphLogDebug ( "Index %s (%s) is not capable for seamless rotate. Skipping", sIndex.cstr ()
-						  , rLocked->m_sIndexPath.cstr () );
-		}
-	}
-
-	if ( dNotCapableForRotation.GetLength () )
-	{
-		sphWarning ( "INTERNAL ERROR: non-empty queue on a rotation cycle start, got %d elements"
-					 , dNotCapableForRotation.GetLength () );
-		for ( dNotCapableForRotation.IterateStart (); dNotCapableForRotation.IterateNext (); )
-		{
-			g_pDisabledIndexes->Delete ( dNotCapableForRotation.IterateGetKey () );
-			sphWarning ( "queue[] = %s", dNotCapableForRotation.IterateGetKey ().cstr () );
-		}
-	}
-
-	if ( !g_pDisabledIndexes->GetLength () )
-	{
-		sphWarning ( "nothing to rotate after SIGHUP" );
-		g_bInvokeRotationService = false;
-		g_bInRotate = false;
-		return;
-	}
+	if ( g_bSeamlessRotate )
+		CheckIndexesForSeamless();
+	else
+		DoGreedyRotation();
 }
 
 
@@ -21322,7 +21811,7 @@ struct HttpHeaderStreamParser_t
 
 struct NetReceiveDataHttp_t : public ISphNetAction
 {
-	CSphScopedPtr<NetStateQL_t>		m_tState;
+	CSphScopedPtr<NetStateCommon_t>		m_tState;
 	HttpHeaderStreamParser_t		m_tHeadParser;
 
 	explicit NetReceiveDataHttp_t ( NetStateQL_t * pState );
@@ -21330,6 +21819,9 @@ struct NetReceiveDataHttp_t : public ISphNetAction
 	NetEvent_e		Tick ( DWORD uGotEvents, CSphVector<ISphNetAction *> & dNextTick, CSphNetLoop * pLoop ) override;
 	NetEvent_e		Setup ( int64_t tmNow ) override;
 	void			CloseSocket () override;
+
+private:
+	void GrowBuffer();
 };
 
 struct EventsIterator_t
@@ -21934,10 +22426,10 @@ struct ThdJobQL_t : public ISphJob
 
 struct ThdJobHttp_t : public ISphJob
 {
-	CSphScopedPtr<NetStateQL_t>		m_tState;
+	CSphScopedPtr<NetStateCommon_t>		m_tState;
 	CSphNetLoop *		m_pLoop;
 
-	ThdJobHttp_t ( CSphNetLoop * pLoop, NetStateQL_t * pState );
+	ThdJobHttp_t ( CSphNetLoop * pLoop, NetStateCommon_t * pState );
 
 	void		Call () final;
 };
@@ -22750,9 +23242,9 @@ int NetStateCommon_t::NetManageSocket ( bool bWrite, bool bAfterWrite )
 	// try next chunk
 	int iRes = 0;
 	if ( bWrite )
-		iRes = (int)sphSockSend ( m_iClientSock, (const char*) m_dBuf.begin() + m_iPos, m_iLeft );
+		iRes = (int)sphSockSend ( m_iClientSock, (const char*)(m_dBuf.begin() + m_iPos), m_iLeft );
 	else
-		iRes = (int)sphSockRecv ( m_iClientSock, (char*) m_dBuf.begin () + m_iPos, m_iLeft );
+		iRes = (int)sphSockRecv ( m_iClientSock, (char*)(m_dBuf.begin () + m_iPos), m_iLeft );
 
 	// if there was EINTR, retry
 	// if any other error, bail
@@ -22856,6 +23348,19 @@ bool HttpHeaderStreamParser_t::HeaderFound ( const BYTE * pBuf, int iLen )
 	return ( m_iHeaderEnd>0 );
 }
 
+void NetReceiveDataHttp_t::GrowBuffer()
+{
+	if ( m_tState->m_iLeft )
+		return;
+
+	auto iCanGrow = Min ( g_iMaxPacketSize - m_tState->m_iPos, 4096 );
+	if ( !iCanGrow )
+		return;
+
+	m_tState->m_dBuf.AddN ( iCanGrow );
+	m_tState->m_iLeft = iCanGrow;
+}
+
 NetEvent_e NetReceiveDataHttp_t::Tick ( DWORD uGotEvents, CSphVector<ISphNetAction *> & , CSphNetLoop * pLoop )
 {
 	assert ( m_tState.Ptr() );
@@ -22884,7 +23389,10 @@ NetEvent_e NetReceiveDataHttp_t::Tick ( DWORD uGotEvents, CSphVector<ISphNetActi
 		if ( !m_tHeadParser.m_iHeaderEnd )
 		{
 			if ( !m_tHeadParser.HeaderFound ( m_tState->m_dBuf.Begin(), m_tState->m_iPos ) )
+			{
+				GrowBuffer ();
 				continue;
+			}
 
 			int iReqSize = m_tHeadParser.m_iHeaderEnd + m_tHeadParser.m_iFieldContentLenVal;
 			if ( m_tHeadParser.m_iFieldContentLenVal && m_tState->m_iPos<iReqSize )
@@ -23085,7 +23593,7 @@ void ThdJobCleanup_t::Clear ()
 	m_dCleanup.Reset();
 }
 
-ThdJobHttp_t::ThdJobHttp_t ( CSphNetLoop * pLoop, NetStateQL_t * pState )
+ThdJobHttp_t::ThdJobHttp_t ( CSphNetLoop * pLoop, NetStateCommon_t * pState )
 	: m_tState ( pState )
 	, m_pLoop ( pLoop )
 {
@@ -23590,9 +24098,23 @@ void ConfigureAndPreload ( const CSphConfig & hConf, const StrVec_t & dOptIndexe
 
 	InitPersistentPool();
 
+	for ( RLockedServedIt_c it ( g_pLocalIndexes ); it.Next(); )
+	{
+		ServedDescRPtr_c tServed ( it.Get () );
+		if ( tServed )
+		{
+			CSphString sWarning, sError;
+			if ( !ApplyIndexKillList ( tServed->m_pIndex, sWarning, sError, true ) )
+				sphWarning ( "index '%s': error applying killlist: %s", tServed->m_pIndex->GetName(), sError.cstr() );
+
+			if ( sWarning.Length() )
+				sphWarning ( "%s", sWarning.cstr() );
+		}
+	}
+
 	tmLoad += sphMicroTimer();
 	if ( !iValidIndexes )
-		sphWarning ( "no valid indexes to serve" );
+		sphLogDebug ( "no valid indexes to serve" );
 	else
 		fprintf ( stdout, "precached %d indexes in %0.3f sec\n", iCounter, float(tmLoad)/1000000 );
 }
@@ -23743,10 +24265,10 @@ int WINAPI ServiceMain ( int argc, char **argv ) REQUIRES (!MainThread)
 #else
 		OPT1 ( "--nodetach" )		g_bOptNoDetach = true;
 #endif
-		OPT1 ( "--logdebug" )		g_eLogLevel = SPH_LOG_DEBUG;
-		OPT1 ( "--logdebugv" )		g_eLogLevel = SPH_LOG_VERBOSE_DEBUG;
-		OPT1 ( "--logdebugvv" )		g_eLogLevel = SPH_LOG_VERY_VERBOSE_DEBUG;
-		OPT1 ( "--logreplication" )	g_eLogLevel = SPH_LOG_RPL_DEBUG;
+		OPT1 ( "--logdebug" )		g_eLogLevel = Max ( g_eLogLevel, SPH_LOG_DEBUG );
+		OPT1 ( "--logdebugv" )		g_eLogLevel = Max ( g_eLogLevel, SPH_LOG_VERBOSE_DEBUG );
+		OPT1 ( "--logdebugvv" )		g_eLogLevel = Max ( g_eLogLevel, SPH_LOG_VERY_VERBOSE_DEBUG );
+		OPT1 ( "--logreplication" )	g_eLogLevel = Max ( g_eLogLevel, SPH_LOG_RPL_DEBUG );
 		OPT1 ( "--safetrace" )		g_bSafeTrace = true;
 		OPT1 ( "--test" )			{ g_bWatchdog = false; bTestMode = true; } // internal option, do NOT document
 		OPT1 ( "--test-thd-pool" )	{ g_bWatchdog = false; bTestMode = true; bTestThdPoolMode = true; } // internal option, do NOT document
@@ -24172,11 +24694,12 @@ int WINAPI ServiceMain ( int argc, char **argv ) REQUIRES (!MainThread)
 	Listener_t tListener;
 	tListener.m_eProto = PROTO_SPHINX;
 	tListener.m_bTcp = true;
+	CSphVector<ListenerDesc_t> dListenerDescs;
 
 	// command line arguments override config (but only in --console)
 	if ( bOptListen )
 	{
-		AddListener ( sOptListen, bThdPool );
+		AddListener ( sOptListen, bThdPool, dListenerDescs );
 
 	} else if ( bOptPort )
 	{
@@ -24187,7 +24710,7 @@ int WINAPI ServiceMain ( int argc, char **argv ) REQUIRES (!MainThread)
 	{
 		// listen directives in configuration file
 		for ( CSphVariant * v = hSearchd("listen"); v; v = v->m_pNext )
-			AddListener ( v->strval(), bThdPool );
+			AddListener ( v->strval(), bThdPool, dListenerDescs );
 
 		// default is to listen on our two ports
 		if ( !g_dListeners.GetLength() )
@@ -24205,11 +24728,6 @@ int WINAPI ServiceMain ( int argc, char **argv ) REQUIRES (!MainThread)
 	//////////////////////
 	// build indexes hash
 	//////////////////////
-
-	// setup mva updates arena here, since we could have saved persistent mva updates
-	const char * sArenaError = sphArenaInit ( hSearchd.GetSize ( "mva_updates_pool", MVA_UPDATES_POOL ) );
-	if ( sArenaError )
-		sphWarning ( "process shared mutex unsupported, MVA update disabled ( %s )", sArenaError );
 
 	// configure and preload
 
@@ -24478,7 +24996,7 @@ int WINAPI ServiceMain ( int argc, char **argv ) REQUIRES (!MainThread)
 	SphCrashLogger_c::SetTopQueryTLS ( &tQueryTLS );
 
 	// time for replication to sync with cluster
-	ReplicationStart ( hSearchd, bNewCluster, bNewClusterForce );
+	ReplicationStart ( hSearchd, dListenerDescs, bNewCluster, bNewClusterForce );
 
 	// ready, steady, go
 	sphInfo ( "accepting connections" );

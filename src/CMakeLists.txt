@@ -15,23 +15,36 @@ set ( LIBSPHINX_SRCS sphinx.cpp sphinxexcerpt.cpp
 		sphinxsearch.cpp sphinxrt.cpp sphinxjson.cpp
 		sphinxaot.cpp sphinxplugin.cpp sphinxudf.c
 		sphinxqcache.cpp sphinxrlp.cpp sphinxjsonquery.cpp
-		json/cJSON.c sphinxpq.cpp )
+		attribute.cpp secondaryindex.cpp killlist.cpp searchnode.cpp json/cJSON.c sphinxpq.cpp )
 set ( INDEXER_SRCS indexer.cpp )
 set ( INDEXTOOL_SRCS indextool.cpp )
-set ( SEARCHD_SRCS_TESTABLE searchdha.cpp http/http_parser.c searchdhttp.cpp searchdreplication.cpp replication/wsrep_loader.cpp replication/wsrep_dummy.cpp replication/wsrep_uuid.cpp replication/wsrep_gtid.cpp )
+set ( SEARCHD_SRCS_TESTABLE searchdha.cpp http/http_parser.c searchdhttp.cpp searchdreplication.cpp )
 set ( SEARCHD_SRCS searchd.cpp ${SEARCHD_SRCS_TESTABLE} )
 set ( SPELLDUMP_SRCS spelldump.cpp )
 set ( TESTS_SRCS tests.cpp )
 set ( WORDBREAKER_SRCS sphinxstd.cpp wordbreaker.cpp)
+set ( INDEX_CONVERTER_SRCS sphinxstd.cpp index_converter.cpp)
 set ( LIBSPHINX_BISON sphinxexpr.y sphinxselect.y sphinxquery.y sphinxjson.y )
 set ( LIBSPHINX_FLEX sphinxjson.l )
 set ( SEARCHD_BISON sphinxql.y )
 set ( SEARCHD_FLEX sphinxql.l )
+set ( INDEX_CONV_SRCS index_converter.cpp )
 
 # The headers is not neccessary for executable build, but nesessary for MSVC and other projects
 # all the (non-generated) headers
-file ( GLOB HEADERS "sphinx*.h" lz4.h lz4hc.h http/http_parser.h )
-file ( GLOB SEARCHD_H "searchd*.h" replication/wsrep_api.h )
+# So if you add headers to the project and NOT see them in visual studio solution - just list them here!
+file ( GLOB HEADERS "sphinx*.h" lz4.h lz4hc.h http/http_parser.h secondaryindex.h searchnode.h killlist.h attribute.h)
+file ( GLOB SEARCHD_H "searchd*.h" )
+
+if ( UNIX AND NOT APPLE )
+	add_subdirectory ( replication )
+	add_compile_definitions( HAVE_WSREP )
+	set ( WSREP "wsrep")
+	LIST (APPEND SEARCHD_H "replication/wsrep_api.h" )
+else()
+	set ( WSREP "" )
+	LIST ( APPEND SEARCHD_H "replication/wsrep_api_stub.h" )
+endif()
 
 file ( GLOB GHEADERS "yysphinx*.h" )
 source_group ( "Generated Header Files" FILES ${GHEADERS} )
@@ -158,27 +171,34 @@ add_executable ( indextool ${INDEXTOOL_SRCS} )
 add_executable ( searchd ${SEARCHD_SRCS} ${SEARCHD_H} ${SEARCHD_BISON} ${SEARCHD_FLEX} )
 add_executable ( spelldump ${SPELLDUMP_SRCS} )
 add_executable ( wordbreaker ${WORDBREAKER_SRCS} )
+add_executable ( index_converter ${INDEX_CONV_SRCS} )
 add_dependencies ( wordbreaker vergen )
 target_link_libraries ( indexer libsphinx ${EXTRA_LIBRARIES} )
 target_link_libraries ( indextool libsphinx ${EXTRA_LIBRARIES} )
-target_link_libraries ( searchd libsphinx ${EXTRA_LIBRARIES} ${EXTRA_SEARCHD_LIBRARIES} )
+target_link_libraries ( searchd libsphinx ${EXTRA_LIBRARIES} ${EXTRA_SEARCHD_LIBRARIES} ${WSREP})
 target_link_libraries ( spelldump libsphinx ${EXTRA_LIBRARIES} )
 target_link_libraries ( wordbreaker libsphinx ${EXTRA_LIBRARIES} )
+target_link_libraries ( index_converter libsphinx ${EXTRA_LIBRARIES} )
 
-SET_RPATH ( searchd )
+IF ( USE_GALERA )
+    SET_SEARCHD_RPATH ()
+endif ()
 
 include ( helpers )
 
 
 if ( SPLIT_SYMBOLS )
-	install_dbg ( indexer )
-	install_dbg ( indextool )
-	install_dbg ( searchd )
-	install_dbg ( spelldump )
-	install_dbg ( wordbreaker )
-else()
-	INSTALL ( TARGETS indexer indextool searchd spelldump wordbreaker RUNTIME DESTINATION bin COMPONENT APPLICATIONS )
-endif ( SPLIT_SYMBOLS )
+	split_dbg ( indexer )
+	split_dbg ( indextool )
+	split_dbg ( searchd )
+	split_dbg ( spelldump )
+	split_dbg ( wordbreaker )
+	split_dbg ( index_converter )
+endif()
+
+INSTALL ( TARGETS indexer indextool searchd spelldump wordbreaker RUNTIME DESTINATION ${BINPREFIX}bin COMPONENT applications )
+
+INSTALL ( TARGETS index_converter RUNTIME DESTINATION ${BINPREFIX}bin COMPONENT converter )
 
 if ( NOT DISABLE_TESTING )
 	# Read docs at https://github.com/google/googletest.git
@@ -191,7 +211,7 @@ if ( NOT DISABLE_TESTING )
 					gtests_functions.cpp gtests_globalstate.cpp gtests_searchd.cpp gtests_filter.cpp gtests_searchdaemon.cpp
 					gtests_pqstuff.cpp gtests_json.cpp json/cJSON_test.c )
 			add_executable ( gmanticoretest ${GTESTS_SRC} )
-			target_link_libraries ( gmanticoretest gmock_main libsphinx ${EXTRA_LIBRARIES} )
+			target_link_libraries ( gmanticoretest gmock_main libsphinx ${EXTRA_LIBRARIES} ${WSREP} )
 			if ( CMAKE_VERSION VERSION_LESS 3.9.0 )# freshest cmake able to discover google-tests
 				find_package ( GTest QUIET )
 				GTEST_ADD_TESTS ( gmanticoretest "" ${GTESTS_SRC} )
@@ -212,7 +232,7 @@ if ( NOT DISABLE_TESTING )
 	add_executable ( tests ${TESTS_SRCS} )
 	target_link_libraries ( tests libsphinx ${EXTRA_LIBRARIES} )
 	if ( SPLIT_SYMBOLS )
-		install_dbg ( tests )
+		split_dbg_noinstall ( tests )
 	endif()
 
 	# compile rtestconfig.h

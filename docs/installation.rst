@@ -29,7 +29,7 @@ You can install Manticore with command:
 	$ wget https://github.com/manticoresoftware/manticore/releases/download/2.4.1/manticore_2.4.1-171017-3b31a97-release-stemmer.jessie_amd64-bin.deb
 	$ sudo dpkg -i manticore_2.4.1-171017-3b31a97-release-stemmer.jessie_amd64-bin.deb
 
-Manticore requires no extra libraries to be installed on Debian/Ubuntu.
+Manticore package depends on zlib and ssl libraries, nothing else is strictly required.
 However if you plan to use 'indexer' tool to create indexes from different sources,
 you'll need to install appropriate client libraries.
 To know what exactly libraries, run `indexer` tool from Manticore and look at the top of it's output:
@@ -116,7 +116,7 @@ Supported platforms:
 * x86
 * x86_64
 
-Manticore requires no extra libraries to be installed on RedHat/CentOS.
+Manticore package depends on zlib and ssl libraries, nothing else is strictly required.
 However if you plan to use 'indexer' tool to create indexes from different sources,
 you'll need to install appropriate client libraries. Use yum to download and install these dependencies:
 
@@ -163,7 +163,7 @@ In the following example we'll consider folder ``C:\Manticore`` where we unpack 
 
 The zip comes with 2 sample configurations: ``sphinx.conf.in`` and ``sphinx-min.conf.in``. The latter is a stripped-down of comments version of the first.  	
 
-The configuration contains a @CONFIGDIR@ string which needs to be replaced. The @CONFIGDIR@ is the root directory of ``data`` and ``log`` folders (first is used as location for indexes, second for logs).
+The configuration contains a ``@CONFIGDIR@`` string which needs to be replaced. The ``@CONFIGDIR@`` is the root directory of ``data`` and ``log`` folders (first is used as location for indexes, second for logs).
 The zip package comes with these folders, so they will be available at the location where you unzipped the package. If you want to use a different location, the two folders must be created there.
 
 Install the ``searchd`` system as a Windows service:
@@ -275,7 +275,14 @@ Required tools
 	* on Windows - Microsoft Visual Studio 2015 and above (community edition is enough)
 	* on Mac OS - XCode
 
-* cmake - used on all plaftorms (version 2.8 or above)
+* cmake - used on all plaftorms (version 3.13 or above)
+
+Required libraries/packages on Linux
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* Development version of **ssl** lib. Usually comes in package named like **libssl-dev** or **openssl-devel**.
+* Development version of **boost**. On debian packages **libboost-system-dev** and **libboost-program-options-dev** are enough; on redhat it is **boost-devel**.
+
 
 Optional dependencies
 ~~~~~~~~~~~~~~~~~~~~~
@@ -292,8 +299,8 @@ General building options
 
 For compiling latest version of Manticore, recommended is checkout the latest code from the github repositiory.
 Alternative, for compiling a certain version, you can either checked that version from github or use it's respective source tarball.
-In last case avoid to use automatic tarballs from github (named there as 'Source code'), but use provided files as `manticore-2.4.1-171017-3b31a97-release.tar.gz`.
-When building from clone you need packages `git`, `flex`, `bison`. When building from tarball they are not necessary. This requirement
+In last case avoid to use automatic tarballs from github (named there as 'Source code'), but use provided files as **manticore-2.4.1-171017-3b31a97-release.tar.gz**.
+When building from git clone you need packages **git**, **flex**, **bison**. When building from tarball they are not necessary. This requirement
 may be essential to build on Windows.
 
 .. code-block:: bash
@@ -343,7 +350,7 @@ To install all dependencies on Debian/Ubuntu:
 
 .. code-block:: bash
 
-   $ apt-get install build-essential cmake unixodbc-dev libpq-dev libexpat-dev libmysqlclient-dev git flex bison
+   $ apt-get install build-essential cmake unixodbc-dev libpq-dev libexpat-dev libmysqlclient-dev libssl-dev libboost-system-dev libboost-program-options-dev git flex bison
 
 Note: on Debian 9 (stretch) package ``libmysqlclient-dev`` is absent. Use ``default-libmysqlclient-dev`` there instead.
 
@@ -351,7 +358,7 @@ To install all dependencies on CentOS/RHEL:
 
 .. code-block:: bash
 
-   $ yum install gcc gcc-c++ make cmake mysql-devel expat-devel postgresql-devel unixODBC-devel rpm-build systemd-units git flex bison
+   $ yum install gcc gcc-c++ make cmake mysql-devel expat-devel postgresql-devel unixODBC-devel openssl-devel boost-devel rpm-build systemd-units  git flex bison
 
 (git, flex, bison doesn't necessary if you build from tarball)
 
@@ -364,19 +371,19 @@ RHEL/CentOS 6  ship with a old version of the gcc compiler, which doesn't suppor
    $ yum install -y devtoolset-2-gcc devtoolset-2-binutils devtoolset-2-gcc-c++
    $ export PATH=/opt/rh/devtoolset-2/root/usr/bin:$PATH
 
-Manticore uses `cmake` for building. We recommend to use a folder outside the sources to keep them clean.
+Manticore uses **cmake** for building. We recommend to use a folder outside the sources to keep them clean.
 
 .. code-block:: bash
 
    $ mkdir build
    $ cd build
-   $ cmake -D WITH_MYSQL=1 -DWITH_RE2=1 ../manticore
+   $ cmake3 -D WITH_MYSQL=1 -DWITH_RE2=1 ../manticore
 
 or if we use sources from tarball:
 
 .. code-block:: bash
 
-   $ cmake -D WITH_MYSQL=1 -DWITH_RE2=1 ../manticore-2.4.1-171017-3b31a97-release
+   $ cmake3 -D WITH_MYSQL=1 -DWITH_RE2=1 ../manticore-2.4.1-171017-3b31a97-release
 
 To simply compile:
 
@@ -404,7 +411,7 @@ If, for example, we want to create a deb package for Debian Jessie, we need to s
 
 .. code-block:: bash
 
-   $ cmake -DDISTR_BUILD=jessie ../manticore
+   $ cmake3 -DDISTR_BUILD=jessie ../manticore
    $ make -j4 package	   
 
 This will create 2 deb packages, a manticore-x.x.x-bin.deb and a manticore-x.x.x-dbg.deb which contains the version with debug symbols.
@@ -437,7 +444,7 @@ If you didn't change path for sources and build, just move to you build folder a
 
 .. code-block:: bash
 
-   cmake .
+   cmake3 .
    make clean
    make
 

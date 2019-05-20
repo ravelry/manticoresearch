@@ -248,7 +248,7 @@ Example:
     agent = test:9312|box2:9312|box3:9312:any2[retry_count=2]
 
 .. _agent_mirrors:
-	
+
 Agent mirrors
 ^^^^^^^^^^^^^
 
@@ -322,6 +322,23 @@ Example:
 
     # config on box3, box4
     agent = box1:9312|box2:9312:chunk1
+
+
+.. _attr_update_reserve:
+
+attr_update_reserve
+~~~~~~~~~~~~~~~~~~~
+
+Sets the space to be reserved for blob attribute updates. Optional, default value is 128k.
+
+When blob attributes (MVAs, strings, JSON), are updated, their length may change. If the updated string (or MVA, or JSON) is shorter than the old one, it overwrites the old one in the .SPB file. But if the updated string is longer, updates are written to the end of the .SPB file. This file is memory mapped, that's why resizing it may be a rather slow process, depending on the OS implementation of memory mapped files.
+
+To avoid frequent resizes, you can specify the extra space to be reserved at the end of the .SPB file by using
+
+.. code-block:: ini
+
+    attr_update_reserve=1M
+
 
 .. _bigram_freq_words:
 
@@ -569,13 +586,13 @@ ranges of characters at once. The complete list is as follows:
    a number of Unicode blocks where uppercase and lowercase letters go
    in such interleaved order instead of contiguous chunks.
 
-Control characters with codes from 0 to 31 are always treated as
-separators. Characters with codes 32 to 127, ie. 7-bit ASCII characters,
+Control characters with codes from 0 to 32 are always treated as
+separators. Characters with codes 33 to 127, ie. 7-bit ASCII characters,
 can be used in the mappings as is. To avoid configuration file encoding
 issues, 8-bit ASCII characters and Unicode characters must be specified
 in U+xxx form, where ‘xxx’ is hexadecimal codepoint number. This form
 can also be used for 7-bit ASCII characters to encode special ones: eg.
-use U+20 to encode space, U+2E to encode dot, U+2C to encode comma.
+use U+2E to encode dot, U+2C to encode comma.
 
 Aliases “english” and “russian” are allowed at control character
 mapping.
@@ -592,13 +609,13 @@ Example:
 
     # english charset defined with alias
     charset_table = 0..9, english, _
-    
 
-So if you want your search to support different languages 
-you will need to define sets of valid characters and folding rules 
+
+So if you want your search to support different languages
+you will need to define sets of valid characters and folding rules
 for all of them what can be quite a laborious task.
 We have performed this task for you by preparing default charset tables,
-non-cjk and cjk, that comprise non-cjk and cjk-languages respectively. 
+non-cjk and cjk, that comprise non-cjk and cjk-languages respectively.
 These charsets should be sufficient to use in most cases.
 
 The languages that are currently NOT supported:
@@ -627,7 +644,7 @@ The languages that are currently NOT supported:
 All other languages listed in the following list are supported by default:
 `Unicode languages list <http://www.unicode.org/cldr/charts/latest/supplemental/languages_and_scripts.html/>`_.
 
-To be able to work with both cjk and non-cjk languages you should set the options 
+To be able to work with both cjk and non-cjk languages you should set the options
 in your configuration file as shown below:
 
 .. code-block:: none
@@ -718,37 +735,6 @@ Example:
 
 
     dict = keywords
-
-.. _docinfo:
-
-docinfo
-~~~~~~~
-
-Document attribute values (docinfo) storage mode. Optional, default is
-‘extern’. Known values are ‘none’, ‘extern’ and ‘inline’.
-
-Docinfo storage mode defines how exactly docinfo will be physically
-stored on disk and RAM. “none” means that there will be no docinfo at
-all (ie. no attributes). Normally you need not to set “none” explicitly
-because Manticore will automatically select “none” when there are no
-attributes configured. “inline” means that the docinfo will be stored in
-the ``.spd`` file, along with the document ID lists. “extern” means that
-the docinfo will be stored separately (externally) from document ID
-lists, in a special ``.spa`` file.
-
-Basically, externally stored docinfo must be kept in RAM when querying.
-for performance reasons. So in some cases “inline” might be the only
-option. However, such cases are infrequent, and docinfo defaults to
-“extern”. Refer to :ref:`attributes` for in-depth discussion and RAM
-usage estimates.
-
-Example:
-
-
-.. code-block:: ini
-
-
-    docinfo = inline
 
 .. _embedded_limit:
 
@@ -899,7 +885,7 @@ exact words) are combined:
 
 
     running -> ( running | *running* | =running )
-	
+
 (as ``expand_keywords =  1`` or ``expand_keywords = star,exact``)
 or expansion limited by exact option even infixes enabled for index
 
@@ -947,10 +933,10 @@ node they reside.
 
 The easiest way to fix that issue is to create and utilize a global
 frequency dictionary, or a global IDF file for short. This directive
-lets you specify the location of that file. It it suggested (but not
-required) to use a .idf extension. When the IDF file is specified for a
-given index *and* and OPTION global_idf is set to 1, the engine will
-use the keyword frequencies and collection documents count from the
+lets you specify the location of that file. It is suggested (but not
+required) to use an .idf extension. When the IDF file is specified for a
+given index *and* OPTION global_idf is set to 1, the engine will
+use the keyword frequencies and collection documents counts from the
 global_idf file, rather than just the local index. That way, IDFs and
 the values that depend on them will stay consistent across the cluster.
 
@@ -1370,8 +1356,8 @@ Example:
 
 
     index_token_filter = my_lib.so:custom_blend:chars=@#&
-	
-	
+
+
 .. _index_zones:
 
 index_zones
@@ -1428,26 +1414,6 @@ Example:
 
     infix_fields = url, domain
 
-.. _inplace_docinfo_gap:
-
-inplace_docinfo_gap
-~~~~~~~~~~~~~~~~~~~
-
-:ref:`In-place
-inversion <inplace_enable>`
-fine-tuning option. Controls preallocated docinfo gap size. Optional,
-default is 0.
-
-This directive does not affect ``searchd`` in any way, it only affects
-``indexer``.
-
-Example:
-
-
-.. code-block:: ini
-
-
-    inplace_docinfo_gap = 1M
 
 .. _inplace_enable:
 
@@ -1547,6 +1513,50 @@ Example:
 
 
     inplace_write_factor = 0.1
+
+
+.. _killlist_target:
+
+killlist_target
+~~~~~~~~~~~~~~~
+
+Sets the index(es) that the kill-list will be applied to.
+Optional, default value is empty.
+
+When you use :ref:`plain_indexes` you often need to maintain not a single index, but
+a set of them to be able to add/update/delete new documents sooner (read :ref:`delta_index_updates`).
+In order to suppress matches in the previous (**main**) index that were updated or
+deleted in the next (**delta**) index you need to:
+
+1. Create a kill-list in the **delta** index using :ref:`sql_query_killlist`
+2. Specify **main** index as ``killlist_target`` in **delta** index settings:
+
+.. code-block:: ini
+
+
+    index delta
+    {
+        killlist_target = main:kl
+    }
+
+
+When ``killlist_target`` is specified, kill-list is applied to all the indexes listed in it on ``searchd`` startup. If any of the indexes from ``killlist_target`` are rotated, kill-list is reapplied to these indexes. When kill-list is applied, indexes that were affected save these changes to disk.
+
+``killlist_target`` has 3 modes of operation:
+
+1. ``killlist_target = main:kl``. Document ids from the kill-list of the **delta** index are suppressed in the **main** index (see ``sql_query_killlist``).
+2. ``killlist_target = main:id``. All document ids from **delta** index are suppressed in the **main** index. Kill-list is ignored.
+3. ``killlist_target = main``. Both document ids from **delta** index and its kill-list are suppressed in the **main** index.
+
+Multiple targets can be specified separated by comma like ``killlist_target = index_one:kl,index_two:kl``.
+
+You can change ``killlist_target`` settings for an index without reindexing it by using ``ALTER``:
+
+.. code-block:: mysql
+
+    ALTER TABLE delta KILLLIST_TARGET='new_main_index:kl'
+
+But since the 'old' main index has already written the changes to disk, the documents that were deleted in it will **remain** deleted even if it is no longer in the ``killlist_target`` of the **delta** index.
 
 .. _local:
 
@@ -1675,6 +1685,11 @@ mininum prefix length is considered 1.
 For dict=keywords word infixing and prefixing cannot be both enabled at the same.
 For dict=crc it is possible to specify only some fields to have infixes  declared with :ref:`infix_fields <infix_fields>`  and
 other fields to have prefixes declared with :ref:`prefix_fields <prefix_fields>`, but it's forbidden to declare same field in both lists.
+
+In case of dict=keywords, beside the wildcard ``*`` two other wildcard characters can be used:
+
+* ``?`` can match any(one) character: ``t?st`` will match ``test``, but not ``teast``
+* ``%`` can match zero or one character : ``tes%`` will match ``tes`` or ``test``, but not ``testing``
 
 Example:
 
@@ -2006,7 +2021,7 @@ To be used in conjunction with in
 list defines characters, sequences of which are subject to N-gram
 extraction. Words comprised of other characters will not be affected by
 N-gram indexing feature. The value format is identical to
-:ref:`charset_table <charset_table>`. 
+:ref:`charset_table <charset_table>`.
 N-gram characters cannot appear in the :ref:`charset_table <charset_table>`.
 
 Example:
@@ -2016,8 +2031,8 @@ Example:
 
 
     ngram_chars = U+3000..U+2FA1F
-    
-    
+
+
 Also you can use an alias for our default N-gram table as in the example below.
 It should be sufficient in most cases.
 
@@ -2088,13 +2103,10 @@ ondisk_attrs
 Allows for fine-grain control over how attributes are loaded into memory
 when using indexes with external storage. It is possible to keep
 attributes on disk. Although, the daemon does map them to memory and the
-OS loads small chunks of data on demand. This allows use of docinfo =
-extern instead of docinfo = inline, but still leaves plenty of free
+OS loads small chunks of data on demand. This leaves plenty of free
 memory for cases when you have large collections of pooled attributes
 (string/JSON/MVA) or when you're using many indexes per daemon that
-don't consume memory. It is not possible to update attributes left on
-disk when this option is enabled and the constraint of 4Gb of entries
-per pool is still in effect.
+don't consume memory.
 
 Note that this option also affects RT indexes. When it is enabled, all
 attribute updates will be disabled, and also all disk chunks of RT
@@ -2105,13 +2117,12 @@ Possible values:
 
 
 -  0 - disabled and default value, all attributes are loaded in memory
-   (the normal behaviour of docinfo = extern)
--  1 - all attributes stay on disk. Daemon loads no files (spa, spm,
-   sps). This is the most memory conserving mode, however it is also the
+-  1 - all attributes stay on disk. Daemon loads no files (.spa, .spb).
+   This is the most memory conserving mode, however it is also the
    slowest as the whole doc-id-list and block index doesn't load.
 -  pool - only pooled attributes stay on disk. Pooled attributes are
-   string, MVA, and JSON attributes (sps, spm files). Scalar attributes
-   stored in docinfo (spa file) load as usual.
+   string, MVA, and JSON attributes (.spb file). Scalar attributes
+   stored in docinfo (.spa file) load as usual.
 
 This option does not affect indexing in any way, it only requires daemon
 restart.
@@ -2160,24 +2171,26 @@ remove ``.tmp*`` files is if indexer fails to remove them automatically.
 
 For reference, different index files store the following data:
 
--  ``.spa`` stores document attributes (used in :ref:`extern
-   docinfo <docinfo>` storage
-   mode only);
+-  ``.spa`` stores document attributes
+
+-  ``.spb`` stores blob attributes: strings, MVA, json
 
 -  ``.spd`` stores matching document ID lists for each word ID;
 
 -  ``.sph`` stores index header information;
 
+-  ``.sphi`` stores histograms of attribute values;
+
 -  ``.spi`` stores word lists (word IDs and pointers to ``.spd`` file);
 
 -  ``.spk`` stores kill-lists;
 
--  ``.spm`` stores MVA data;
+-  ``.spm`` stores a bitmap of killed documents;
 
 -  ``.spp`` stores hit (aka posting, aka word occurrence) lists for each
    word ID;
 
--  ``.sps`` stores string attribute data.
+-  ``.spt`` stores additional data structures to speed up lookups by document ids;
 
 -  ``.spe`` stores skip-lists to speed up doc-list filtering
 
@@ -2801,18 +2814,18 @@ type
 Index type. Known values are ``plain``, ``distributed``, ``rt``,
 ``template`` and ``percolate``. Optional, default is ‘plain’ (plain local index).
 
-Manticore supports several different types of indexes. 
+Manticore supports several different types of indexes.
 Plain local indexes
-are stored and processed on the local machine. 
+are stored and processed on the local machine.
 Distributed indexes
 involve not only local searching but querying remote ``searchd``
-instances over the network as well (see :ref:`distributed_searching`). 
+instances over the network as well (see :ref:`distributed_searching`).
 Real-time indexes (or
 RT indexes for short) are also stored and processed locally, but
 additionally allow for on-the-fly updates of the full-text index (see
 :ref:`real-time_indexes`). Note that
 *attributes* can be updated on-the-fly using either plain local indexes
-or RT ones. 
+or RT ones.
 Template indexes are actually a pseudo-indexes because they
 do not store any data. That means they do not create any files on your
 hard drive. But you can use them for keywords and snippets generation,

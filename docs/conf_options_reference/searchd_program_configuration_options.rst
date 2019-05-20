@@ -1,4 +1,4 @@
-.. _searchd program configuration options:
+.. _searchd_program_configuration_options:
 
 ``searchd`` program configuration options
 -----------------------------------------
@@ -67,13 +67,14 @@ attr_flush_period
 ~~~~~~~~~~~~~~~~~
 
 When calling ``UpdateAttributes()`` to update document attributes in
-real-time, changes are first written to the in-memory copy of attributes
-(``docinfo`` must be set to ``extern``). Then, once ``searchd`` shuts
-down normally (via ``SIGTERM`` being sent), the changes are written to
+real-time, the changes are first written to in-memory copy of attributes.
+The updates are done in a memory mapped file, which means that the OS decides
+when to write these changes to disk. Once ``searchd`` shuts
+down normally (via ``SIGTERM`` being sent) it forces writing all the changes to
 disk.
 
-It is possible to tell ``searchd`` to periodically write these changes
-back to disk, to avoid them being lost. The time between those intervals
+It is also possible to tell ``searchd`` to periodically write these changes
+back to disk to avoid them being lost. The time between those intervals
 is set with ``attr_flush_period``, in seconds.
 
 It defaults to 0, which disables the periodic flushing, but flushing
@@ -234,6 +235,26 @@ Example:
 
 
     collation_server = utf8_ci
+
+.. _data_dir:
+
+data_dir
+~~~~~~~~~~~~
+
+For now - just path to the dir for replication internal files, optional.
+
+In this directory daemon stores replication meta info and state such as cluster
+descriptions and list of indexes replicated to the current node in ``manticore.json``
+file in this directory and uses it as a default directory for cluster contents.
+
+Example:
+
+
+.. code-block:: ini
+
+
+    data_dir = /var/manticore
+
 
 .. _dist_threads:
 
@@ -443,12 +464,12 @@ The informal grammar for ``listen`` setting is:
 .. code-block:: ini
 
 
-    listen = ( address ":" port | port | path ) [ ":" protocol ] [ "_vip" ]
+    listen = ( address ":" port | port | path | address ":" port start - port end ) [ ":" protocol ] [ "_vip" ]
 
 I.e. you can specify either an IP address (or hostname) and port number,
-or just a port number, or Unix socket path. If you specify port number
-but not the address, ``searchd`` will listen on all network interfaces.
-Unix path is identified by a leading slash.
+or just a port number or Unix socket path or an IP address and ports range.
+If you specify port number but not the address, ``searchd`` will listen on all network interfaces.
+Unix path is identified by a leading slash. Ports range could be set only for replication protocol.
 
 You can also specify a protocol handler (listener) to be used for
 connections on this socket. Supported protocol values are :
@@ -456,6 +477,7 @@ connections on this socket. Supported protocol values are :
 * ``sphinx`` - native API protocol, used for client connections but also by distributed indexes. Default protocol if none specified.
 * ``mysql41`` - MySQL protocol used since 4.1. More details on MySQL protocol support can be found in :ref:`mysql_protocol_support_and_sphinxql` section.
 * ``http`` - HTTP protocol. More details can be found in :ref:`httpapi_reference` section.
+* ``replication`` - replication protocol, used for nodes communication. More details can be found in :ref:`replication` section.
 
 
 Adding a "_vip" suffix to a protocol (for instance ``sphinx_vip`` or
@@ -476,15 +498,16 @@ Examples:
     listen = /var/run/sphinx.s
     listen = 9312
     listen = localhost:9306:mysql41
-	listen = 127.0.0.1:9308:http
+    listen = 127.0.0.1:9308:http
+    listen = 192.168.0.1:9320-9328:replication
 
 There can be multiple listen directives, ``searchd`` will listen for
-client connections on all specified ports and sockets. 
+client connections on all specified ports and sockets.
 If no ``listen`` directives are found then the server will listen on all available
 interfaces using the default SphinxAPI port **9312**, and also on default
 SphinxQL port **9306**. Both port numbers are assigned by IANA (see
 http://www.iana.org/assignments/port-numbers for details) and should
-therefor be available. For HTTP the port **9308** is considered the default one, however please note that this port is not assigned by IANA and 
+therefor be available. For HTTP the port **9308** is considered the default one, however please note that this port is not assigned by IANA and
 should be checked first if it's available.
 
 Unix-domain sockets are not supported on Windows.
@@ -593,7 +616,7 @@ until there are free worker threads. The queries will only start failing
 with a temporary. Thus, in thread_pool mode it makes little sense to
 raise max_children much higher than the amount of CPU cores. Usually
 that will only hurt CPU contention and *decrease* the general
-throughput. The threads are created at startup to initialized the thread pool, 
+throughput. The threads are created at startup to initialized the thread pool,
 using extreme high values can lead to a slow daemon startup.
 
 Example:
@@ -694,33 +717,6 @@ Example:
 
     max_packet_size = 32M
 
-.. _mva_updates_pool:
-
-mva_updates_pool
-~~~~~~~~~~~~~~~~
-
-Shared pool size for in-memory MVA updates storage. Optional, default
-size is 1M.
-
-This setting controls the size of the shared storage pool for updated
-MVA values. Specifying 0 for the size disable MVA updates at all. Once
-the pool size limit is hit, MVA update attempts will result in an error.
-However, updates on regular (scalar) attributes will still work. Due to
-internal technical difficulties, currently it is **not** possible to
-store (flush) **any** updates on indexes where MVA were updated;
-though this might be implemented in the future. In the meantime, MVA
-updates are intended to be used as a measure to quickly catchup with
-latest changes in the database until the next index rebuild; not as a
-persistent storage mechanism.
-
-Example:
-
-
-.. code-block:: ini
-
-
-    mva_updates_pool = 16M
-
 .. _mysql_version_string:
 
 mysql_version_string
@@ -787,6 +783,30 @@ These options define how many clients got accepted and how many requests
 processed on each iteration of network loop, in case of value above zero.
 Zero value means do not constrain network loop. These options might help to
 fine tune network loop throughput at high load scenario.
+
+.. _node_address:
+
+node_address
+~~~~~~~~~~~~
+
+This setting lets you specify the network address of the node. By default it set to
+replication :ref:`listen <listen>` address. That is correct in most cases, however there are
+situations where you have to specify it manually:
+
+* node behind a firewall
+* network address translation enabled (NAT)
+* container deployments, such as Docker or cloud deployments
+* clusters with nodes in more than one region
+
+
+Examples:
+
+
+.. code-block:: ini
+
+
+    node_address = 10.101.0.10
+
 
 .. _ondisk_attrs_default:
 
@@ -1038,7 +1058,7 @@ query_log_mode
 ~~~~~~~~~~~~~~
 
 By default the searchd and query log files are created with 600 permission, so only the user under which daemon runs and root users can read the log files.
-query_log_mode allows settings a different permission. 
+query_log_mode allows settings a different permission.
 This can be handy to allow other users to be able to read the log files (for example monitoring solutions running on non-root users).
 
 Example:
@@ -1048,8 +1068,8 @@ Example:
 
     query_log_mode  = 666
 
-   
-	
+
+
 .. _queue_max_length:
 
 queue_max_length
@@ -1206,8 +1226,8 @@ data to precache. Optional, default is 1 (enable seamless rotation). On
 Windows systems seamless rotation is disabled by default.
 
 Indexes may contain some data that needs to be precached in RAM. At the
-moment, ``.spa``, ``.spi`` and ``.spm`` files are fully precached (they
-contain attribute data, MVA data, and keyword index, respectively.)
+moment, ``.spa``, ``.spb``, ``.spi`` and ``.spm`` files are fully precached (they
+contain attribute data, blob attribute data, keyword index and killed row map, respectively.)
 Without seamless rotate, rotating an index tries to use as little RAM as
 possible and works as follows:
 
@@ -1243,7 +1263,7 @@ With seamless rotate enabled, rotation works as follows:
    copy.
 
 Seamless rotate comes at the cost of higher **peak** memory usage during
-the rotation (because both old and new copies of ``.spa/.spi/.spm`` data
+the rotation (because both old and new copies of ``.spa/.spb/.spi/.spm`` data
 need to be in RAM while preloading new copy). Average usage stays the
 same.
 
@@ -1507,4 +1527,3 @@ Example:
 
 
     workers = thread_pool
-

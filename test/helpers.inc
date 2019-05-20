@@ -388,8 +388,13 @@ function GetSearchd ( &$searchd, &$error )
 {
 	global $g_locals;
 
+	if ( isset ( $g_locals['valgrindoptions'] ) )
+		$vlgoptions = $g_locals['valgrindoptions'];
+	else
+		$vlgoptions = '--leak-check=full';
+
 	if ( UseValgrind() ) {
-		$searchd = "valgrind --leak-check=full ";
+		$searchd = "valgrind $vlgoptions ";
 		if ( file_exists("valgrind.supp" ) )
 			$searchd .= "--suppressions=" . getcwd() . "/valgrind.supp ";
 		$searchd .= $g_locals['searchd'];
@@ -406,9 +411,16 @@ function GetSearchd ( &$searchd, &$error )
 	return true;
 }
 
+function GetTmDelta()
+{
+	if ( UseValgrind() )
+		return 10;
+	return 3;
+}
+
 function StartSearchd ( $config_file, $error_file, $pidfile, &$error, $use_watchdog = false, $addr=false, $port=false )
 {
-	global $g_locals, $windows, $action_wait_timeout, $sd_address, $sd_port, $g_repli_path;
+	global $g_locals, $windows, $action_wait_timeout, $sd_address, $sd_port;
 
 
 	$abs_config_file = testdir($config_file);
@@ -450,10 +462,6 @@ function StartSearchd ( $config_file, $error_file, $pidfile, &$error, $use_watch
 			unlink ( $abs_pidfile );
 		$process = popen ("start /min cmd /c \"$path --config $abs_config_file --pidfile --console $extra_params > $abs_error_file\"", "r" );
 		pclose ( $process );
-	}
-	else if ( $g_repli_path )
-	{
-		system ( "LD_LIBRARY_PATH=$g_repli_path $path --config $abs_config_file $extra_params > $abs_error_file", $retval );
 	} else
 	{
 		system ( "$path --config $abs_config_file $extra_params > $abs_error_file", $retval );
@@ -892,9 +900,9 @@ class APIClient extends SphinxClient
 		return $res;
 	}
 
-	function XUpdateAttributes ( $index, $attrs, $values, $mva=false, $ignorenonexistent=false )
+	function XUpdateAttributes ( $index, $attrs, $values, $type=SPH_UPDATE_INT, $ignorenonexistent=false )
 	{
-		$res = $this->UpdateAttributes ( $index, $attrs, $values, $mva, $ignorenonexistent );
+		$res = $this->UpdateAttributes ( $index, $attrs, $values, $type, $ignorenonexistent );
 		if ($res===false)
 			return $this->GetLastError();
 		return $res;
@@ -1010,6 +1018,22 @@ function HttpQueryPost ( $http_endpoint, $http_content, $http_post )
 }
 
 
+function GetJsonError()
+{
+    switch (json_last_error())
+	{
+		case JSON_ERROR_NONE:			return 'no errors';
+		case JSON_ERROR_DEPTH:			return 'maximum stack depth exceeded';
+		case JSON_ERROR_STATE_MISMATCH: return 'underflow or the modes mismatch';
+		case JSON_ERROR_CTRL_CHAR:		return 'unexpected control character found';
+		case JSON_ERROR_SYNTAX:			return 'syntax error, malformed JSON';
+		case JSON_ERROR_UTF8:			return 'malformed UTF-8 characters, possibly incorrectly encoded';
+    }
+
+	return 'unknown error';
+}
+
+
 class SphinxConfig
 {
 	private $_name;
@@ -1031,6 +1055,7 @@ class SphinxConfig
 	private $_sd_sphinxql_port;
 	private	$_sd_http_port;
 	private $_sd_sphinxql_port_vip;
+	private $_sd_replication_port;
 	private	$_sd_pid_file;
 	private $_num_agents;
 	private $_subtest;
@@ -1052,7 +1077,7 @@ class SphinxConfig
 
 	function SphinxConfig ()
 	{
-		global $sd_address, $sd_port, $sd_sphinxql_port, $sd_pid_file, $sd_http_port, $sd_sphinxql_port_vip;
+		global $sd_address, $sd_port, $sd_sphinxql_port, $sd_pid_file, $sd_http_port, $sd_sphinxql_port_vip, $sd_replication_port;
 
 		$this->_counters 		= array ();
 		$this->_dynamic_entries = array ();
@@ -1075,6 +1100,7 @@ class SphinxConfig
 		$this->_sd_sphinxql_port	= $sd_sphinxql_port;
 		$this->_sd_http_port	= $sd_http_port;
 		$this->_sd_sphinxql_port_vip= $sd_sphinxql_port_vip;
+		$this->_sd_replication_port = $sd_replication_port;
 		$this->_sd_pid_file		= $sd_pid_file;
 		$this->_custom_test		= "";
 		$this->_compat098		= false;
@@ -1175,6 +1201,7 @@ class SphinxConfig
 		$this->_sd_port = $agent ["port"];
 		$this->_sd_sphinxql_port = $agent ["sqlport"];
 		$this->_sd_sphinxql_port_vip = $agent ["sqlport_vip"];
+		$this->_sd_replication_port = $agent ["replication_port"];
 	}
 
 	
@@ -1485,7 +1512,6 @@ class SphinxConfig
 				$res["resarray"] = $q->getAttribute("resarray");
 				$res["index"] = $q->getAttribute("index");
 				$res["select"] = $q->getAttribute("select");
-				$res["id_range"] = $this->ParseRange ( $q->getAttribute("id_range") );
 				$res["index_weights"] = $this->ParseIndexWeights ( $q->getAttribute("index_weights") );
 				$res["roundoff"] = $q->getAttribute("roundoff");
 				$res["expect_error"] = $q->getAttribute("expect_error");
@@ -1684,7 +1710,7 @@ class SphinxConfig
 				$decoded_rows = json_decode ( $query_result['rows'] );
 				if ( !$decoded_rows )
 				{
-					$error = "Unable to decode repsonse json'" . $query_result['rows'] . "'";
+					$error = "Unable to decode repsonse json'" . $query_result['rows'] . "': ".GetJsonError();
 					return false;
 				}
 
@@ -1741,7 +1767,6 @@ class SphinxConfig
 			$system_cmd = "";
 			if (is_array($query))
 			{
-				$cluster_listen = -1;
 				$cluster_connect = -1;
 				$cluster_path;
 				foreach ( $query[1] as $k => $v )
@@ -1754,37 +1779,20 @@ class SphinxConfig
 						$vip_connection = $v;
 					elseif ($k=="system")
 						$system_cmd = $v;
-					elseif ($k=="cluster_listen")
-						$cluster_listen = $v;
 					elseif ($k=="cluster_connect")
 						$cluster_connect = $v;
 					elseif ($k=="cluster_path")
 						$cluster_path = $v;
 				}
 				$query = $query[0];
-				if ( $cluster_listen !== -1 || $cluster_connect !== -1 )
+				if ( $cluster_connect !== -1 )
 				{
 					$query_ref = $query;
 				}
 					
-				if ( $cluster_listen !== -1 )
-				{
-					if ( !array_key_exists ( "cluster", $agents[$cluster_listen] ) )
-					{
-						$agents[$cluster_listen]["cluster"] = array();
-						$agents[$cluster_listen]["cluster"]["address"] = $agents[$cluster_listen]["address"];
-						$agents[$cluster_listen]["cluster"]["port"] = $agents[$cluster_listen]["port"] + 100 + $cluster_listen * 20;
-					} else
-					{
-						$agents[$cluster_listen]["cluster"]["port"] = $agents[$cluster_listen]["cluster"]["port"] + 3;
-					}
-					$address = $agents[$cluster_listen]["cluster"]["address"] . ":" . $agents[$cluster_listen]["cluster"]["port"];
-					
-					$query = str_replace ( "%addr_listen%", $address, $query );
-				}
 				if ( $cluster_connect !== -1 )
 				{
-					$address = $agents[$cluster_connect]["cluster"]["address"] . ":" . $agents[$cluster_connect]["cluster"]["port"];
+					$address = $agents[$cluster_connect]["address"] . ":" . $agents[$cluster_connect]["port"];
 					$query = str_replace ( "%addr_connect%", $address, $query );
 				}
 				if ( isset ( $cluster_path ) )
@@ -1854,7 +1862,7 @@ class SphinxConfig
 						}
 						
 						$tm_delta = MyMicrotime()-$wait_started;
-						if ( $tm_delta>3 )
+						if ( $tm_delta>GetTmDelta() )
 						{
 							$status .= sprintf( "; timeout %.3f sec", $tm_delta );
 							break;
@@ -2108,7 +2116,6 @@ class SphinxConfig
 						if ( @$qinfo["groupdistinct"] )	$cl->SetGroupDistinct ( $qinfo["groupdistinct"] );
 						if ( @$qinfo["resarray"] )	$cl->SetArrayResult ( true );
 						if ( @$qinfo["select"] )	$cl->SetSelect ( $qinfo["select"] );
-						if ( @$qinfo["id_range"] )	$cl->SetIDRange ( $qinfo["id_range"]["min"], $qinfo["id_range"]["max"] );
 						if ( @$qinfo["index"] )		$my_index = $qinfo["index"];
 						if ( @$qinfo["index_weights"] ) $cl->SetIndexWeights ( $qinfo["index_weights"] );
 						if ( @$qinfo["cutoff"] )		$cl->SetLimits ( 0, 20, 0, $qinfo["cutoff"] );
@@ -3141,7 +3148,11 @@ class SphinxConfig
 			if ( $cn === false )
 				return false;
 
-			$cols = join ( ", ", array_keys ( $data["orders"] ) );
+			$corrected_cols = array();
+			foreach ( array_keys($data["orders"]) as $key )
+				$corrected_cols[] = '`'.$key.'`';
+
+			$cols = join ( ", ", $corrected_cols );
 			$prefix = "INSERT INTO $name ($cols) VALUES ";
 
 			$accum = "";
@@ -3248,6 +3259,12 @@ class SphinxConfig
 
 			if ( $this->Requires("vip") )
 				fwrite ( $fp, "\tlisten		= {$this->_sd_address}:{$this->_sd_sphinxql_port_vip}:mysql41_vip\n" );
+			if ( $this->Requires("replication") )
+			{
+				$replication_port0 = $this->_sd_replication_port;
+				$replication_port1 = $this->_sd_replication_port + 8;
+				fwrite ( $fp, "\tlisten		= {$this->_sd_address}:{$replication_port0}-{$replication_port1}:replication\n" );
+			}
 		}
 
 		fwrite ( $fp, "\tlog			= $sd_log\n" );

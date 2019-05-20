@@ -1,8 +1,69 @@
 Release notes
 =============
 
+
+Version 3.0.0, 6 May 2019
+-------------------------------
+
+Features and improvements
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* New index storage. Non-scalar attributes are not limited anymore to 4GB size per index
+* attr_update_reserve directive
+* String,JSON and MVAs can be updated using UPDATE
+* killlists are applied at index load time
+* killlist_target directive
+* multi AND searches speedup
+* better average performance and RAM usage
+* convert tool for upgrading indexes made with 2.x
+* CONCAT() function
+* JOIN CLUSTER cluster AT 'nodeaddress:port'
+* ALTER CLUSTER posts UPDATE nodes
+* node_address directive
+* list of nodes printed in SHOW STATUS
+
+Behaviour changes
+~~~~~~~~~~~~~~~~~
+
+* in case of indexes with killists, daemon doesn't rotate indexes in order defined in conf, but follows the chain of killlist targets
+* order of indexes in a search no longer defines the order in which killlists are applied
+* Document IDs are now signed big integers
+
+Removed directives
+~~~~~~~~~~~~~~~~~~
+
+* docinfo (always extern now), inplace_docinfo_gap, mva_updates_pool 
+
+
+Version 2.8.2 GA, 2 April 2019
+------------------------------
+
+Features and improvements
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* Galera replication for percolate indexes
+* OPTION morphology
+
+Compiling notes
+~~~~~~~~~~~~~~~
+Cmake minimum version is now 3.13. Compiling requires boost and libssl development libraries.
+
+Bugfixes
+~~~~~~~~
+
+* `6967fedb <https://github.com/manticoresoftware/manticoresearch/commit/6967fedb2ef818ec1c825d482563edd05e1c9245>`__ fixed crash on many stars at select list for query into many distributed indexes
+* `36df1a40 <https://github.com/manticoresoftware/manticoresearch/commit/36df1a407dc08263690e3492518613ace82d69ca>`__ fixed `#177 <https://github.com/manticoresoftware/manticoresearch/issues/177>`__ large packet via SphinxQL interface
+* `57932aec <https://github.com/manticoresoftware/manticoresearch/commit/57932aec734583fa93359faaf5034b2e2c9d352b>`__ fixed `#170 <https://github.com/manticoresoftware/manticoresearch/issues/170>`__ crash of daemon on RT optimize with MVA updated
+* `edb24b87 <https://github.com/manticoresoftware/manticoresearch/commit/edb24b870423add86eba471d361e0e5aff098b18>`__ fixed daemon crash on binlog removed due to RT index remove after config reload on SIGHUP
+* `bd3e66e0 <https://github.com/manticoresoftware/manticoresearch/commit/bd3e66e0085bc7e2e351b817dfc972fd8158fbce>`__ fixed mysql handshake auth plugin payloads
+* `6a217f6e <https://github.com/manticoresoftware/manticoresearch/commit/6a217f6ed82fb10f752213b15617b9cedf1e8533>`__ fixed `#172 <https://github.com/manticoresoftware/manticoresearch/issues/172>`__ phrase_boundary settings at RT index
+* `3562f652 <https://github.com/manticoresoftware/manticoresearch/commit/3562f652753e4091fd7b5b0f65b58341c8cbcb31>`__ fixed `#168 <https://github.com/manticoresoftware/manticoresearch/issues/168>`__ deadlock at ATTACH index to itself
+* `250b3f0e <https://github.com/manticoresoftware/manticoresearch/commit/250b3f0e74ad18dda34ba080aa13ca87798a9ac9>`__ fixed binlog saves empty meta after daemon crash
+* `4aa6c69a <https://github.com/manticoresoftware/manticoresearch/commit/4aa6c69ad3a181cd7c5dafb990fb528121f68e59>`__ fixed crash of daemon due to string at sorter from RT index with disk chunks
+
+
 Version 2.8.1 GA, 6 March 2019
----------------------------------
+------------------------------
 
 Features and improvements
 ~~~~~~~~~~~~~~~~~~~~~~~~~

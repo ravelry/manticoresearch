@@ -23,9 +23,11 @@ index test_rt
     rt_field = title
 	rt_field = content
     rt_attr_uint = int_col
+	rt_attr_bigint = bint_col
 	rt_attr_float = flt_col
 	rt_attr_multi = mva_col
 	rt_attr_json = json_col
+	rt_attr_string = title
 }
 </config>
 
@@ -38,6 +40,7 @@ index test_rt
 	"id":1,
 	"doc":
 	{
+		"bint_col" : 1556004428,
 	    "int_col" : 1,
 		"flt_col" : 1.1,
 		"mva_col" : [1,2,3,4,5],
@@ -248,6 +251,52 @@ index test_rt
 {
 	"index":"test_rt",
 	"query": { "match": { "*": "two" } } }
+}
+</query>
+
+<query endpoint="json/search">{ "index": "test_rt", "query": { "match_all": {} } } }</query>
+
+<!-- full string/json updates -->
+<query endpoint="json/create">
+{
+	"index":"test_rt",
+	"id":1,
+	"doc":
+	{
+	    "int_col" : 1,
+	    "flt_col" : 1.1,
+	    "content" : "document one",
+	    "title" : "title of document one"
+	}
+}
+</query>
+
+<query endpoint="json/create">
+{
+	"index":"test_rt",
+	"id":2,
+	"doc":
+	{
+	    "int_col" : 2,
+	    "flt_col" : 2.2,
+	    "content" : "document two",
+	    "title" : "title of document two"
+	}
+}
+</query>
+
+<query endpoint="json/search">{ "index": "test_rt", "query": { "match_all": {} } } }</query>
+
+<query endpoint="json/update">
+{
+	"index":"test_rt",
+	"doc":
+	{
+	    "title" : "updated title",
+	    "json_col" : "{\"array\":[1,2,3]}"
+	},
+
+	"query": { "range": { "int_col": { "gte": 1 } } }
 }
 </query>
 

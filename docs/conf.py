@@ -1,12 +1,13 @@
 import os
 import sys
-import collections
+
 try:
- if THEME_PATH:
-	sys.path.append(THEME_PATH)
+    if THEME_PATH:
+        sys.path.append(THEME_PATH)
 except NameError:
-	pass
+    pass
 import sphinx_rtd_theme
+
 sys.path.insert(0, os.path.abspath('..'))
 sys.path.append(os.path.dirname(__file__))
 sys.path.append(os.path.abspath('_ext'))
@@ -29,7 +30,7 @@ master_doc = 'index'
 source_suffix = '.rst'
 project = u'Manticore Search'
 copyright = u'2017-2019, Manticore Search team'
-version = '2.8.0'
+version = '2.8.2'
 release = version
 exclude_patterns = ['_build', 'html', 'doctrees']
 pygments_style = 'sphinx'

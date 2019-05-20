@@ -26,7 +26,7 @@ The options available to ``searchd`` on all builds are:
    called in your particular build of ``searchd``.
 
 -  ``-v`` show version information of your particular build of ``searchd``.
-   
+
 -  ``--config <file>`` (``-c <file>`` for short) tells
    ``searchd`` to use the given file as its configuration, just as with
    ``indexer`` above.
@@ -108,7 +108,7 @@ The options available to ``searchd`` on all builds are:
 
        $ searchd --config /home/myuser/sphinx.conf --console
 
--  ``--logdebug``, ``--logdebugv``, and ``--logdebugvv`` options enable
+-  ``--logdebug``, ``--logreplication``, ``--logdebugv``, and ``--logdebugvv`` options enable
    additional debug output in the daemon log. They differ by the logging
    verboseness level. These are debugging options, they pollute the log
    a lot, and thus they should *not* be normally enabled. (The normal
@@ -119,9 +119,14 @@ The options available to ``searchd`` on all builds are:
    ``query_log`` will need to have been activated in ``sphinx.conf``) to
    provide more detailed information on a per-query basis as to the
    input/output operations carried out in the course of that query, with
-   a slight performance hit and of course bigger logs. Further details
-   are available under the `query log
-   format <README>` section. You might
+   a slight performance hit and of course bigger logs. 
+   
+   .. note::
+      The IO statistics don't include information about IO operations for attributes, as these are loaded with mmap().
+   
+   
+   Further details are available under the :ref:`query log
+   format <query_log_format>` section. You might
    start ``searchd`` thus:
 
    .. code-block:: bash
@@ -165,9 +170,9 @@ The options available to ``searchd`` on all builds are:
    for connections on this socket. Supported protocol values are
    ‘sphinx’ and ‘mysql41’ (MySQL protocol used since 4.1 upto at least
    5.1).
-   
--  ``--force-preread`` forbids the daemon to serve any incoming connection until prereading of index files completes. By default, at startup the daemon accepts connections while index files are lazy loaded into memory. 
-   
+
+-  ``--force-preread`` forbids the daemon to serve any incoming connection until prereading of index files completes. By default, at startup the daemon accepts connections while index files are lazy loaded into memory.
+
 -  ``--index <index>`` (or ``-i <index>`` for short) forces
    this instance of ``searchd`` only to serve the specified index. Like
    ``--port``, above, this is usually for debugging purposes; more
@@ -190,7 +195,7 @@ The options available to ``searchd`` on all builds are:
    -  ``accept-desc-timestamp``, ignore descending transaction
       timestamps and replay such transactions anyway (the default
       behavior is to exit with an error).
-	 
+
    -  ``ignore-open-errors``, ignore missing binlog files (the default
       behavior is to exit with an error).
 
@@ -200,7 +205,7 @@ The options available to ``searchd`` on all builds are:
 
 
        $ searchd --replay-flags=accept-desc-timestamp
-       
+
 -  ``--coredump`` is used to enable save of core file or minidump
    of daemon on crash. Disabled by default to speed up of daemon restart
    on crash. This is useful for debugging purposes.
@@ -210,18 +215,24 @@ The options available to ``searchd`` on all builds are:
 
        $ searchd --config /home/myuser/sphinx.conf --coredump
 
+-  ``--new-cluster`` bootstraps a replication cluster and makes the daemon a
+   reference node with :ref:`cluster restart <replication_restart>` protection
+
+-  ``--new-cluster-force`` bootstraps a replication cluster and makes the daemon a
+   reference node bypassing :ref:`cluster restart <replication_restart>` protection
+
 There are some options for ``searchd`` that are specific to Windows
-platforms, concerning handling as a service, are only be available on
+platforms, concerning handling as a service, and are only available in
 Windows binaries.
 
-Note that on Windows searchd will default to ``--console`` mode, unless
+Note that in Windows searchd will default to ``--console`` mode, unless
 you install it as a service.
 
 -  ``--install`` installs ``searchd`` as a service into the Microsoft
    Management Console (Control Panel / Administrative Tools / Services).
    Any other parameters specified on the command line, where
    ``--install`` is specified will also become part of the command line
-   on future starts of the service. For example, as part of calling
+   on future starts of the service. For example, as a part of calling
    ``searchd``, you will likely also need to specify the configuration
    file with ``--config``, and you would do that as well as specifying
    ``--install``. Once called, the usual start/stop facilities will
@@ -235,8 +246,8 @@ you install it as a service.
        C:\WINDOWS\system32> C:\Manticore\bin\searchd.exe --install
           --config C:\Manticore\sphinx.conf
 
-   If you wanted to have the I/O stats every time you started
-   ``searchd``, you would specify its option on the same line as the
+   If you want to have the I/O stats every time you start
+   ``searchd``, you need to specify its option on the same line as the
    ``--install`` command thus:
 
    .. code-block:: bat
@@ -251,7 +262,7 @@ you install it as a service.
    uninstall the software or delete the indexes. It means the service
    will not be called from the services systems, and will not be started
    on the machine's next start. If currently running as a service, the
-   current instance will not be terminated (until the next reboot, or
+   current instance will not be terminated (until the next reboot, or until
    ``searchd`` is called with ``--stop``). If the service was installed
    with a custom name (with ``--servicename``), the same name will need
    to be specified with ``--servicename`` when calling to uninstall.

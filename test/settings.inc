@@ -4,6 +4,7 @@ $sd_address 		= "127.0.0.1";
 $sd_port 			= 6712;
 $sd_sphinxql_port	= 6706;
 $sd_http_port		= 6780;
+$sd_replication_port = 6720;
 
 $sd_sphinxql_port_vip = 6709;
 
@@ -24,9 +25,9 @@ else if ( array_key_exists ( "SPHINXDAEMON", $_SERVER ) && $_SERVER["SPHINXDAEMO
 	$sd_address = $_SERVER["SPHINXDAEMON"];
 
 $agents 			= array (
-	array ( "address" => $sd_address, "port" => $sd_port, "sqlport" => $sd_sphinxql_port, "sqlport_vip" => $sd_sphinxql_port_vip ),
-	array ( "address" => $agent_address, "port" => $agent_port, "sqlport" => $agent_port_sql, "sqlport_vip" => $agent_port_sql_vip ),
-	array ( "address" => $agent_address, "port" => $agent_port+1, "sqlport" => $agent_port_sql+1, "sqlport_vip" => $agent_port_sql_vip+1 ) );
+	array ( "address" => $sd_address, "port" => $sd_port, "sqlport" => $sd_sphinxql_port, "sqlport_vip" => $sd_sphinxql_port_vip, "replication_port" => $sd_replication_port ),
+	array ( "address" => $agent_address, "port" => $agent_port, "sqlport" => $agent_port_sql, "sqlport_vip" => $agent_port_sql_vip, "replication_port" => $sd_replication_port+20 ),
+	array ( "address" => $agent_address, "port" => $agent_port+1, "sqlport" => $agent_port_sql+1, "sqlport_vip" => $agent_port_sql_vip+1, "replication_port" => $sd_replication_port+30  ) );
 
 $index_data_path	= "data";
 
@@ -97,7 +98,7 @@ function LoadCachedGuesses ()
 function CacheGuesses ()
 {
 	global $g_locals;
-	global $g_re2, $g_rlp, $g_odbc, $g_repli, $g_repli_path;
+	global $g_re2, $g_rlp, $g_odbc, $g_repli;
 
 	$guessfile = $g_locals['testdir'].'guess.txt';
 
@@ -106,7 +107,6 @@ function CacheGuesses ()
 	if ( $g_rlp ) $text .= "global \$g_rlp; \$g_rlp = true;\n";
 	if ( $g_odbc ) $text .= "global \$g_odbc; \$g_odbc = true;\n";
 	if ( $g_repli ) $text .= "global \$g_repli; \$g_repli = true;\n";
-	if ( $g_repli_path ) $text .= "global \$g_repli_path; \$g_repli_path = '" . $g_locals['galera_lib_path'] . "';\n";
 
 	file_put_contents ( $guessfile, $text );
 }
@@ -173,9 +173,8 @@ function GetVersion ()
 
 function GuessReplication()
 {
-	$repli_on = 'DWITH_REPLICATION=ON';
-	$galera_name = 'libgalera_smm.so';
-	global $g_repli, $g_repli_path, $g_locals;
+	$repli_on = 'DGALERA_SOVERSION';
+	global $g_repli;
 	
 	$banner = GetBanner();
 	foreach ( $banner as $line )
@@ -184,17 +183,6 @@ function GuessReplication()
 		{
 			$g_repli = true;
 			break;
-		}
-	}
-
-	// build with replication and galera_lib_path set at .sphinx
-	if ( $g_repli )
-	{
-		$g_repli = false;
-		if ( isset ( $g_locals['galera_lib_path'] ) && is_file ( $g_locals['galera_lib_path'] . $galera_name ) !== false )
-		{
-			$g_repli = true;
-			$g_repli_path = $g_locals['galera_lib_path'];
 		}
 	}
 }
