@@ -3948,6 +3948,17 @@ ESortClauseParseResult sphParseSortClause ( const CSphQuery * pQuery, const char
 			// try to lookup plain attr in sorter schema
 			int iAttr = tSchema.GetAttrIndex ( pTok );
 
+			// do not order by mva (the result is undefined)			
+			if ( iAttr>=0 )
+			{
+				ESphAttr eAttrType = tSchema.GetAttr(iAttr).m_eAttrType;
+				if ( eAttrType==SPH_ATTR_UINT32SET || eAttrType==SPH_ATTR_INT64SET || eAttrType==SPH_ATTR_UINT32SET_PTR || eAttrType==SPH_ATTR_INT64SET_PTR )
+				{
+					sError.SetSprintf ( "order by MVA is undefined" );
+					return SORT_CLAUSE_ERROR;
+				}
+			}
+
 			// try to lookup aliased count(*) and aliased groupby() in select items
 			if ( iAttr<0 )
 			{
