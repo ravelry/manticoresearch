@@ -63,6 +63,8 @@ FLOAT_CONSTANT      ({I}\.{I}?|{I}?\.{I}){EXPONENT}?
 "DROP"				{ STORE_BOUNDS; return TOK_DROP; }
 "FILES"				{ STORE_BOUNDS; return TOK_FILES; }
 "OPTION"			{ STORE_BOUNDS; return TOK_OPTION; }
+"COMPRESS"			{ STORE_BOUNDS; return TOK_COMPRESS; }
+"SPLIT"				{ STORE_BOUNDS; return TOK_SPLIT; }
 
 "ON"				{ STORE_BOUNDS; return TOK_ON; }
 "OFF"				{ STORE_BOUNDS; return TOK_OFF; }
@@ -70,6 +72,7 @@ FLOAT_CONSTANT      ({I}\.{I}?|{I}?\.{I}){EXPONENT}?
 "CHUNK"			    { STORE_BOUNDS; return TOK_CHUNK; }
 "INTO"			    { STORE_BOUNDS; return TOK_INTO; }
 "FROM"			    { STORE_BOUNDS; return TOK_FROM; }
+"CLOSE"				{ STORE_BOUNDS; return TOK_CLOSE; }
 
 
 '	                { STORE_START; BEGIN (QSTR); }
@@ -89,7 +92,6 @@ FLOAT_CONSTANT      ({I}\.{I}?|{I}?\.{I}){EXPONENT}?
 {ID}				{ STORE_BOUNDS; return TOK_IDENT; }
 @{ID}				{ STORE_BOUNDS; return TOK_USERVAR; }
 @@{ID}				{ STORE_BOUNDS; return TOK_SYSVAR; }
-@@{ID}\.{ID}		{ STORE_BOUNDS; return TOK_SYSVAR; }
 `{ID}`				{  lvalp->sValue.m_iStart = yytext - pParser->m_pBuf + 1;
                        		lvalp->sValue.m_iLen = yyleng-2; return TOK_IDENT; }
 {ID}:{ID}			{ STORE_BOUNDS; return TOK_IDENT; }

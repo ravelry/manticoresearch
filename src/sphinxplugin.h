@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -25,6 +25,8 @@ extern "C"
 typedef void			(*PluginLogCb_fn) ( void (*) ( const char *, int ));
 typedef int				(*PluginVer_fn)		();
 typedef void			(*PluginReinit_fn)	();
+typedef int				(*PluginLoad_fn)	( char * error );
+typedef int				(*PluginUnload_fn)	( char * error );
 
 typedef int				(*UdfInit_fn)		( SPH_UDF_INIT * init, SPH_UDF_ARGS * args, char * error );
 typedef void			(*UdfDeinit_fn)		( SPH_UDF_INIT * init );
@@ -41,6 +43,9 @@ typedef char *			(*TokenFilterPushToken_fn)		( void * userdata, char * token, in
 typedef char *			(*TokenFilterGetExtraToken_fn)	( void * userdata, int * delta );
 typedef int				(*TokenFilterEndField_fn)		( void * userdata );
 typedef void			(*TokenFilterDeinit_fn)			( void * userdata );
+typedef	int				(*TokenFilterIsBlended_fn)		( void * userdata );
+typedef	int				(*TokenFilterIsBlendedPart_fn)	( void * userdata );
+
 
 typedef int				(*QueryTokenFilterInit_fn)		( void ** userdata, int max_len, const char * options, char * error );
 typedef void			(*QueryTokenFilterPreMorph_fn)	( void * userdata, char * token, int * stopword );
@@ -124,6 +129,9 @@ public:
 	TokenFilterEndField_fn		m_fnEndField = nullptr;
 	TokenFilterDeinit_fn		m_fnDeinit = nullptr;
 
+	TokenFilterIsBlended_fn		m_fnTokenIsBlended = nullptr;
+	TokenFilterIsBlendedPart_fn m_fnTokenIsBlendedPart = nullptr;
+
 	explicit					PluginTokenFilter_c ( PluginLib_c * pLib ) : PluginDesc_c ( pLib ) {}
 };
 
@@ -176,6 +184,7 @@ bool sphPluginExists ( PluginType_e eType, const char * sName );
 /// that is, load the library if not yet loaded, import the symbols, register the plugin internally
 /// eRetType is only used for UDF type; might wanna change it to (void*) and pass a generic argument instead
 bool sphPluginCreate ( const char * sLib, PluginType_e eType, const char * sName, ESphAttr eUDFRetType, CSphString & sError );
+bool sphPluginCreate ( const char * sLib, PluginType_e eType, const char * sName, ESphAttr eUDFRetType, bool bDlGlobal, CSphString & sError );
 
 /// get plugin instance descriptor by name
 /// WARNING, increments users count, so non-NULL pointers you get back need to be Release()d

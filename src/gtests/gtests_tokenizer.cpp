@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -811,12 +811,10 @@ public:
 	int					Kill ( DocID_t /*tDocID*/ ) override { return 0; }
 
 	int					Build ( const CSphVector<CSphSource*> & , int , int ) override { return 0; }
-	bool				Merge ( CSphIndex * , const CSphVector<CSphFilterSettings> &, bool ) override {return false; }
-	bool				Prealloc ( bool, FilenameBuilder_i * ) override { return false; }
+	bool				Merge ( CSphIndex * , const VecTraits_T<CSphFilterSettings> &, bool ) override { return false; }
+	bool				Prealloc ( bool, FilenameBuilder_i *, StrVec_t & ) override { return false; }
 	void				Dealloc () override {}
 	void				Preread () override {}
-	void				SetMemorySettings ( const FileAccessSettings_t & ) override {}
-	const FileAccessSettings_t & GetMemorySettings() const override { return g_tDummyFASettings; }
 	void				SetBase ( const char * ) override {}
 	bool				Rename ( const char * ) override { return false; }
 	bool				Lock () override { return true; }
@@ -829,7 +827,7 @@ public:
 	bool				MultiQueryEx ( int , const CSphQuery * , CSphQueryResult* , ISphMatchSorter** , const CSphMultiQueryArgs & ) const override { return false; }
 	bool				GetKeywords ( CSphVector <CSphKeywordInfo> & , const char * , const GetKeywordsSettings_t & , CSphString * ) const override { return false; }
 	bool				FillKeywords ( CSphVector <CSphKeywordInfo> & dKeywords ) const override;
-	int					UpdateAttributes ( const CSphAttrUpdate & , int, bool &, CSphString &, CSphString & ) override { return -1; }
+	int					UpdateAttributes ( const CSphAttrUpdate & , int, bool &, FNLOCKER, CSphString &, CSphString & ) override { return -1; }
 	bool				SaveAttributes ( CSphString & ) const override { return false; }
 	DWORD				GetAttributeStatus () const override { return 0; }
 	bool				AddRemoveAttribute ( bool, const CSphString &, ESphAttr, CSphString & ) override { return true; }

@@ -25,21 +25,15 @@ CREATE TABLE products(title text, price float) charset_table = 'cjk' morphology 
 <!-- request PHP -->
 
 ```php
-$params = [
-    'body' => [
-        'settings' => [
-            'charset_table' => 'cjk',
-            'morphology' => 'icu_chinese'
-        ],
-        'columns' => [
+$index = new \Manticoresearch\Index($client);
+$index->setName('products');
+$index->create([
             'title'=>['type'=>'text'],
             'price'=>['type'=>'float']
-        ]
-    ],
-    'index' => 'products'
-];
-$index = new \Manticoresearch\Index($client);
-$index->create($params);
+        ],[
+            'charset_table' => 'cjk',
+            'morphology' => 'icu_chinese'
+        ]);
 ```
 
 <!-- intro -->
@@ -84,7 +78,7 @@ index products {
 <!-- end -->
 
 <!-- example cjk 2 -->
-* Basic support with N-grams options [ngram_len](Creating_an_index/NLP_and_tokenization/Low-level_tokenization.md#ngram_len) and [ngram_chars](Creating_an_index/NLP_and_tokenization/Low-level_tokenization.md#ngram_chars)
+* Basic support with N-grams options [ngram_len](../../Creating_an_index/NLP_and_tokenization/Low-level_tokenization.md#ngram_len) and [ngram_chars](../../Creating_an_index/NLP_and_tokenization/Low-level_tokenization.md#ngram_chars)
 There are separate charset tables(`chinese`, `korean`, `japanese`) that can be used for each CJK-language or, alternatively, common `cjk` charset table can be applied. 
 
 
@@ -107,22 +101,16 @@ CREATE TABLE products(title text, price float) charset_table = 'non_cjk' ngram_l
 <!-- request PHP -->
 
 ```php
-$params = [
-    'body' => [
-        'settings' => [
+$index = new \Manticoresearch\Index($client);
+$index->setName('products');
+$index->create([
+            'title'=>['type'=>'text'],
+            'price'=>['type'=>'float']
+        ],[
              'charset_table' => 'non_cjk',
              'ngram_len' => '1',
              'ngram_chars' => 'cjk'
-        ],
-        'columns' => [
-            'title'=>['type'=>'text'],
-            'price'=>['type'=>'float']
-        ]
-    ],
-    'index' => 'products'
-];
-$index = new \Manticoresearch\Index($client);
-$index->create($params);
+        ]);
 ```
 
 <!-- intro -->
@@ -166,7 +154,7 @@ index products {
 <!-- end -->
 
 <!-- example cjk 3 -->
-There's also built-in [stopwords](Creating_an_index/NLP_and_tokenization/Ignoring_stop-words.md#stopwords) for Chinese with alias `zh`.
+There's also built-in [stopwords](../../Creating_an_index/NLP_and_tokenization/Ignoring_stop-words.md#stopwords) for Chinese with alias `zh`.
 
 
 <!-- intro -->
@@ -189,22 +177,16 @@ CREATE TABLE products(title text, price float) charset_table = 'chinese' morphol
 <!-- request PHP -->
 
 ```php
-$params = [
-    'body' => [
-        'settings' => [
+$index = new \Manticoresearch\Index($client);
+$index->setName('products');
+$index->create([
+            'title'=>['type'=>'text'],
+            'price'=>['type'=>'float']
+        ],[
             'charset_table' => 'chinese',
             'morphology' => 'icu_chinese',
             'stopwords' => 'zh'
-        ],
-        'columns' => [
-            'title'=>['type'=>'text'],
-            'price'=>['type'=>'float']
-        ]
-    ],
-    'index' => 'products'
-];
-$index = new \Manticoresearch\Index($client);
-$index->create($params);
+        ]);
 ```
 
 <!-- intro -->

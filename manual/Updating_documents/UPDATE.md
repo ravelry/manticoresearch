@@ -1,8 +1,8 @@
-# UPDATE 
+# UPDATE
 
 <!-- example update -->
 
-UPDATE changes attribute values of existing documents in a specified index with new values. Note that you can't update contents of a fulltext field. If there's a need to change contents of a full-text field, use [REPLACE](Updating_documents/REPLACE.md).
+UPDATE changes attribute values of existing documents in a specified index with new values. Note that you can't update contents of a fulltext field. If there's a need to change contents of a full-text field, use [REPLACE](../Updating_documents/REPLACE.md).
 
 Attribute updates are supported for RT, PQ and plain indexes. All attribute types can be updated.
 
@@ -105,7 +105,7 @@ UpdateDocumentRequest updateRequest = new UpdateDocumentRequest();
 doc = new HashMap<String,Object >(){{
     put("price",10);
 }};
-updateRequest.index("products").id(1L).setDoc(doc); 
+updateRequest.index("products").id(1L).setDoc(doc);
 indexApi.update(updateRequest);
 ```
 
@@ -248,7 +248,7 @@ doc = new HashMap<String,Object >(){{
     put("tags1",new int[]{3,6,4});
     put("tags2",new int[]{});
 }};
-updateRequest.index("products").id(1L).setDoc(doc); 
+updateRequest.index("products").id(1L).setDoc(doc);
 indexApi.update(updateRequest);
 ```
 
@@ -267,8 +267,8 @@ class UpdateResponse {
 When assigning out-of-range values to 32-bit attributes, they will be trimmed to their lower 32 bits without a prompt. For example, if you try to update the 32-bit unsigned int with a value of 4294967297, the value of 1 will actually be stored, because the lower 32 bits of 4294967297 (0x100000001 in hex) amount to 1 (0x00000001 in hex).
 
 <!-- example partial JSON update -->
- 
-`UPDATE` can be used to perform partial JSON updates on numeric data types or arrays of numeric data types. 
+
+`UPDATE` can be used to perform partial JSON updates on numeric data types or arrays of numeric data types. Just make sure you don't update an integer value with a float value as it will be rounded off.
 
 <!-- intro -->
 ##### SQL:
@@ -402,7 +402,7 @@ UpdateDocumentRequest updateRequest = new UpdateDocumentRequest();
 doc = new HashMap<String,Object >(){{
     put("meta.tags[0]",100);
 }};
-updateRequest.index("products").id(1L).setDoc(doc); 
+updateRequest.index("products").id(1L).setDoc(doc);
 indexApi.update(updateRequest);
 ```
 
@@ -554,23 +554,23 @@ res = await indexApi.update({"index" : "products", "id" : 100, "doc" : {"meta" :
 InsertDocumentRequest newdoc = new InsertDocumentRequest();
 doc = new HashMap<String,Object>(){{
     put("title","title");
-    put("meta", 
+    put("meta",
         new HashMap<String,Object>(){{
             put("tags",new int[]{1,2,3});
         }});
- 
+
 }};
 newdoc.index("products").id(100L).setDoc(doc);        
 indexApi.insert(newdoc);
 
 updatedoc = new UpdateDocumentRequest();
 doc = new HashMap<String,Object >(){{
-    put("meta", 
+    put("meta",
         new HashMap<String,Object>(){{
             put("tags",new String[]{"one","two","three"});
         }});
 }};
-updatedoc.index("products").id(100L).setDoc(doc); 
+updatedoc.index("products").id(100L).setDoc(doc);
 indexApi.update(updatedoc);
 
 ```
@@ -597,7 +597,7 @@ class UpdateResponse {
 
 <!-- example cluster update -->
 
-When using replication, index name should be prepended with `cluster_name:` (in SQL) so that updates will be propagated to all nodes in the cluster. For queries via HTTP you should set a `cluster` property. See [setting up replication](Creating_a_cluster/Setting_up_replication/Setting_up_replication.md) for more info.
+When using replication, index name should be prepended with `cluster_name:` (in SQL) so that updates will be propagated to all nodes in the cluster. For queries via HTTP you should set a `cluster` property. See [setting up replication](../Creating_a_cluster/Setting_up_replication/Setting_up_replication.md) for more info.
 
 ```json
 {
@@ -672,7 +672,7 @@ updatedoc = new UpdateDocumentRequest();
 doc = new HashMap<String,Object >(){{
     put("enabled",0);
 }};
-updatedoc.index("products").cluster("weekly").id(1L).setDoc(doc); 
+updatedoc.index("products").cluster("weekly").id(1L).setDoc(doc);
 indexApi.update(updatedoc);
 
 ```
@@ -695,11 +695,11 @@ class UpdateResponse {
 Here is the syntax for the SQL `UPDATE` statement:
 
 ```sql
-UPDATE index SET col1 = newval1 [, ...] WHERE where_condition [OPTION opt_name = opt_value [, ...]]
+UPDATE index SET col1 = newval1 [, ...] WHERE where_condition [OPTION opt_name = opt_value [, ...]] [FORCE|IGNORE INDEX(id)]
 ```
 
 
-`where_condition` has the same syntax as in the [SELECT](Searching/Full_text_matching/Basic_usage.md#SQL) statement.
+`where_condition` has the same syntax as in the [SELECT](../Searching/Full_text_matching/Basic_usage.md#SQL) statement.
 
 <!-- example MVA empty update -->
 
@@ -802,7 +802,7 @@ updatedoc = new UpdateDocumentRequest();
 doc = new HashMap<String,Object >(){{
     put("tags1",new int[]{});
 }};
-updatedoc.index("products").id(1L).setDoc(doc); 
+updatedoc.index("products").id(1L).setDoc(doc);
 indexApi.update(updatedoc);
 
 ```
@@ -825,15 +825,17 @@ class UpdateResponse {
 OPTION <optionname>=<value> [ , ... ]
 ```
 
-The options are the same as for [SELECT](Searching/Full_text_matching/Basic_usage.md#SQL) statement. Specifically for `UPDATE` statement you can use these options:
+The options are the same as for [SELECT](../Searching/Full_text_matching/Basic_usage.md#SQL) statement. Specifically for `UPDATE` statement you can use these options:
 
 *   'ignore_nonexistent_columns' - If set to **1** points that the update will silently ignore any warnings about trying to update a column which is not exists in current index schema. Default value is  **0**.
 *   'strict' - this option is used in partial JSON attribute updates. By default (strict=1), `UPDATE` will end in an error if the `UPDATE` query tries to perform an update on non-numeric properties. With strict=0 if multiple properties are updated and some are not allowed, the `UPDATE` will not end in error and will perform the changes only on allowed properties (with the rest being ignored). If none of the `SET` changes of the `UPDATE` are not permitted, the command will end in an error even with strict=0.
 
+### FORCE/IGNORE INDEX
+In rare cases Manticore's built-in query analyzer can be wrong in understanding a query and whether an index by id should be used or not. It can cause poor performance of queries like `UPDATE ... WHERE id = 123`. Adding `FORCE INDEX(id)` will force Manticore use the index. `IGNORE INDEX(id)` will force ignore it.
 
 ## Updates via HTTP
 
-Updates using HTTP protocol are performed via the `/update` endpoint. Syntax is similar to the [/insert endpoint](Adding_documents_to_an_index/Adding_documents_to_a_real-time_index.md), but this time the `doc` property is mandatory.
+Updates using HTTP protocol are performed via the `/update` endpoint. Syntax is similar to the [/insert endpoint](../Adding_documents_to_an_index/Adding_documents_to_a_real-time_index.md), but this time the `doc` property is mandatory.
 
 The server will respond with a JSON object stating if the operation was successful or not.
 
@@ -863,7 +865,7 @@ POST /update
   "_index": "test",
   "_id": 1,
   "result": "updated"
-} 
+}
 ```
 
 <!-- end -->
@@ -904,7 +906,7 @@ POST /update
 
 <!-- end -->
 
-Query syntax is the same as in the [/search endpoint](Searching/Full_text_matching/Basic_usage.md#HTTP). Note that you can't specify `id` and `query` at the same time.
+Query syntax is the same as in the [/search endpoint](../Searching/Full_text_matching/Basic_usage.md#HTTP). Note that you can't specify `id` and `query` at the same time.
 
 ## Flushing attributes
 
@@ -926,7 +928,7 @@ mysql> FLUSH ATTRIBUTES;
 +------+
 1 row in set (0.19 sec)
 ```
-See also [attr_flush_period](Updating_documents/UPDATE.md#attr_flush_period) setting. 
+See also [attr_flush_period](../Updating_documents/UPDATE.md#attr_flush_period) setting.
 
 
 ## Bulk updates
@@ -978,12 +980,12 @@ POST /bulk
 
 `/bulk` endpoint supports inserts, replaces and deletes. Each statement starts with an action type (in this case, `update`). Here's a list of the supported actions:
 
-* `insert`: Inserts a document. Syntax is the same as in the [/insert endpoint](Quick_start_guide.md#Add-documents).
+* `insert`: Inserts a document. Syntax is the same as in the [/insert endpoint](../Quick_start_guide.md#Add-documents).
 * `create`: a synonym for `insert`
-* `replace`: Replaces a document. Syntax is the same as in the [/replace](Updating_documents/REPLACE.md#HTTP:).
+* `replace`: Replaces a document. Syntax is the same as in the [/replace](../Updating_documents/REPLACE.md#HTTP:).
 * `index`: a synonym for `replace`
-* `update`: Updates a document. Syntax is the same as in [/update](Updating_documents/UPDATE.md#Updates-via-HTTP).
-* `delete`: Deletes a document. Syntax is the same as in [/delete endpoint](Deleting_documents.md).
+* `update`: Updates a document. Syntax is the same as in [/update](../Updating_documents/UPDATE.md#Updates-via-HTTP).
+* `delete`: Deletes a document. Syntax is the same as in [/delete endpoint](../Deleting_documents.md).
 
 Updates by query and deletes by query are also supported.
 
@@ -1065,16 +1067,16 @@ Array(
             [update] => Array(
                 [_index] => products
                 [updated] => 0
-            ) 
+            )
         )   
         Array(
              [update] => Array(
                  [_index] => products
                  [updated] => 3
-             ) 
+             )
         )    
 )
- 
+
 ```
 
 
@@ -1101,8 +1103,8 @@ indexApi.bulk('\n'.join(map(json.dumps,docs)))
 
 <!-- request javascript -->
 ``` javascript
-docs = [ 
-            { "update" : { "index" : "products", "doc": { "coeff" : 1000 }, "query": { "range": { "price": { "gte": 1000 } } } } }, 
+docs = [
+            { "update" : { "index" : "products", "doc": { "coeff" : 1000 }, "query": { "range": { "price": { "gte": 1000 } } } } },
             { "update" : { "index" : "products", "doc": { "coeff" : 0 }, "query": { "range": { "price": { "lt": 1000 } } } } } ];
 res =  await indexApi.bulk(docs.map(e=>JSON.stringify(e)).join('\n'));
 ```

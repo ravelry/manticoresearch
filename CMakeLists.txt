@@ -1,6 +1,6 @@
-cmake_minimum_required ( VERSION 2.8 )
+cmake_minimum_required ( VERSION 2.8.12 )
 
-FOREACH ( policy CMP0012 CMP0013 CMP0014 CMP0048 CMP0074 )
+FOREACH ( policy CMP0012 CMP0013 CMP0014 CMP0048 CMP0074 CMP0110 )
 	IF ( POLICY ${policy} )
 		CMAKE_POLICY ( SET ${policy} NEW )
 	ENDIF ()
@@ -36,6 +36,7 @@ SET ( CMAKE_MODULE_PATH "${MANTICORE_SOURCE_DIR}/cmake" )
 SET ( MANTICORE_MODULE_PATH "${CMAKE_MODULE_PATH}")
 SET ( EXTRA_LIBRARIES )
 SET ( EXTRA_SEARCHD_LIBRARIES )
+SET ( CMAKE_CXX_STANDARD 14 )
 
 option ( DISABLE_TESTING "Disable all testing (if you just build a distr)" OFF )
 
@@ -153,7 +154,7 @@ if ( NOT DISABLE_TESTING )
 	include ( CTest )
 endif ()
 
-set ( SPHINX_TAG "" CACHE STRING "The tag which will be added to build" )
+set ( BUILD_TAG "" CACHE STRING "The tag which will be added to build" )
 set ( PKGSUFFIXES ) # list of suffixes which will be append to package name, will be '-'-separated
 set ( PACKAGE_NAME "manticore" )
 set ( COMPANY_NAME "Manticore Software LTD" )
@@ -310,13 +311,16 @@ else ( WIN32 )
 		if ( STATIC_BINARY )
 			set ( CFLAGS "${CFLAGS} -static")
 			set ( HAVE_DLOPEN 0 )
-			set ( WITH_ODBC 0 )
-			set ( WITH_MYSQL 0 )
-			set ( WITH_PGSQL 0 )
+			set ( HAVE_GETADDRINFO_A 0 )
+			set ( WITH_ODBC 0 CACHE BOOL "" FORCE)
+			set ( WITH_MYSQL 0 CACHE BOOL "" FORCE)
+			set ( WITH_PGSQL 0 CACHE BOOL "" FORCE)
+			set ( USE_GALERA 0 CACHE BOOL "" FORCE )
+			set ( USE_SSL 0 CACHE BOOL "" FORCE )
+			SET ( DISABLE_TESTING 1 CACHE BOOL "" FORCE)
 		endif()
 
 		set ( MY_C_FLAGS "${CFLAGS}" )
-		set ( CMAKE_CXX_STANDARD 14 )
 		set ( MY_CXX_FLAGS "${CFLAGS} -fno-rtti" )
 
 		# eliminate also some too noisy warnings from CLang
@@ -582,10 +586,25 @@ ENDIF ( WITH_STEMMER )
 message ( STATUS "Option WITH_ICU ${WITH_ICU}" )
 option ( WITH_ICU "compile with ICU library support" ON )
 if ( WITH_ICU )
-	OPTION ( WITH_ICU_FORCE_STATIC "force to compile ICU from sources" ON )
+	OPTION ( WITH_ICU_FORCE_STATIC "force to link ICU statically" ON )
+	if (STATIC_BINARY)
+		OPTION(WITH_ICU_FORCE_BUILD "force to compile ICU from sources" ON)
+	endif()
 	include ( GetICU )
+	if (STATIC_BINARY)
+		target_compile_options(icu PRIVATE "-DHAVE_DLOPEN=0")
+	endif()
 endif ( WITH_ICU )
 
+# Check for Columnar build
+message ( STATUS "Option WITH_COLUMNAR ${WITH_COLUMNAR}" )
+option ( WITH_COLUMNAR "compile with Columnar library support" ON )
+if ( WITH_COLUMNAR )
+	include ( GetColumnar )
+	if (HAVE_COLUMNAR)
+		set ( USE_COLUMNAR 1 )
+	endif ()
+endif ( WITH_COLUMNAR )
 
 find_package(Valgrind)
 
@@ -678,58 +697,16 @@ set ( CPACK_SOURCE_IGNORE_FILES "/\\\\.idea/" "/\\\\.git/"
 
 set ( CPACK_SOURCE_GENERATOR TGZ )
 
-set ( CPACK_PACKAGE_CONTACT "${PACKAGE_NAME} package builds <build@manticoresearch.com>" )
-set ( CMAKE_PROJECT_HOMEPAGE_URL "http://manticoresearch.com" )
-set ( CPACK_PACKAGE_NAME "${PACKAGE_NAME}" )
-set ( CPACK_PACKAGE_VENDOR "${COMPANY_NAME}" )
-set ( CPACK_RESOURCE_FILE_LICENSE "${MANTICORE_BINARY_DIR}/COPYING.txt" )
-set ( CPACK_PACKAGE_DESCRIPTION_SUMMARY "Manticore full-text search server")
-
-# meta
-set ( CPACK_COMPONENT_META_GROUP "main" )
-set ( CPACK_COMPONENT_GROUP_META_DISPLAY_NAME "Virtual" )
-set ( CPACK_COMPONENT_META_DISPLAY_NAME "${PACKAGE_NAME} meta-package" )
-
-
-# applications (indexes,indextool etc.)
-set ( CPACK_COMPONENT_TOOLS_GROUP "main" )
-set ( CPACK_COMPONENT_GROUP_TOOLS_DISPLAY_NAME "Tools" )
-set ( CPACK_COMPONENT_TOOLS_DISPLAY_NAME "${PACKAGE_NAME} t" )
-
-# searchd daemon
-set ( CPACK_COMPONENT_APPLICATIONS_GROUP "main" )
-set ( CPACK_COMPONENT_GROUP_APLLICATIONS_DISPLAY_NAME "Server" )
-set ( CPACK_COMPONENT_APPLICATIONS_DISPLAY_NAME "${PACKAGE_NAME} service" )
-
-# configurations
-set ( CPACK_COMPONENT_CONFIG_GROUP "main" )
-set ( CPACK_COMPONENT_CONFIG_DISPLAY_NAME "Configuration examples" )
-
-# documentation files
-set ( CPACK_COMPONENT_DOC_GROUP "main" )
-set ( CPACK_COMPONENT_DOC_DISPLAY_NAME "Documentation" )
-
-# converter tool
-set ( CPACK_COMPONENT_CONVERTER_GROUP "converter" )
-set ( CPACK_COMPONENT_GROUP_CONVERTER_DISPLAY_NAME "Converter" )
-set ( CPACK_COMPONENT_CONVERTER_DISPLAY_NAME "CONVERTER application" )
-
-# icu data library
-set ( CPACK_COMPONENT_ICUDATA_GROUP "main" )
-set ( CPACK_COMPONENT_ICUDATA_DISPLAY_NAME "ICU DAT file" )
-
-# development files
-set ( CPACK_COMPONENT_DEVEL_GROUP "main" )
-set ( CPACK_COMPONENT_DEVEL_DISPLAY_NAME "Development" )
-set ( CPACK_COMPONENT_GROUP_DEVEL_DISPLAY_NAME "Development files" )
+# Common all-packages info
+include(CommonInfo)
 
 set ( CPACK_RPM_COMPONENT_INSTALL 1 )
 set ( CPACK_DEB_COMPONENT_INSTALL 1 )
 set ( CPACK_ARCHIVE_COMPONENT_INSTALL 1 )
 
 if ( SPLIT )
- set (CPACK_COMPONENTS_GROUPING IGNORE )
- endif()
+	set (CPACK_COMPONENTS_GROUPING IGNORE )
+endif()
 
 include ( SetBuildType )
 

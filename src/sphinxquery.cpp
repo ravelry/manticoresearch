@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -1264,7 +1264,9 @@ int XQParser_t::GetToken ( YYSTYPE * lvalp )
 			return 0;
 
 		m_iPendingNulls = m_pTokenizer->GetOvershortCount() * m_iOvershortStep;
-		m_iAtomPos += 1 + m_iPendingNulls + iPrevDeltaPos;
+		m_iAtomPos += 1 + m_iPendingNulls;
+		if ( iPrevDeltaPos>1 ) // to match with condifion of m_bWasBlended above
+			m_iAtomPos += ( iPrevDeltaPos - 1);
 
 		bool bMultiDestHead = false;
 		bool bMultiDest = false;
@@ -1344,7 +1346,7 @@ int XQParser_t::GetToken ( YYSTYPE * lvalp )
 		// count [ * ] at phrase node for qpos shift
 		if ( m_pTokenizer->m_bPhrase && pLastTokenEnd )
 		{
-			if ( strncmp ( sToken, "*", 1 )==0 )
+			if ( sToken[0]=='*' && sToken[1]=='\0' ) // phrase star should be separate token
 			{
 				m_dPhraseStar.Add ( m_iAtomPos );
 			} else

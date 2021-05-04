@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -1228,12 +1228,18 @@ SphThread_t Threads::Self ()
 }
 
 /// compares two thread ids
-bool Threads::Same ( SphThread_t first, SphThread_t second )
+bool Threads::Same ( const LowThreadDesc_t * pFirst, const LowThreadDesc_t * pSecond )
 {
+	if ( !pFirst && !pSecond )
+		return true;
+	if ( !pFirst || !pSecond )
+		return false;
+
 #if USE_WINDOWS
-	return first==second;
+	// can not use m_tThread on Windows as GetCurrentThread returns -2 and that handle valid only inside thread itself
+	return ( pFirst->m_iThreadID==pSecond->m_iThreadID );
 #else
-	return pthread_equal ( first, second )!=0;
+	return pthread_equal ( pFirst->m_tThread, pSecond->m_tThread )!=0;
 #endif
 }
 

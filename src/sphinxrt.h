@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -25,22 +25,19 @@ struct CSphReconfigureSettings;
 struct CSphReconfigureSetup;
 class RtAccum_t;
 
-const int64_t DEFAULT_RT_MEM_LIMIT = 128 * 1024 * 1024;
-
-
 /// RAM based updateable backend interface
 class RtIndex_i : public CSphIndex
 {
 public:
-	explicit RtIndex_i ( const char * sIndexName, const char * sFileName ) : CSphIndex ( sIndexName, sFileName ) {}
+	RtIndex_i ( const char * sIndexName, const char * sFileName ) : CSphIndex ( sIndexName, sFileName ) {}
 
 	/// get internal schema (to use for Add calls)
 	virtual const CSphSchema & GetInternalSchema () const { return m_tSchema; }
+	virtual uint64_t GetSchemaHash () const = 0;
 
 	/// insert/update document in current txn
 	/// fails in case of two open txns to different indexes
-	virtual bool AddDocument ( const VecTraits_T<VecTraits_T<const char >> &dFields, CSphMatch & tDoc,
-		bool bReplace, const CSphString & sTokenFilterOptions, const char ** ppStr, const VecTraits_T<int64_t> & dMvas,
+	virtual bool AddDocument ( const VecTraits_T<VecTraits_T<const char>> & dFields, CSphMatch & tDoc, bool bReplace, const CSphString & sTokenFilterOptions, const char ** ppStr, const VecTraits_T<int64_t> & dMvas,
 		CSphString & sError, CSphString & sWarning, RtAccum_t * pAccExt ) = 0;
 
 	/// delete document in current txn
@@ -54,7 +51,7 @@ public:
 	virtual void RollBack ( RtAccum_t * pAccExt ) = 0;
 
 	/// forcibly flush RAM chunk to disk
-	virtual void ForceRamFlush ( bool bPeriodic=false ) = 0;
+	virtual void ForceRamFlush ( const char* szReason ) = 0;
 
 	virtual bool IsFlushNeed() const = 0;
 
@@ -65,12 +62,12 @@ public:
 	virtual bool ForceDiskChunk () = 0;
 
 	/// attach a disk chunk to current index
-	virtual bool AttachDiskIndex ( CSphIndex * pIndex, bool bTruncate, bool & bFatal, CSphString & sError ) = 0;
+	virtual bool AttachDiskIndex ( CSphIndex * pIndex, bool bTruncate, bool & bFatal, StrVec_t & dWarnings, CSphString & sError ) = 0;
 
 	/// truncate index (that is, kill all data)
 	virtual bool Truncate ( CSphString & sError ) = 0;
 
-	virtual void Optimize ( int iCutoff, int iFrom, int iTo ) = 0;
+	virtual void Optimize ( int iCutoff, int iFromID, int iToID, const char* szUvarFilter ) = 0;
 
 	/// check settings vs current and return back tokenizer and dictionary in case of difference
 	virtual bool IsSameSettings ( CSphReconfigureSettings & tSettings, CSphReconfigureSetup & tSetup, StrVec_t & dWarnings, CSphString & sError ) const = 0;

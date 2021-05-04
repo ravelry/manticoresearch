@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -23,7 +23,7 @@
 static RwLock_t g_tUservarsMutex;
 static SmallStringHash_T<Uservar_t> g_hUservars GUARDED_BY ( g_tUservarsMutex );
 
-static void UservarAdd ( const CSphString& sName, CSphVector<SphAttr_t>& dVal )
+static void UservarAdd ( const CSphString& sName, CSphVector<SphAttr_t>& dVal, bool bPersist = true )
 {
 	ScWL_t wLock ( g_tUservarsMutex );
 	Uservar_t* pVar = g_hUservars ( sName );
@@ -33,7 +33,7 @@ static void UservarAdd ( const CSphString& sName, CSphVector<SphAttr_t>& dVal )
 		// actual destruction of the value (aka data) might happen later
 		// as the concurrent queries might still be using and holding that data
 		// from here, the old value becomes nameless, though
-		assert ( pVar->m_eType==USERVAR_INT_SET );
+		assert ( pVar->m_eType==USERVAR_INT_SET || pVar->m_eType==USERVAR_INT_SET_TMP );
 		assert ( pVar->m_pVal );
 	} else
 	{
@@ -44,7 +44,7 @@ static void UservarAdd ( const CSphString& sName, CSphVector<SphAttr_t>& dVal )
 
 	// swap in the new value
 	assert ( pVar );
-	pVar->m_eType = USERVAR_INT_SET;
+	pVar->m_eType = bPersist ? USERVAR_INT_SET : USERVAR_INT_SET_TMP;
 	pVar->m_pVal = new UservarIntSetValues_c; // previous will be auto-released here
 	pVar->m_pVal->SwapData ( dVal );
 }
@@ -56,6 +56,15 @@ void SetLocalUserVar ( const CSphString& sName, CSphVector<SphAttr_t>& dSetValue
 	SphinxqlStateFlush ();
 }
 
+// create or update the which is not to be saved to state (i.e. exists only during current session)
+void SetLocalTemporaryUserVar ( const CSphString & sName, VecTraits_T<DocID_t> & dDocids )
+{
+	CSphVector<SphAttr_t> dSetValues;
+	dSetValues.Append ( dDocids ); // warn! explicit convert from DocID_t to SphAttr_t (as both are int64_t)
+	dSetValues.Uniq();
+	UservarAdd ( sName, dSetValues, false );
+}
+
 UservarIntSet_c UservarsHook ( const CSphString& sUservar )
 {
 	ScRL_t rLock ( g_tUservarsMutex );
@@ -63,7 +72,7 @@ UservarIntSet_c UservarsHook ( const CSphString& sUservar )
 	if ( !pVar )
 		return UservarIntSet_c ();
 
-	assert ( pVar->m_eType==USERVAR_INT_SET );
+	assert ( pVar->m_eType==USERVAR_INT_SET || pVar->m_eType==USERVAR_INT_SET_TMP);
 	return pVar->m_pVal;
 }
 
@@ -220,11 +229,26 @@ bool InitSphinxqlState ( CSphString dStateFilePath, CSphString& sError )
 	return true;
 }
 
-struct NamedRefVectorPair_t
+void IterateUservars ( UservarFn&& fnSample )
 {
-	CSphString m_sName;
-	UservarIntSet_c m_pVal;
-};
+	CSphVector<NamedRefVectorPair_t> dUservars;
+	{
+		ScRL_t rLock ( g_tUservarsMutex );
+		dUservars.Reserve ( g_hUservars.GetLength () );
+		g_hUservars.IterateStart ();
+		while ( g_hUservars.IterateNext () )
+		{
+			if ( !g_hUservars.IterateGet ().m_pVal->GetLength () )
+				continue;
+
+			auto & tPair = dUservars.Add ();
+			tPair.first = g_hUservars.IterateGetKey ();
+			tPair.second = g_hUservars.IterateGet ();
+		}
+	}
+	dUservars.Sort ( ::bind ( &NamedRefVectorPair_t::first ) );
+	dUservars.for_each ( fnSample );
+}
 
 /// SphinxQL state writer
 /// periodically flushes changes of uservars, UDFs
@@ -261,33 +285,16 @@ static void SphinxqlStateThreadFunc ( void* )
 	// save uservars
 	/////////////////
 
-	CSphVector <NamedRefVectorPair_t> dUservars;
+	IterateUservars ( [&dBuf,&tWriter,iMaxString] ( const NamedRefVectorPair_t &dVar )
 	{
-		ScRL_t rLock ( g_tUservarsMutex );
-		dUservars.Reserve ( g_hUservars.GetLength ());
-		g_hUservars.IterateStart ();
-		while ( g_hUservars.IterateNext ())
-		{
-			if ( !g_hUservars.IterateGet ().m_pVal->GetLength ())
-				continue;
+		if ( dVar.second.m_eType==USERVAR_INT_SET_TMP )
+			return;
 
-			auto& tPair = dUservars.Add ();
-			tPair.m_sName = g_hUservars.IterateGetKey ();
-			tPair.m_pVal = g_hUservars.IterateGet ().m_pVal;
-		}
-	}
-	dUservars.Sort ( bind ( &NamedRefVectorPair_t::m_sName ));
-
-	// reinitiate store process on new variables added
-	for ( const auto& dUserVar : dUservars )
-	{
-		const CSphVector <SphAttr_t>& dVals = *dUserVar.m_pVal;
-		int iLen = snprintf ( dBuf, sizeof ( dBuf ), "SET GLOBAL %s = ( "
-		INT64_FMT, dUserVar.m_sName.cstr (), dVals[0] );
+		const CSphVector<SphAttr_t> & dVals = *dVar.second.m_pVal;
+		int iLen = snprintf ( dBuf, sizeof ( dBuf ), "SET GLOBAL %s = ( " INT64_FMT, dVar.first.cstr (), dVals[0] );
 		for ( int j = 1; j<dVals.GetLength (); j++ )
 		{
-			iLen += snprintf ( dBuf + iLen, sizeof ( dBuf ), ", "
-			INT64_FMT, dVals[j] );
+			iLen += snprintf ( dBuf + iLen, sizeof ( dBuf ), ", " INT64_FMT, dVals[j] );
 
 			if ( iLen>=iMaxString && j<dVals.GetLength () - 1 )
 			{
@@ -302,7 +309,7 @@ static void SphinxqlStateThreadFunc ( void* )
 
 		char sTail[] = " );\n";
 		tWriter.PutBytes ( sTail, sizeof ( sTail ) - 1 );
-	}
+	});
 
 	/////////////////////////////////
 	// writing done, flip the burger

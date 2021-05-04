@@ -5,7 +5,7 @@
 message ( STATUS "Will create DEB for Ubuntu 18.04 (bionic)" )
 
 # m.b. postinst.bionic, postinst.debian and postinst.trusty
-FILE ( READ dist/deb/postinst.xenial.in POSTINST_SPECIFIC_IN )
+FILE ( READ dist/deb/postinst.bionic.in POSTINST_SPECIFIC_IN )
 
 # m.b. prerm.ubuntu, prerm.debian
 configure_file ( "${CMAKE_CURRENT_SOURCE_DIR}/dist/deb/prerm.ubuntu.in"
@@ -32,6 +32,8 @@ configure_file ( "${CMAKE_CURRENT_SOURCE_DIR}/dist/deb/manticore.generator.in"
 install ( FILES "${MANTICORE_BINARY_DIR}/manticore-generator"
 		DESTINATION  /lib/systemd/system-generators  PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ
         GROUP_EXECUTE GROUP_READ COMPONENT applications )
+install(PROGRAMS "dist/deb/manticore_new_cluster"
+		DESTINATION ${BINPREFIX}bin COMPONENT applications)
 
 # some bionic-specific variables and files
 set ( DISTR_SUFFIX "~bionic_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}" )

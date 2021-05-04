@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -17,6 +17,7 @@
 #include "sphinxutils.h"
 #include "fileutils.h"
 #include "sphinxexpr.h"
+#include "columnarlib.h"
 
 typedef uint64_t SphWordID_t;
 STATIC_SIZE_ASSERT ( SphWordID_t, 8 );
@@ -169,6 +170,9 @@ public:
 	StrVec_t m_dStoredFields;		///< list of stored fields
 	StrVec_t m_dStoredOnlyFields;	///< list of "fields" that are stored but not indexed
 
+	StrVec_t m_dColumnarAttrs;			///< list of attributes to place in columnar store
+	StrVec_t m_dColumnarStringsNoHash;	///< list of columnar string attributes that don't need pregenerated hashes
+
 	ESphWordpart GetWordpart ( const char * sField, bool bWordDict );
 	int GetMinPrefixLen ( bool bWordDict ) const;
 	void SetMinPrefixLen ( int iMinPrefixLen );
@@ -232,6 +236,9 @@ enum ESphBigram
 
 
 class CSphIndexSettings : public CSphSourceSettings, public DocstoreSettings_t
+#if USE_COLUMNAR
+	, public columnar::Settings_t
+#endif
 {
 public:
 	ESphHitFormat	m_eHitFormat = SPH_HIT_FORMAT_PLAIN;
@@ -261,6 +268,11 @@ public:
 
 private:
 	void			ParseStoredFields ( const CSphConfigSection & hIndex );
+
+#if USE_COLUMNAR
+	bool			ParseColumnarSettings ( const CSphConfigSection & hIndex, CSphString & sError );
+#endif
+
 	bool			ParseDocstoreSettings ( const CSphConfigSection & hIndex, CSphString & sWarning, CSphString & sError );
 };
 
@@ -293,6 +305,33 @@ struct FileAccessSettings_t : public SettingsWriter_c
 	void			Format ( SettingsFormatter_c & tOut, FilenameBuilder_i * pFilenameBuilder ) const override;
 };
 
+class MutableIndexSettings_c : public SettingsWriter_c
+{
+public:
+	int			m_iExpandKeywords;
+	int64_t		m_iMemLimit;
+	bool		m_bPreopen = false;
+	FileAccessSettings_t m_tFileAccess;
+	
+	MutableIndexSettings_c();
+
+	static MutableIndexSettings_c & GetDefaults();
+
+	bool Load ( const char * sFileName, const char * sIndexName );
+	void Load ( const CSphConfigSection & hIndex, bool bNeedSave, StrVec_t * pWarnings );
+	bool Save ( CSphString & sBuf ) const;
+
+	bool NeedSave() const { return m_bNeedSave; }
+	bool HasSettings() const { return ( m_dLoaded.BitCount()>0 ); }
+
+	void Format ( SettingsFormatter_c & tOut, FilenameBuilder_i * pFilenameBuilder ) const override;
+
+	void Combine ( const MutableIndexSettings_c & tOther );
+
+private:
+	CSphBitvec	m_dLoaded;
+	bool		m_bNeedSave = false;
+};
 
 struct RtTypedAttr_t
 {
@@ -367,5 +406,9 @@ CreateFilenameBuilder_fn GetIndexFilenameBuilder();
 
 const char * FileAccessName ( FileAccess_e eValue );
 FileAccess_e ParseFileAccess ( CSphString sVal );
+
+int ParseKeywordExpansion ( const char * sValue );
+void SaveMutableSettings ( const MutableIndexSettings_c & tSettings, const CSphString & sPath );
+FileAccess_e GetFileAccess (  const CSphConfigSection & hIndex, const char * sKey, bool bList, FileAccess_e eDefault );
 
 #endif // _indexsettings_

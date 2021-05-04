@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -30,7 +30,7 @@ struct Listener_t
 };
 
 class CSphNetLoop;
-struct ISphNetAction : ISphNoncopyable, NetPollEvent_t
+struct ISphNetAction :  NetPollEvent_t
 {
 	explicit ISphNetAction ( int iSock ) : NetPollEvent_t ( iSock ) {}
 
@@ -45,9 +45,9 @@ struct ISphNetAction : ISphNoncopyable, NetPollEvent_t
 	/// timer is always removed when processing. If it is timeout - the event is also already removed from the poller.
 	virtual void		Process ( DWORD uGotEvents, CSphNetLoop * pLoop ) = 0;
 
-	/// invoked when CSphNetLoop with this action destroyed
+	/// invoked when CSphNetLoop with this action destroying
 	/// usually action is owned by netloop (signaller, acceptor), so it just destroys itself here.
-	virtual void NetLoopDestroying () { delete this; };
+	virtual void NetLoopDestroying ()  REQUIRES ( NetPoollingThread ) { Release (); };
 };
 
 // event that wakes-up poll net loop from finished thread pool job
@@ -56,10 +56,14 @@ class CSphWakeupEvent final : public PollableEvent_t, public ISphNetAction
 {
 public:
 	CSphWakeupEvent ();
-	~CSphWakeupEvent () final;
 	void Process ( DWORD uGotEvents, CSphNetLoop * ) final;
 	void Wakeup ();
+
+protected:
+	~CSphWakeupEvent () final;
 };
+
+using WakeupEventRefPtr_c = CSphRefcountedPtr<CSphWakeupEvent>;
 
 /////////////////////////////////////////////////////////////////////////////
 /// NETWORK THREAD
@@ -71,15 +75,15 @@ class CSphNetLoop : public ISphRefcountedMT
 	Impl_c * m_pImpl = nullptr;
 
 protected:
-	~CSphNetLoop ();
+	~CSphNetLoop () override;
 
 public:
 	explicit CSphNetLoop ( const VecTraits_T<Listener_t> & dListeners );
 	void LoopNetPoll ();
 	void StopNetLoop ();
 
-	void AddAction ( ISphNetAction * pElem );
-	void RemoveEvent ( NetPollEvent_t * pEvent );
+	void AddAction ( ISphNetAction * pElem ) EXCLUDES ( NetPoollingThread );
+	void RemoveEvent ( NetPollEvent_t * pEvent ) REQUIRES ( NetPoollingThread );
 };
 
 // redirect async socket io to netloop
@@ -101,6 +105,9 @@ public:
 
 	int64_t GetWTimeoutUS () const;
 	void SetWTimeoutUS ( int64_t iTimeoutUS );
+
+	int64_t GetTotalSent () const;
+	int64_t GetTotalReceived () const;
 };
 
 using SockWrapperPtr_c = SharedPtr_t<SockWrapper_c *>;

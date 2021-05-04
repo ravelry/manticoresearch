@@ -1,14 +1,14 @@
 # MATCH
- 
-The `MATCH` clause allows to perform  full-text searches in text fields. The query string at input is [tokenized](Creating_an_index/NLP_and_tokenization/Data_tokenization.md) using same settings applied to the text during indexing. In addition to tokenization of input text, the query string supports a number of [full-text operators](Searching/Full_text_matching/Operators.md) that allow enforcing different rules on how keywords should provide a valid match.
 
-The full-text match clauses can be combined with attribute [filters](Searching/Filters.md) as an AND boolean. **OR relation between full-text matches and attribute filters are not supported**.
+The `MATCH` clause allows to perform  full-text searches in text fields. The query string at input is [tokenized](../../Creating_an_index/NLP_and_tokenization/Data_tokenization.md) using same settings applied to the text during indexing. In addition to tokenization of input text, the query string supports a number of [full-text operators](../../Searching/Full_text_matching/Operators.md) that allow enforcing different rules on how keywords should provide a valid match.
 
-The match query is always executed first in the filtering process, followed by the [attribute filters](Searching/Filters.md). The attribute filters are applied on the result set of the match query. A query without a match clause is called a fullscan.
+The full-text match clauses can be combined with attribute [filters](../../Searching/Filters.md) as an AND boolean. **OR relation between full-text matches and attribute filters are not supported**.
+
+The match query is always executed first in the filtering process, followed by the [attribute filters](../../Searching/Filters.md). The attribute filters are applied on the result set of the match query. A query without a match clause is called a fullscan.
 
 There must be at most one `MATCH()` in the `SELECT` clause.
 
-Using the [full-text query syntax](Searching/Full_text_matching/Operators.md) matching  is performed over all indexed text fields of a document, unless the expression requires to be match within a field (like phrase search) or limited by field operators.
+Using the [full-text query syntax](../../Searching/Full_text_matching/Operators.md) matching  is performed over all indexed text fields of a document, unless the expression requires to be match within a field (like phrase search) or limited by field operators.
 
 ## SQL
 <!-- example Example_1 -->
@@ -17,7 +17,7 @@ Using the [full-text query syntax](Searching/Full_text_matching/Operators.md) ma
 SELECT * FROM index WHERE MATCH('cats|birds');
 ```
 
-[SELECT](Searching/Full_text_matching/Basic_usage.md#SQL) statement uses [MATCH](Searching/Full_text_matching/Basic_usage.md) clause for performing full-text searches. It accepts an input string in which all [full-text operators](Searching/Full_text_matching/Operators.md) are available.
+[SELECT](../../Searching/Full_text_matching/Basic_usage.md#SQL) statement uses [MATCH](../../Searching/Full_text_matching/Basic_usage.md) clause for performing full-text searches. It accepts an input string in which all [full-text operators](../../Searching/Full_text_matching/Operators.md) are available.
 
 
 <!-- intro -->
@@ -48,7 +48,7 @@ SELECT * FROM myindex WHERE MATCH('"find me fast"/2');
 
 <!-- example Example_11 -->
 
-Full-text matching is available in the `/search` endpoint. The following clauses can be used for performing full-text matches:
+Full-text matching is available in the `/search` endpoint and in HTTP-based clients. The following clauses can be used for performing full-text matches:
 
 ### match
 
@@ -109,7 +109,7 @@ By default keywords are combined using the OR operator. However, you can change 
 ```
 
 ### query_string
-"query_string" accepts an input string as a full-text query in `MATCH()` syntax 
+"query_string" accepts an input string as a full-text query in `MATCH()` syntax
 
 ```json
 "query":
@@ -121,7 +121,7 @@ By default keywords are combined using the OR operator. However, you can change 
 
 ### Combining full-text filtering with other filters
 
-All full-text match clauses can be combined with [must](Searching/Filters.md#must), [must_not](Searching/Filters.md#must_not) and [should](Searching/Filters.md#should) operators of an [HTTP `bool` query](Searching/Filters.md#bool-query).
+All full-text match clauses can be combined with [must](../../Searching/Filters.md#must), [must_not](../../Searching/Filters.md#must_not) and [should](../../Searching/Filters.md#should) operators of an [HTTP `bool` query](../../Searching/Filters.md#bool-query).
 
 <!-- intro -->
 Examples:
@@ -129,7 +129,7 @@ Examples:
 <!-- request match -->
 
 ```json
-POST /search 
+POST /search
 -d
 '{   "index" : "myindex",
     "query":
@@ -168,7 +168,7 @@ POST /search
 ```
 <!-- request match_phrase -->
 ```json
-POST /search 
+POST /search
 -d
 '{   "index" : "myindex",
     "query":
@@ -207,7 +207,7 @@ POST /search
 
 <!-- request query_string -->
 ```json
-POST /search 
+POST /search
 -d
 '{   "index" : "myindex",
     "query":

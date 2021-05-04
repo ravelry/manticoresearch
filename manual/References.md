@@ -2,11 +2,11 @@
 
 ### SQL commands
 ##### Schema management
-* [CREATE TABLE %5BIF NOT EXISTS%5D](Creating_an_index/Local_indexes/Plain_and_real-time_index_settings.md#General-syntax-of-CREATE-TABLE) - Creates new table
+* [CREATE TABLE IF NOT EXISTS](Creating_an_index/Local_indexes/Plain_and_real-time_index_settings.md#General-syntax-of-CREATE-TABLE) - Creates new table
 * [CREATE TABLE LIKE](Creating_an_index/Local_indexes/Plain_and_real-time_index_settings.md#Creating-a-real-time-index-online-via-CREATE-TABLE) - Creates table using another one as a template
 * [DESCRIBE](Listing_indexes.md#DESCRIBE) - Prints out table's field list and their types
 * [ALTER TABLE](Updating_index_schema.md) - Changes table schema / settings
-* [DROP TABLE %5BIF EXISTS%5D](Deleting_an_index.md#Deleting-an-index) - Deletes table [if it exists]
+* [DROP TABLE IF EXISTS](Deleting_an_index.md#Deleting-an-index) - Deletes table [if it exists]
 * [SHOW TABLES](Listing_indexes.md#SHOW-TABLES) - Shows tables list
 * [SHOW CREATE TABLE](Listing_indexes.md#SHOW-CREATE-TABLE) - Shows SQL command how to create the table
 * [SHOW INDEX STATUS](Profiling_and_monitoring/Index_settings_and_status/SHOW_INDEX_STATUS.md) - Shows information about current table status
@@ -88,7 +88,7 @@
 * [/pq/idx/doc/N?refresh=1](Adding_documents_to_an_index/Adding_rules_to_a_percolate_index.md#Replacing-rules-in-a-PQ-index) - Replaces a PQ rule in a percolate index
 * [/delete](Deleting_documents.md) - Deletes a document in an index
 * [/bulk](Updating_documents/UPDATE.md#Bulk-updates) - Perform several insert, update or delete operations in a single call
-* [/search](Quick_start_guide.md#Connect-via-JSON-over-HTTP) - Performs search
+* [/search](Searching/Full_text_matching/Basic_usage.md#http) - Performs search
 * [/pq/idx/search](Searching/Percolate_query.md) - Performs reverse search in a percolate index
 
 ### Common things
@@ -268,6 +268,9 @@
 
 ##### Date and time
 * [NOW()](Functions/Date_and_time_functions.md#NOW%28%29) - Returns current timestamp as an INTEGER
+* [CURTIME()](Functions/Date_and_time_functions.md#CURTIME%28%29) - Returns current time in local timezone
+* [UTC_TIME()](Functions/Date_and_time_functions.md#UTC_TIME%28%29) - Returns current time in UTC timezone
+* [UTC_TIMESTAMP()](Functions/Date_and_time_functions.md#UTC_TIMESTAMP%28%29) - Returns current date/time in UTC timezone
 * [SECOND()](Functions/Date_and_time_functions.md#SECOND%28%29) - Returns integer second from the timestamp argument
 * [MINUTE()](Functions/Date_and_time_functions.md#MINUTE%28%29) - Returns integer minute from the timestamp argument
 * [HOUR()](Functions/Date_and_time_functions.md#HOUR%28%29) - Returns integer hour from the timestamp argument
@@ -276,6 +279,7 @@
 * [YEAR()](Functions/Date_and_time_functions.md#YEAR%28%29) - Returns integer year from the timestamp argument
 * [YEARMONTH()](Functions/Date_and_time_functions.md#YEARMONTH%28%29) - Returns integer year and month code from the timestamp argument
 * [YEARMONTHDAY()](Functions/Date_and_time_functions.md#YEARMONTHDAY%28%29) - Returns integer year, month and day code from the timestamp argument
+* [TIMEDIFF()](Functions/Date_and_time_functions.md#TIMEDIFF%28%29) - Returns difference between the timstamps
 
 ##### Geo-spatial
 * [GEODIST()](Functions/Geo_spatial_functions.md#GEODIST%28%29) - Computes geosphere distance between two given points
@@ -313,6 +317,7 @@ To be put to section `indexer {}` in configuration file:
 * [mem_limit](Adding_data_from_external_storages/Plain_indexes_creation.md#mem_limit) - Indexing RAM usage limit
 * [on_file_field_error](Adding_data_from_external_storages/Plain_indexes_creation.md#on_file_field_error) - How to handle IO errors in file fields
 * [write_buffer](Adding_data_from_external_storages/Plain_indexes_creation.md#write_buffer) - Write buffer size
+* [ignore_non_plain](Adding_data_from_external_storages/Plain_indexes_creation.md#ignore_non_plain) - To ignore warnings about non-plain indexes
 
 ##### Indexer start parameters
 ```bash
@@ -398,7 +403,6 @@ To be put to section `searchd {}` in configuration file:
   * [net_workers](Server_settings/Searchd.md#net_workers) - Number of network threads
   * [network_timeout](Server_settings/Searchd.md#network_timeout) - Network timeout for requests from clients
   * [node_address](Server_settings/Searchd.md#node_address) - Specifies network address of the node
-  * [ondisk_attrs_default](Server_settings/Searchd.md#ondisk_attrs_default) - Instance-wide default for [ondisk_attrs](Creating_an_index/Local_indexes/Plain_and_real-time_index_settings.md#Accessing-index-files) directive
   * [persistent_connections_limit](Creating_an_index/Creating_a_distributed_index/Remote_indexes.md#persistent_connections_limit) - Maximum number of simultaneous persistent connections to remote persistent agents
   * [pid_file](Server_settings/Searchd.md#pid_file) - Path to Manticore server pid file
   * [predicted_time_costs](Server_settings/Searchd.md#predicted_time_costs) - Costs for the query time prediction model
@@ -492,9 +496,10 @@ indextool <command> [options]
 * [--mergeidf](Miscellaneous_tools.md#indextool) - Merges several .idf files into a single one
 * [--morph](Miscellaneous_tools.md#indextool) - Applies morphology to the given STDIN and prints the result to stdout
 * [--check](Miscellaneous_tools.md#indextool) - Checks the index data files for consistency
-* [--strip-path](Starting_the_server/Manually.md#searchd-command-line-options) - Strips path names from all the file names referenced from the index
+* [--check-disk-chunk](Miscellaneous_tools.md#indextool) - Checks one disk chunk of an RT index
+* [--strip-path](Miscellaneous_tools.md#indextool) - Strips path names from all the file names referenced from the index
 * [--rotate](Miscellaneous_tools.md#indextool) - Defines whether to check index waiting for rotation in `--check`
-* [Indextool](Miscellaneous_tools.md#indextool) - Applies kill-lists for all indexes listed in the configuration file
+* [--apply-killlists](Miscellaneous_tools.md#indextool) - Applies kill-lists for all indexes listed in the configuration file
 
 ## [Wordbreaker](Miscellaneous_tools.md#wordbreaker)
 Splits compound words into components.

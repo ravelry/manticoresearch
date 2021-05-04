@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -38,8 +38,9 @@
 	#define SPH_O_BINARY 0
 #endif
 
-#define SPH_O_READ	( O_RDONLY | SPH_O_BINARY )
-#define SPH_O_NEW	( O_CREAT | O_RDWR | O_TRUNC | SPH_O_BINARY )
+#define SPH_O_READ		( O_RDONLY | SPH_O_BINARY )
+#define SPH_O_NEW		( O_CREAT | O_RDWR | O_TRUNC | SPH_O_BINARY )
+#define SPH_O_APPEND	( O_CREAT | O_RDWR | O_APPEND | SPH_O_BINARY )
 
 class CSphIOStats
 {
@@ -122,7 +123,7 @@ bool			sphWrite ( int iFD, const Str_t& dBuf );
 
 StrVec_t		FindFiles ( const char * szPath, bool bNeedDirs=false );
 bool			MkDir ( const char * szDir );
-bool			CopyFile ( const CSphString & sSource, const CSphString & sDest, CSphString & sError );
+bool			CopyFile ( const CSphString & sSource, const CSphString & sDest, CSphString & sError, int iMode=SPH_O_NEW );
 bool			RenameFiles ( const StrVec_t & dSrc, const StrVec_t & dDst, CSphString & sError );
 bool			RenameWithRollback ( const StrVec_t & dSrc, const StrVec_t & dDst, CSphString & sError );
 
@@ -130,10 +131,14 @@ bool			RenameWithRollback ( const StrVec_t & dSrc, const StrVec_t & dDst, CSphSt
 bool			CheckPath ( const CSphString & sPath, bool bCheckWrite, CSphString & sError, const char * sCheckFileName="tmp" );
 
 bool			IsPathAbsolute ( const CSphString & sPath );
+CSphString		GetExecutablePath();
 
 CSphString &	StripPath ( CSphString & sPath );
 CSphString		GetPathOnly ( const CSphString & sFullPath );
 const char *	GetExtension ( const CSphString & sFullPath );
+
+class CSphWriter;
+void			SeekAndPutOffset ( CSphWriter & tWriter, SphOffset_t tOffset, SphOffset_t tValue );
 
 // FIXME! unify this weird zoo of file function naming
 namespace sph

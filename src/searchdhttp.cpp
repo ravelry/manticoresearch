@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -27,6 +27,7 @@ const char * g_dHttpStatus[] = { "200 OK", "206 Partial Content", "400 Bad Reque
 								 "501 Not Implemented", "503 Service Unavailable", "526 Invalid SSL Certificate" };
 STATIC_ASSERT ( sizeof(g_dHttpStatus)/sizeof(g_dHttpStatus[0])==SPH_HTTP_STATUS_TOTAL, SPH_HTTP_STATUS_SHOULD_BE_SAME_AS_SPH_HTTP_STATUS_TOTAL );
 
+extern CSphString g_sStatusVersion;
 
 static void HttpBuildReply ( CSphVector<BYTE> & dData, ESphHttpStatus eCode, const char * sBody, int iBodyLen, bool bHtml )
 {
@@ -34,7 +35,7 @@ static void HttpBuildReply ( CSphVector<BYTE> & dData, ESphHttpStatus eCode, con
 
 	const char * sContent = ( bHtml ? "text/html" : "application/json" );
 	CSphString sHttp;
-	sHttp.SetSprintf ( "HTTP/1.1 %s\r\nServer: %s\r\nContent-Type: %s; charset=UTF-8\r\nContent-Length:%d\r\n\r\n", g_dHttpStatus[eCode], szMANTICORE_VERSION, sContent, iBodyLen );
+	sHttp.SetSprintf ( "HTTP/1.1 %s\r\nServer: %s\r\nContent-Type: %s; charset=UTF-8\r\nContent-Length:%d\r\n\r\n", g_dHttpStatus[eCode], g_sStatusVersion.cstr(), sContent, iBodyLen );
 
 	int iHeaderLen = sHttp.Length();
 	dData.Resize ( iHeaderLen + iBodyLen );
@@ -287,7 +288,7 @@ R"index(<!DOCTYPE html>
 static void HttpHandlerIndexPage ( CSphVector<BYTE> & dData )
 {
 	StringBuilder_c sIndexPage;
-	sIndexPage.Appendf ( g_sIndexPage, szMANTICORE_VERSION );
+	sIndexPage.Appendf ( g_sIndexPage, g_sStatusVersion.cstr() );
 	HttpBuildReply ( dData, SPH_HTTP_STATUS_200, sIndexPage.cstr(), sIndexPage.GetLength(), true );
 }
 
@@ -776,11 +777,12 @@ public:
 		m_dBuf += "null";
 	}
 
-	void Commit() override
+	bool Commit() override
 	{
 		m_dBuf += "}";
 		m_iCol = 0;
 		m_iRow++;
+		return true;
 	}
 
 	void Eof ( bool bMoreResults , int iWarns ) override
@@ -805,7 +807,7 @@ public:
 		m_dBuf += "{";
 	}
 
-	void HeadEnd ( bool , int ) override
+	bool HeadEnd ( bool , int ) override
 	{
 		{
 			ScopedComma_c tComma ( m_dBuf, ",", R"("columns":[)", "],\n", false );
@@ -821,9 +823,10 @@ public:
 		
 		m_dBuf.AppendName ( "data" );
 		m_dBuf += "[\n";
+		return true;
 	}
 
-	void HeadColumn ( const char * sName, MysqlColumnType_e eType, WORD ) override
+	void HeadColumn ( const char * sName, MysqlColumnType_e eType ) override
 	{
 		m_dColumns.Add ( ColumnNameType_t { sName, eType } );
 	}

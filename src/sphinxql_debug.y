@@ -47,6 +47,9 @@
 %token <sValue>	TOK_DROP
 %token <sValue>	TOK_FILES
 %token <sValue>	TOK_OPTION
+%token <sValue>	TOK_CLOSE
+%token <sValue>	TOK_COMPRESS
+%token <sValue>	TOK_SPLIT
 
 %type <iValue> boolpar timeint
 %type <sValue> ident szparam ident_special szparam_special
@@ -63,9 +66,10 @@ optsemicolon:
 
 debugcommand:
 	shutdown_crash_token
-	| TOK_MALSTATS		{ pParser->m_tCmd.m_eCommand = Cmd_e::MALLOC_STATS; }
-	| TOK_MALTRIM		{ pParser->m_tCmd.m_eCommand = Cmd_e::MALLOC_TRIM; }
-	| TOK_PROCDUMP  	{ pParser->m_tCmd.m_eCommand = Cmd_e::PROCDUMP; }
+	| TOK_MALSTATS	{ pParser->m_tCmd.m_eCommand = Cmd_e::MALLOC_STATS; }
+	| TOK_MALTRIM	{ pParser->m_tCmd.m_eCommand = Cmd_e::MALLOC_TRIM; }
+	| TOK_PROCDUMP  { pParser->m_tCmd.m_eCommand = Cmd_e::PROCDUMP; }
+	| TOK_CLOSE		{ pParser->m_tCmd.m_eCommand = Cmd_e::CLOSE; }
 	| setgdb
 	| sleep			{ pParser->m_tCmd.m_eCommand = Cmd_e::SLEEP; }
 	| TOK_TASKS		{ pParser->m_tCmd.m_eCommand = Cmd_e::TASKS; }
@@ -74,14 +78,16 @@ debugcommand:
 	| merge			{ pParser->m_tCmd.m_eCommand = Cmd_e::MERGE; }
 	| drop			{ pParser->m_tCmd.m_eCommand = Cmd_e::DROP; }
 	| files			{ pParser->m_tCmd.m_eCommand = Cmd_e::FILES; }
+	| compress		{ pParser->m_tCmd.m_eCommand = Cmd_e::COMPRESS; }
+	| split			{ pParser->m_tCmd.m_eCommand = Cmd_e::SPLIT; }
 	;
 
 //////////////////////////////////////////////////////////////////////////
 
 ident_special:
 	TOK_IDENT | TOK_DEBUG | TOK_SHUTDOWN | TOK_CRASH | TOK_TOKEN | TOK_MALSTATS | TOK_MALTRIM
-	| TOK_PROCDUMP | TOK_SETGDB | TOK_SLEEP | TOK_SYSTHREADS | TOK_SCHED | TOK_MERGE | TOK_FILES
-	| TOK_STATUS
+	| TOK_PROCDUMP | TOK_CLOSE | TOK_SETGDB | TOK_SLEEP | TOK_SYSTHREADS | TOK_SCHED | TOK_MERGE | TOK_FILES
+	| TOK_STATUS | TOK_COMPRESS | TOK_SPLIT
 	;
 
 ident:
@@ -165,7 +171,7 @@ into:
 	| TOK_INTO
 	;
 
-// command 'drop chunk X [from] <IDX> [option...]'
+// command 'drop [chunk] X [from] <IDX> [option...]'
 drop:
 	TOK_DROP chunk TOK_CONST_INT from ident opt_option_clause
 	{
@@ -185,7 +191,28 @@ files:
 	{
 		auto& tCmd = pParser->m_tCmd;
 		tCmd.m_sParam = pParser->StrFromBlob ($2);
-       	}
+	}
+	;
+
+// command 'compress <IDX> [chunk] N [option...]'
+compress:
+	TOK_COMPRESS ident chunk TOK_CONST_INT opt_option_clause
+	{
+		auto& tCmd = pParser->m_tCmd;
+		tCmd.m_sParam = pParser->StrFromBlob ($2);
+		tCmd.m_iPar1 = $4;
+	}
+	;
+
+// command 'split <IDX> [chunk] N on @uservar [option...]'
+split:
+	TOK_SPLIT ident chunk TOK_CONST_INT TOK_ON TOK_USERVAR opt_option_clause
+	{
+		auto& tCmd = pParser->m_tCmd;
+		tCmd.m_sParam = pParser->StrFromBlob ($2);
+		tCmd.m_sParam2 = pParser->StrFromBlob ($6);
+		tCmd.m_iPar1 = $4;
+	}
 	;
 
 

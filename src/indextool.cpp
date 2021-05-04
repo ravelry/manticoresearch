@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -21,6 +21,80 @@
 #include <time.h>
 
 static CSphString g_sDataDir;
+static bool g_bConfigless = false;
+
+static bool IsConfigless()
+{
+	return g_bConfigless;
+}
+
+static CSphString GetPathForNewIndex ( const CSphString & sIndexName )
+{
+	CSphString sRes;
+	if ( g_sDataDir.Length() && !g_sDataDir.Ends("/") && !g_sDataDir.Ends("\\") )
+		sRes.SetSprintf ( "%s/%s", g_sDataDir.cstr(), sIndexName.cstr() );
+	else
+		sRes.SetSprintf ( "%s%s", g_sDataDir.cstr(), sIndexName.cstr() );
+
+	return sRes;
+}
+
+void MakeRelativePath ( CSphString & sPath )
+{
+	bool bAbsolute = strchr ( sPath.cstr(), '/' ) || strchr ( sPath.cstr(), '\\' );
+	if ( !bAbsolute )
+		sPath.SetSprintf ( "%s/%s/%s", g_sDataDir.cstr(), sPath.cstr(), sPath.cstr() );
+}
+
+class FilenameBuilder_c : public FilenameBuilder_i
+{
+public:
+					FilenameBuilder_c ( const char * szIndex );
+
+	CSphString		GetFullPath ( const CSphString & sName ) const final;
+
+private:
+	const CSphString		m_sIndex;
+};
+
+
+FilenameBuilder_c::FilenameBuilder_c ( const char * szIndex )
+	: m_sIndex ( szIndex )
+{}
+
+
+CSphString FilenameBuilder_c::GetFullPath ( const CSphString & sName ) const
+{
+	if ( !IsConfigless() || !sName.Length() )
+		return sName;
+
+	CSphString sPath = GetPathForNewIndex ( m_sIndex );
+
+	StrVec_t dFiles;
+	StringBuilder_c sNewValue = " ";
+
+	// we assume that path has been stripped before
+	StrVec_t dValues = sphSplit ( sName.cstr(), sName.Length(), " \t," );
+	for ( auto & i : dValues )
+	{
+		if ( !i.Length() )
+			continue;
+
+		CSphString & sNew = dFiles.Add();
+		sNew.SetSprintf ( "%s/%s", sPath.cstr(), i.Trim().cstr() );
+		sNewValue << sNew;
+	}
+
+	return sNewValue.cstr();
+}
+
+static FilenameBuilder_i * CreateFilenameBuilder ( const char * szIndex )
+{
+	if ( IsConfigless() )
+		return new FilenameBuilder_c(szIndex);
+
+	return nullptr;
+}
 
 void StripStdin ( const char * sIndexAttrs, const char * sRemoveElements )
 {
@@ -470,7 +544,7 @@ bool MergeIDF ( const CSphString & sFilename, const StrVec_t & dFiles, CSphStrin
 
 //////////////////////////////////////////////////////////////////////////
 static const DWORD META_HEADER_MAGIC = 0x54525053;    ///< my magic 'SPRT' header
-static const DWORD META_VERSION = 17;
+static const DWORD META_VERSION = 18;
 
 const char * AttrType2Str ( ESphAttr eAttrType )
 {
@@ -503,20 +577,35 @@ const char * AttrType2Str ( ESphAttr eAttrType )
 	return "SPH_ATTR_NONE";
 }
 
-static void InfoMetaSchemaColumn ( CSphReader &rdInfo,  DWORD uVersion )
+static void InfoMetaSchemaColumn ( CSphReader & rdInfo, DWORD uVersion )
 {
 	CSphString sName = rdInfo.GetString ();
 	fprintf ( stdout, "%s", sName.cstr());
 	fprintf ( stdout, " %s", AttrType2Str ((ESphAttr)rdInfo.GetDword ()) );
 
-	if ( uVersion<57 ) // m_uVersion for searching
-	{
-		fprintf ( stdout, " (rowitem %d)", rdInfo.GetDword () );
-		fprintf ( stdout, " %d/", rdInfo.GetDword () );
-		fprintf ( stdout, "%d", rdInfo.GetDword () );
-	}
+	rdInfo.GetDword (); // ignore rowitem
+	fprintf ( stdout, " offset %d/", rdInfo.GetDword () );
+	fprintf ( stdout, "count %d", rdInfo.GetDword () );
 	fprintf ( stdout, " payload %d", rdInfo.GetByte () );
+
+	if ( uVersion>=61 )
+		fprintf ( stdout, " attr flags %d", rdInfo.GetDword() );
 }
+
+
+static void InfoMetaSchemaField ( CSphReader & rdInfo, DWORD uVersion )
+{
+	if ( uVersion>=57  )
+	{
+		CSphString sName = rdInfo.GetString();
+		fprintf ( stdout, "%s", sName.cstr() );
+		fprintf ( stdout, " field flags %d", rdInfo.GetDword() );
+		fprintf ( stdout, " payload %d", rdInfo.GetByte () );
+	}
+	else
+		InfoMetaSchemaColumn ( rdInfo, uVersion );
+}
+
 
 void InfoMetaSchema ( CSphReader &rdMeta, DWORD uVersion )
 {
@@ -527,7 +616,7 @@ void InfoMetaSchema ( CSphReader &rdMeta, DWORD uVersion )
 	for ( int i = 0; i<iNumFields; ++i )
 	{
 		fprintf ( stdout, "\n%02d. ", i + 1 );
-		InfoMetaSchemaColumn ( rdMeta, uVersion );
+		InfoMetaSchemaField ( rdMeta, uVersion );
 	}
 
 	int iNumAttrs = rdMeta.GetDword ();
@@ -535,7 +624,7 @@ void InfoMetaSchema ( CSphReader &rdMeta, DWORD uVersion )
 	for ( int i = 0; i<iNumAttrs; i++ )
 	{
 		fprintf ( stdout, "\n%02d. ", i + 1 );
-		InfoMetaSchemaColumn ( rdMeta, 0 );
+		InfoMetaSchemaColumn ( rdMeta, uVersion );
 	}
 }
 
@@ -835,11 +924,15 @@ void ApplyKilllists ( CSphConfig & hConf )
 				continue;
 			}
 
-			if ( !pIndex->Prealloc ( false, nullptr ) )
+			StrVec_t dWarnings;
+			if ( !pIndex->Prealloc ( false, nullptr, dWarnings ) )
 			{
 				fprintf ( stdout, "WARNING: unable to prealloc index %s: %s\n", tIndex.m_sName.cstr(), sError.cstr() );
 				continue;
 			}
+
+			for ( const auto & i : dWarnings )
+				fprintf ( stdout, "WARNING: index %s: %s\n", tIndex.m_sName.cstr(), i.cstr() );
 
 			tIndex.m_nDocs = pIndex->GetStats().m_iTotalDocuments;
 		}
@@ -1038,6 +1131,7 @@ bool ReadJsonConfig ( const CSphString & sConfigPath, CSphConfig & hConf, CSphSt
 		if ( !i.FetchStrItem ( sType, "type", sError ) )
 			return false;
 
+		MakeRelativePath ( sPath );
 		tSec.AddEntry ( "path", sPath.cstr() );
 		tSec.AddEntry ( "type", sType.cstr() );
 		tSec.AddEntry ( "from_json", "1" );
@@ -1071,6 +1165,8 @@ static bool LoadJsonConfig ( CSphConfig & hConf, const CSphString & sConfigFile 
 		return false;
 	}
 
+	g_bConfigless = true;
+
 	CSphString sConfigPath;
 	sConfigPath.SetSprintf ( "%s/manticore.json", g_sDataDir.cstr() );
 	if ( !ReadJsonConfig ( sConfigPath, hConf, sError ) )
@@ -1079,6 +1175,36 @@ static bool LoadJsonConfig ( CSphConfig & hConf, const CSphString & sConfigFile 
 	return true;
 }
 
+static CSphIndex * CreateIndex ( CSphConfig & hConf, const CSphString & sIndex, bool bDictKeywords, bool bRotate, CSphString & sError )
+{
+	// don't expect complete index declarations from indexes created with CREATE TABLE
+	bool bFromJson = !!hConf["index"][sIndex]("from_json");
+
+	if ( hConf["index"][sIndex]("type") && hConf["index"][sIndex]["type"]=="rt" )
+	{
+		CSphSchema tSchema;
+		if ( bFromJson || sphRTSchemaConfigure ( hConf["index"][sIndex], tSchema, sError, false ) )
+			return sphCreateIndexRT ( tSchema, sIndex.cstr(), 32*1024*1024, hConf["index"][sIndex]["path"].cstr(), bDictKeywords );
+	} else
+	{
+		StringBuilder_c tPath;
+		tPath << hConf["index"][sIndex]["path"] << ( bRotate ? ".tmp" : nullptr );
+		return sphCreateIndexPhrase ( sIndex.cstr(), tPath.cstr() );
+	}
+
+	return nullptr;
+}
+
+static void PreallocIndex ( const CSphString & sIndex, bool bStripPath, CSphIndex * pIndex )
+{
+	CSphScopedPtr<FilenameBuilder_i> pFilenameBuilder ( CreateFilenameBuilder ( sIndex.cstr() ) );
+	StrVec_t dWarnings;
+	if ( !pIndex->Prealloc ( bStripPath, pFilenameBuilder.Ptr(), dWarnings ) )
+		sphDie ( "index '%s': prealloc failed: %s\n", sIndex.cstr(), pIndex->GetLastError().cstr() );
+
+	for ( const auto & i : dWarnings )
+		fprintf ( stdout, "WARNING: index %s: %s\n", sIndex.cstr(), i.cstr() );
+}
 
 int main ( int argc, char ** argv )
 {
@@ -1108,6 +1234,7 @@ int main ( int argc, char ** argv )
 	bool bQuiet = false;
 	bool bRotate = false;
 	bool bCheckIdDups = false;
+	int iCheckChunk = -1;
 
 	int i;
 	for ( i=1; i<argc; i++ )
@@ -1148,6 +1275,10 @@ int main ( int argc, char ** argv )
 			sIndex = argv[++i];
 			if ( (i+1)<argc && argv[i+1][0]!='-' )
 				sFoldFile = argv[++i];
+		}
+		OPT1 ( "--check-disk-chunk" )
+		{
+			iCheckChunk = strtoll ( argv[++i], NULL, 10 ); continue;
 		}
 
 		// options with 2 args
@@ -1330,30 +1461,15 @@ int main ( int argc, char ** argv )
 		if ( hConf["index"][sIndex].Exists ( "dict" ) )
 			bDictKeywords = ( hConf["index"][sIndex]["dict"]!="crc" );
 
-		// don't expect complete index declarations from indexes created with CREATE TABLE
-		bool bFromJson = !!hConf["index"][sIndex]("from_json");
-
-		if ( hConf["index"][sIndex]("type") && hConf["index"][sIndex]["type"]=="rt" )
-		{
-			CSphSchema tSchema;
-			if ( bFromJson || sphRTSchemaConfigure ( hConf["index"][sIndex], tSchema, sError, false ) )
-				pIndex = sphCreateIndexRT ( tSchema, sIndex.cstr(), 32*1024*1024, hConf["index"][sIndex]["path"].cstr(), bDictKeywords );
-		} else
-		{
-			StringBuilder_c tPath;
-			tPath << hConf["index"][sIndex]["path"] << ( bRotate ? ".tmp" : nullptr );
-			pIndex = sphCreateIndexPhrase ( sIndex.cstr(), tPath.cstr() );
-		}
+		pIndex = CreateIndex ( hConf, sIndex, bDictKeywords, bRotate, sError );
 
 		if ( !pIndex )
 			sphDie ( "index '%s': failed to create (%s)", sIndex.cstr(), sError.cstr() );
 
 		if ( g_eCommand==IndextoolCmd_e::CHECK )
-			pIndex->SetDebugCheck ( bCheckIdDups );
+			pIndex->SetDebugCheck ( bCheckIdDups, iCheckChunk );
 
-		CSphString sWarn;
-		if ( !pIndex->Prealloc ( bStripPath, nullptr ) )
-			sphDie ( "index '%s': prealloc failed: %s\n", sIndex.cstr(), pIndex->GetLastError().cstr() );
+		PreallocIndex ( sIndex, bStripPath, pIndex );
 
 		if ( g_eCommand==IndextoolCmd_e::MORPH )
 			break;
@@ -1433,9 +1549,12 @@ int main ( int argc, char ** argv )
 				if ( !pIndex )
 					sphDie ( "index '%s': failed to create (%s)", sIndex.cstr(), sError.cstr() );
 
-				CSphString sWarn;
-				if ( !pIndex->Prealloc ( bStripPath, nullptr ) )
+				StrVec_t dWarnings;
+				if ( !pIndex->Prealloc ( bStripPath, nullptr, dWarnings ) )
 					sphDie ( "index '%s': prealloc failed: %s\n", sIndex.cstr(), pIndex->GetLastError().cstr() );
+
+				for ( const auto & i : dWarnings )
+					fprintf ( stdout, "WARNING: index %s: %s\n", sIndex.cstr(), i.cstr() );
 
 				pIndex->Preread();
 			} else

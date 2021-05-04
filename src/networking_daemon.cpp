@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -52,6 +52,9 @@ CSphWakeupEvent::~CSphWakeupEvent ()
 
 void CSphWakeupEvent::Wakeup ()
 {
+	if ( !IsPollable() )
+		return;
+
 	if ( FireEvent () )
 		return;
 	int iErrno = PollableErrno ();
@@ -108,10 +111,9 @@ class CSphNetLoop::Impl_c
 
 	CSphNetLoop *					m_pParent; // that is weak ref
 
-	CSphVector<ISphNetAction *> 	m_dWorkInternal;
+	CSphVector<ISphNetAction *> 	m_dWorkInternal GUARDED_BY ( NetPoollingThread );
 	CSphVector<ISphNetAction *>		m_dWorkExternal GUARDED_BY ( m_tExtLock );
-	volatile bool					m_bGotExternal = false;
-	CSphWakeupEvent *				m_pWakeup = nullptr;
+	WakeupEventRefPtr_c				m_pWakeup;
 	CSphMutex						m_tExtLock;
 	LoopProfiler_t					m_tPrf;
 	CSphScopedPtr<NetPooller_c>		m_pPoll;
@@ -121,18 +123,17 @@ class CSphNetLoop::Impl_c
 		: m_pParent ( pParent )
 		, m_pPoll { new NetPooller_c ( 1000 )}
 	{
-		CSphScopedPtr<CSphWakeupEvent> pWakeup ( new CSphWakeupEvent );
-		if ( pWakeup->IsPollable() )
+		m_pWakeup = new CSphWakeupEvent;
+		if ( m_pWakeup->IsPollable() )
 		{
-			m_pWakeup = pWakeup.LeakPtr ();
 			sphLogDebugvv ( "Setup wakeup as %d, %d", m_pWakeup->m_iSock, (int) m_pWakeup->m_iTimeoutTimeUS );
 			m_pPoll->SetupEvent ( m_pWakeup );
 		} else
-			sphWarning ( "net-loop use timeout due to %s", pWakeup->m_sError.cstr () );
+			sphWarning ( "net-loop use timeout due to %s", m_pWakeup->m_sError.cstr () );
 
 		for ( const auto & dListener : dListeners )
 		{
-			auto * pCur = new NetActionAccept_c ( dListener );
+			NetPoolEventRefPtr_c pCur { new NetActionAccept_c ( dListener ) };
 			sphLogDebugvv ( "setup listener as %d, %d", pCur->m_iSock, (int) pCur->m_iTimeoutTimeUS );
 			m_pPoll->SetupEvent ( pCur );
 		}
@@ -141,7 +142,7 @@ class CSphNetLoop::Impl_c
 		m_dWorkInternal.Reserve ( 1000 );
 	}
 
-	inline ListenTaskInfo_t* pMyInfo()
+	static inline ListenTaskInfo_t* pMyInfo()
 	{
 #ifndef NDEBUG
 		auto pRes = myinfo::ref<ListenTaskInfo_t>();
@@ -162,7 +163,10 @@ class CSphNetLoop::Impl_c
 				pWork->NetLoopDestroying ();
 		}
 
-		m_pPoll->ProcessAll( [] ( NetPollEvent_t * pWork ) { ((ISphNetAction *) pWork)->NetLoopDestroying (); } );
+		m_pPoll->ProcessAll( [] ( NetPollEvent_t * pWork ) REQUIRES ( NetPoollingThread )
+		{
+			((ISphNetAction *) pWork)->NetLoopDestroying ();
+		});
 	}
 
 	// add actions planned by jobs
@@ -170,10 +174,14 @@ class CSphNetLoop::Impl_c
 	{
 		m_tPrf.StartExt ();
 		ScopedMutex_t tExtLock ( m_tExtLock );
-		m_tPrf.m_iPerfExt = m_dWorkExternal.GetLength ();
-		assert ( m_dWorkInternal.IsEmpty ());
-		m_dWorkInternal.SwapData ( m_dWorkExternal );
-		m_bGotExternal = false;
+		auto iExtLen = m_dWorkExternal.GetLength();
+		m_tPrf.m_iPerfExt = iExtLen;
+		pMyInfo ()->m_uWorks = iExtLen;
+		if ( iExtLen )
+		{
+			assert ( m_dWorkInternal.IsEmpty ());
+			m_dWorkInternal.SwapData ( m_dWorkExternal );
+		}
 		m_tPrf.EndTask ();
 	}
 
@@ -230,11 +238,6 @@ class CSphNetLoop::Impl_c
 			pMyInfo ()->m_eThdState = NetloopState_e::PROCESS_READY;
 			++pMyInfo ()->m_uTick;
 
-			// add actions planned by jobs
-			if ( m_bGotExternal )
-				PickNewActions ();
-			pMyInfo ()->m_uWorks = m_dWorkInternal.GetLength ();
-
 			// handle events and collect stats
 			m_tPrf.StartTick();
 			sphLogDebugv ( "got events=%d, tick=%u, interrupted=%d", m_pPoll->GetNumOfReady (), pMyInfo ()->m_uTick, !!sphInterrupted () );
@@ -243,12 +246,20 @@ class CSphNetLoop::Impl_c
 
 			pMyInfo ()->m_eThdState = NetloopState_e::PROCESS_NEW;
 
+			// add actions planned by jobs
+			PickNewActions ();
+
 			// setup or refresh handlers
 			m_tPrf.StartNext();
 			m_dWorkInternal.Apply ( [&] ( ISphNetAction * pWork ) REQUIRES ( NetPoollingThread )
 			{
-				assert ( pWork && pWork->m_iSock>=0 );
-				m_pPoll->SetupEvent ( pWork );
+				assert ( pWork );
+				if ( pWork->m_uNetEvents==NetPollEvent_t::CLOSED )
+					m_pPoll->RemoveEvent ( pWork );
+				else {
+					assert ( pWork->m_iSock>=0 );
+					m_pPoll->SetupEvent ( pWork );
+				}
 			});
 			m_dWorkInternal.Resize ( 0 );
 			m_tPrf.EndTask();
@@ -290,8 +301,7 @@ class CSphNetLoop::Impl_c
 	void Kick ()
 	{
 		sphLogDebugvv ( "Kick" );
-		if ( m_pWakeup )
-			m_pWakeup->Wakeup ();
+		m_pWakeup->Wakeup ();
 	}
 
 	void StopNetLoop ()
@@ -306,13 +316,14 @@ class CSphNetLoop::Impl_c
 		sphLogDebug ( "StopNetLoop() succeeded" );
 	}
 
-	void AddAction ( ISphNetAction * pElem )
+	void AddAction ( ISphNetAction * pElem ) EXCLUDES ( NetPoollingThread )
 	{
 		sphLogDebugvv ( "AddAction action as %d, events %d, timeout %d",
 				pElem->m_iSock, pElem->m_uNetEvents, (int) pElem->m_iTimeoutTimeUS );
-		ScopedMutex_t tExtLock ( m_tExtLock );
-		m_dWorkExternal.Add ( pElem );
-		m_bGotExternal = true;
+		{
+			ScopedMutex_t tExtLock ( m_tExtLock );
+			m_dWorkExternal.Add ( pElem );
+		}
 		Kick();
 	}
 
@@ -349,7 +360,7 @@ void CSphNetLoop::StopNetLoop()
 	m_pImpl->StopNetLoop ();
 };
 
-void CSphNetLoop::AddAction ( ISphNetAction * pElem )
+void CSphNetLoop::AddAction ( ISphNetAction * pElem ) EXCLUDES ( NetPoollingThread )
 {
 	assert ( m_pImpl );
 	m_pImpl->AddAction ( pElem );
@@ -374,6 +385,9 @@ class SockWrapper_c::Impl_c final : public ISphNetAction
 	int64_t	m_iWriteTimeoutUS;
 	int64_t m_iReadTimeoutUS;
 
+	int64_t m_iTotalSent = 0;
+	int64_t m_iTotalReceived = 0;
+
 	Impl_c ( int iSocket, CSphNetLoop * pNetLoop );
 	~Impl_c () final;
 
@@ -392,9 +406,14 @@ class SockWrapper_c::Impl_c final : public ISphNetAction
 	int SockPollClassic ( int64_t tmTimeUntilUs, bool bWrite );
 	int SockPollNetloop ( int64_t tmTimeUntilUs, bool bWrite );
 
+	int64_t GetTotalSent () const;
+	int64_t GetTotalReceived () const;
+
+	void ParentDestroying();
+
 public:
 	void Process ( DWORD uGotEvents, CSphNetLoop * ) REQUIRES ( NetPoollingThread ) final;
-	void NetLoopDestroying () final;
+	void NetLoopDestroying () REQUIRES ( NetPoollingThread ) final;
 };
 
 SockWrapper_c::Impl_c::Impl_c ( int iSocket, CSphNetLoop * pNetLoop )
@@ -406,25 +425,35 @@ SockWrapper_c::Impl_c::Impl_c ( int iSocket, CSphNetLoop * pNetLoop )
 	SafeAddRef ( pNetLoop );
 }
 
-SockWrapper_c::Impl_c::~Impl_c ()
+void SockWrapper_c::Impl_c::ParentDestroying ()
 {
-	// unlink _before_ closing the sock - since closing may cause event which we don't want to deal with.
-	NetPooller_c::Unlink ( this );
-
 	if ( m_iSock>=0 )
 	{
-		sphLogDebugv ( "closing sock=%d", m_iSock );
+		sphLogDebugv ( "Destroying and closing sock=%d", m_iSock );
 		sphSockClose ( m_iSock );
+
+		if ( IsLinked () && m_pNetLoop )
+		{
+			m_uNetEvents = NetPollEvent_t::CLOSED;
+			m_pNetLoop->AddAction ( this );
+		}
 	}
 }
 
+SockWrapper_c::Impl_c::~Impl_c ()
+{
+	sphLogDebugv ( "SockWrapper_c::Impl_c::~Impl_c (); sent " INT64_FMT ", received " INT64_FMT, m_iTotalSent, m_iTotalReceived);
+}
+
 // Netpool is already stopped, so it is th-safe here.
-void SockWrapper_c::Impl_c::NetLoopDestroying ()
+void SockWrapper_c::Impl_c::NetLoopDestroying () REQUIRES ( NetPoollingThread )
 {
 	sphLogDebug ( "SockWrapper_c::Impl_c::NetLoopDestroying ()" );
 
 	// unlink here ensures we're not refer anyway to netpool (if any), and so, will not check it again in d-tr
-	NetPooller_c::Unlink ( this );
+	// however initial placement of the socket implies it is not linked at all, and so, need to check first.
+	if ( IsLinked() )
+		NetPooller_c::Unlink ( this );
 
 	// if we're not finished - setting m_pNetLoop to null will just switch us to classic blocking polling.
 	m_pNetLoop = nullptr;
@@ -450,8 +479,10 @@ void SockWrapper_c::Impl_c::EngageWaiterAndYield ( int64_t tmTimeUntilUs )
 
 
 	// switch context (go to poll)
-	m_bEngaged.store ( true, std::memory_order_release );
-	Threads::CoYieldWith ( [this] { m_pNetLoop->AddAction ( this ); } );
+	Threads::CoYieldWith ( [this] {
+		m_bEngaged.store ( true, std::memory_order_release );
+		m_pNetLoop->AddAction ( this );
+	});
 	m_bEngaged.store ( false, std::memory_order_release );
 
 	// here we switched back by call m_fnWakeFromPoll.
@@ -486,6 +517,12 @@ int SockWrapper_c::Impl_c::SockPollClassic ( int64_t tmTimeUntilUs, bool bWrite 
 }
 
 // netloop version - yield rescheduling and yield
+// Command flow:
+// EngageWaiterAndYield stores curent context into continuation, then suspend it and call AddAction to setup polling.
+// Net polling thread then register our socket in the poll/epoll/kqueue and poll it.
+// when an event fired, or timeout happened, it calls 'process', which, in turn,
+// schedules our continuation. So, we returned back from EngageWaiter (most probably already in another thread), and
+// process events.
 int SockWrapper_c::Impl_c::SockPollNetloop ( int64_t tmTimeUntilUs, bool bWrite )
 {
 	m_uNetEvents = NetPollEvent_t::ONCE | ( bWrite ? NetPollEvent_t::WRITE : NetPollEvent_t::READ );
@@ -510,13 +547,19 @@ int SockWrapper_c::Impl_c::SockPoll ( int64_t tmTimeUntilUs, bool bWrite )
 
 int64_t SockWrapper_c::Impl_c::SockSend ( const char * pBuf, int64_t iLeftBytes )
 {
-	return sphSockSend ( m_iSock, pBuf, iLeftBytes );
+	auto iRes = sphSockSend ( m_iSock, pBuf, iLeftBytes );
+	if ( iRes>0 )
+		m_iTotalSent += iRes;
+	return iRes;
 }
 
 int64_t SockWrapper_c::Impl_c::SockRecv ( char * pBuf, int64_t iLeftBytes )
 {
 	sphLogDebugvv ( "SockRecv %d, for " INT64_FMT " bytes", m_iSock, iLeftBytes );
-	return sphSockRecv ( m_iSock, pBuf, iLeftBytes );
+	auto iRes = sphSockRecv ( m_iSock, pBuf, iLeftBytes );
+	if ( iRes>0 )
+		m_iTotalReceived += iRes;
+	return iRes;
 }
 
 int64_t SockWrapper_c::Impl_c::GetTimeoutUS () const
@@ -539,17 +582,29 @@ void SockWrapper_c::Impl_c::SetWTimeoutUS ( int64_t iTimeoutUS )
 	m_iWriteTimeoutUS = iTimeoutUS;
 }
 
+int64_t SockWrapper_c::Impl_c::GetTotalSent() const
+{
+	return m_iTotalSent;
+}
+
+int64_t SockWrapper_c::Impl_c::GetTotalReceived () const
+{
+	return m_iTotalReceived;
+}
+
 /////////////////////////////////////////////////////////////////////////////
 /// SockWrapper_c frontend implementation
 /////////////////////////////////////////////////////////////////////////////
 
 SockWrapper_c::SockWrapper_c ( int iSocket, CSphNetLoop * pNetLoop )
-		: m_pImpl ( new Impl_c ( iSocket, pNetLoop ) )
+		: m_pImpl { new Impl_c ( iSocket, pNetLoop ) }
 {}
 
 SockWrapper_c::~SockWrapper_c ()
 {
-	SafeDelete ( m_pImpl );
+	assert ( m_pImpl );
+	m_pImpl->ParentDestroying();
+	SafeRelease ( m_pImpl );
 }
 
 int64_t SockWrapper_c::SockSend ( const char * pData, int64_t iLen )
@@ -592,6 +647,18 @@ void SockWrapper_c::SetWTimeoutUS ( int64_t iTimeoutUS )
 {
 	assert ( m_pImpl );
 	m_pImpl->SetWTimeoutUS ( iTimeoutUS );
+}
+
+int64_t SockWrapper_c::GetTotalSent() const
+{
+	assert ( m_pImpl );
+	return m_pImpl->GetTotalSent();
+}
+
+int64_t SockWrapper_c::GetTotalReceived () const
+{
+	assert ( m_pImpl );
+	return m_pImpl->GetTotalReceived ();
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -682,9 +749,7 @@ static int SyncSockRead ( SockWrapper_c * pSock, BYTE* pBuf, int iLen, int iSpac
 
 	int64_t tmMaxTimer = sphMicroTimer ()+Max ( S2US, pSock->GetTimeoutUS () ); // in microseconds
 
-	int iErr = 0;
-	int iRes = -1;
-
+	int iErr, iRes;
 	while ( iLen>0 )
 	{
 		int64_t tmNextStopUs = tmMaxTimer;

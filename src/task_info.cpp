@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2021, Manticore Software LTD (https://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -15,26 +15,31 @@ namespace { // static
 	const size_t NINFOS = 256;
 	RenderFnPtr pInfos[NINFOS] = { nullptr };
 	std::atomic<int> dCounters[NINFOS];
-	BYTE uFreeInfoSlot = 1; // 0-th slot is a mark of 'invalid'
+	std::atomic<BYTE> uFreeInfoSlot {1}; // 0-th slot is a mark of 'invalid'
 }
 
 BYTE RegisterRenderer ( RenderFnPtr pFunc )
 {
-	pInfos[uFreeInfoSlot] = pFunc;
-	if ( uFreeInfoSlot==1 ) // that is first one
-		for ( auto & i : dCounters )
-			i.store ( 0, std::memory_order_relaxed );
-	return uFreeInfoSlot++;
+	BYTE uRender = uFreeInfoSlot.fetch_add ( 1, std::memory_order_relaxed );
+	pInfos[uRender] = pFunc;
+	dCounters[uRender].store ( 0 );
+	return uRender;
 }
 
 void internal_myinfo::RefCountInc ( BYTE eType )
 {
+	if ( eType >= uFreeInfoSlot )
+		sphWarning ( "Wrong RefCountInc slot! type=%d, free slot = %d", eType, uFreeInfoSlot.load() );
+
 	assert ( eType<uFreeInfoSlot );
 	dCounters[eType].fetch_add ( 1, std::memory_order_relaxed );
 }
 
 void internal_myinfo::RefCountDec ( BYTE eType )
 {
+	if ( eType>=uFreeInfoSlot )
+		sphWarning ( "Wrong RefCountDec slot! type=%d, free slot = %d", eType, uFreeInfoSlot.load () );
+
 	assert ( eType<uFreeInfoSlot );
 	dCounters[eType].fetch_sub ( 1, std::memory_order_relaxed );
 }
@@ -48,8 +53,8 @@ int myinfo::Count ( BYTE eType )
 int myinfo::CountAll ()
 {
 	int iRes = 0;
-	for ( const auto & i : dCounters )
-		iRes += i.load ( std::memory_order_relaxed );
+	for ( int i = 1, iLast = uFreeInfoSlot.load ( std::memory_order_relaxed ); i<iLast; ++i )
+		iRes += dCounters[i].load ( std::memory_order_relaxed );
 	return iRes;
 }
 
@@ -220,9 +225,9 @@ Threads::Handler myinfo::OwnMini ( Threads::Handler fnHandler )
 // returns ClientTaskInfo_t::m_iDistThreads
 int myinfo::DistThreads()
 {
-	auto pConn = HazardGetClient ();
-	if ( pConn )
-		return pConn->m_iDistThreads;
+	auto pNode = HazardGetClient ();
+	if ( pNode )
+		return pNode->m_iDistThreads;
 
 	sphWarning ( "internal error: myinfo::DistThreads () invoked with empty tls!" );
 	return 0;
@@ -241,9 +246,9 @@ void myinfo::SetDistThreads ( int iValue )
 // returns ClientTaskInfo_t::m_iThrottlingPeriod
 int myinfo::ThrottlingPeriodMS()
 {
-	auto pConn = HazardGetClient ();
-	if ( pConn )
-		return pConn->m_iThrottlingPeriod;
+	auto pNode = HazardGetClient ();
+	if ( pNode )
+		return pNode->m_iThrottlingPeriod;
 
 	sphWarning ( "internal error: myinfo::ThrottlingPeriodMS () invoked with empty tls!" );
 	return 0;
@@ -259,11 +264,32 @@ void myinfo::SetThrottlingPeriodMS ( int iValue )
 		sphWarning ( "internal error: myinfo::SetThrottlingPeriodMS () invoked with empty tls!" );
 }
 
+// returns ClientTaskInfo_t::m_iDesiredStack
+int myinfo::DesiredStack ()
+{
+	auto pNode = HazardGetClient ();
+	if ( pNode )
+		return pNode->m_iDesiredStack;
+
+	sphWarning ( "internal error: myinfo::DesiredStack () invoked with empty tls!" );
+	return -1;
+}
+
+// set ClientTaskInfo_t::m_iDistThreads
+void myinfo::SetDesiredStack ( int iValue )
+{
+	auto pNode = HazardGetClient ();
+	if ( pNode )
+		pNode->m_iDesiredStack = iValue;
+	else
+		sphWarning ( "internal error: myinfo::SetDesiredStack () invoked with empty tls!" );
+}
+
 int myinfo::ConnID ()
 {
-	auto pConn = HazardGetClient();
-	if ( pConn )
-		return pConn->m_iConnID;
+	auto pNode = HazardGetClient();
+	if ( pNode )
+		return pNode->m_iConnID;
 
 	sphWarning ( "internal error: myinfo::ConnID () invoked with empty tls!" );
 	return -1;

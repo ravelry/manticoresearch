@@ -2,11 +2,11 @@
 
 There are 2 different approaches to deal with indexes in Manticore:
 ## Online schema management (RT mode)
-Real-time mode requires no index definition in the configuration file and [data_dir](Server_settings/Searchd.md#data_dir) directive in `searchd` section. Index files are stored inside the data_dir.
+Real-time mode requires no index definition in the configuration file and [data_dir](../Server_settings/Searchd.md#data_dir) directive in `searchd` section. Index files are stored inside the data_dir.
 
 Replication is available only in this mode.
 
-In this mode you can use SQL commands like `CREATE TABLE`, `ALTER TABLE` and `DROP TABLE` to create and change index schema and drop it. This mode is especially useful for **real-time** and **percolate indexes**. 
+In this mode you can use SQL commands like `CREATE TABLE`, `ALTER TABLE` and `DROP TABLE` to create and change index schema and drop it. This mode is especially useful for **real-time** and **percolate indexes**.
 
 Index names are case insensitive in RT mode.
 
@@ -29,4 +29,4 @@ All index types are supported in this mode.
 | Plain       | no       | yes         |
 | Percolate   | yes      | yes         |
 | Distributed | yes      | yes         |
-| Template    | yes      | no          |
+| Template    | no       | yes         |

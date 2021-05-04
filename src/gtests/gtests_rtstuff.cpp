@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -15,6 +15,7 @@
 #include "sphinxint.h"
 #include "attribute.h"
 #include "sphinxrt.h"
+#include "sphinxsort.h"
 #include "searchdaemon.h"
 
 #include <gmock/gmock.h>
@@ -286,7 +287,8 @@ TEST_P ( RTN, WeightBoundary )
 	pIndex->SetTokenizer ( pTok->Clone ( SPH_CLONE_INDEX ) );
 	pIndex->SetDictionary ( pDict->Clone () );
 	pIndex->PostSetup ();
-	EXPECT_TRUE ( pIndex->Prealloc ( false, nullptr ) );
+	StrVec_t dWarnings;
+	EXPECT_TRUE ( pIndex->Prealloc ( false, nullptr, dWarnings ) );
 
 	CSphVector<int64_t> dMvas;
 	CSphString sFilter;
@@ -387,7 +389,8 @@ TEST_F ( RT, RankerFactors )
 	pIndex->SetTokenizer ( pTok ); // index will own this pair from now on
 	pIndex->SetDictionary ( sphCreateDictionaryCRC ( tDictSettings, NULL, pTok, "rt", false, 32, nullptr, sError ) );
 	pIndex->PostSetup ();
-	Verify ( pIndex->Prealloc ( false, nullptr ) );
+	StrVec_t dWarnings;
+	Verify ( pIndex->Prealloc ( false, nullptr, dWarnings ) );
 
 	CSphString sFilter;
 	CSphVector<int64_t> dMvas;
@@ -566,7 +569,8 @@ TEST_F ( RT, SendVsMerge )
 	pIndex->SetTokenizer ( pTok ); // index will own this pair from now on
 	pIndex->SetDictionary ( pDict );
 	pIndex->PostSetup ();
-	ASSERT_TRUE ( pIndex->Prealloc ( false, nullptr ) );
+	StrVec_t dWarnings;
+	ASSERT_TRUE ( pIndex->Prealloc ( false, nullptr, dWarnings ) );
 
 	CSphQuery tQuery;
 	AggrResult_t tResult;
@@ -597,6 +601,7 @@ TEST_F ( RT, SendVsMerge )
 			break;
 
 		pIndex->AddDocument ( pSrc->GetFields (), pSrc->m_tDocInfo, false, sFilter, NULL, dMvas, sError, sWarning, NULL );
+		sError = ""; // need to reset error message
 		if ( pSrc->m_iDocsCounter==350 )
 		{
 			pIndex->Commit ( NULL, NULL );

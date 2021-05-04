@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -350,6 +350,7 @@ TEST_F( TJson, parser )
 	f1:"3.15",
 	f2:"16777217.123"})", true ) );
 	ASSERT_TRUE ( testcase ( R"({"a":{"b":0,"c":0},"d":[]})") );
+	ASSERT_TRUE ( testcase ( R"({"a":{"b":0,"c":0},"d":[2,3333333333333333,45,-235]})" ) );
 }
 
 TEST_F ( TJson, accessor )
@@ -424,12 +425,12 @@ TEST_F ( TJson, bson_ScientificDouble )
 {
 	auto tst = Bsons ( R"([1e-5, 1e5, -1e-5, -1e5, 6.022e+3, 1.4738223E-1])" );
 
-	ASSERT_FLOAT_EQ ( tst[0].Double (), 0.00001 );
-	ASSERT_FLOAT_EQ ( tst[1].Double (), 100000.0 );
-	ASSERT_FLOAT_EQ ( tst[2].Double (), -0.00001 );
-	ASSERT_FLOAT_EQ ( tst[3].Double (), -100000.0 );
-	ASSERT_FLOAT_EQ ( tst[4].Double (), 6022.0 );
-	ASSERT_FLOAT_EQ ( tst[5].Double (), 0.14738223 );
+	ASSERT_DOUBLE_EQ ( tst[0].Double (), 0.00001 );
+	ASSERT_DOUBLE_EQ ( tst[1].Double (), 100000.0 );
+	ASSERT_DOUBLE_EQ ( tst[2].Double (), -0.00001 );
+	ASSERT_DOUBLE_EQ ( tst[3].Double (), -100000.0 );
+	ASSERT_DOUBLE_EQ ( tst[4].Double (), 6022.0 );
+	ASSERT_DOUBLE_EQ ( tst[5].Double (), 0.14738223 );
 }
 
 // test bson::String

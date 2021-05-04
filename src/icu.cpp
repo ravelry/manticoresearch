@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -56,14 +56,7 @@ static void ConfigureICU()
 
 #if USE_WINDOWS
 	if ( PathIsRelative(GET_ICU_DATA_DIR()) )
-	{
-		HMODULE hModule = GetModuleHandle(NULL);
-		CHAR szPath[MAX_PATH];
-		GetModuleFileName ( hModule, szPath, MAX_PATH );
-		PathRemoveFileSpec(szPath);
-
-		g_sICUDir.SetSprintf ( "%s\\%s", szPath, GET_ICU_DATA_DIR() );
-	}
+		g_sICUDir.SetSprintf ( "%s%s", GetPathOnly ( GetExecutablePath() ).cstr(), GET_ICU_DATA_DIR() );
 #endif
 
 	u_setDataDirectory ( g_sICUDir.cstr() );

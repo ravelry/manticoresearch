@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2011-2016, Andrew Aksyonoff
 // Copyright (c) 2011-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -196,6 +196,14 @@ struct JsonNode_t
 	ESphJsonType m_eType { JSON_TOTAL };	///< node type
 
 	inline int GetLength() const { return m_dChildren.m_iLen; }
+
+	JsonNode_t() = default;
+	explicit JsonNode_t ( ESphJsonType eType )
+	{
+		m_eType = eType;
+		m_sName.m_iLen = 0;
+		m_sValue.m_iLen = 0;
+	}
 
 };
 #define YYSTYPE JsonNode_t
@@ -666,7 +674,7 @@ public:
 		JSON_FOREACH ( j, tNode )
 		{
 			auto &dNode = m_dNodes[j];
-			WriteNode ( dNode );
+			WriteNode ( dNode, true );
 			uMask |= JsonKeyMask ( dNode.m_sName );
 		}
 		m_dBsonBuffer.Add ( JSON_EOF );
@@ -675,7 +683,7 @@ public:
 	}
 
 	// main proc which do whole magic over the topmost obj/array
-	bool WriteNode ( JsonNode_t &tNode )
+	bool WriteNode ( JsonNode_t &tNode, bool bNamed=false )
 	{
 		// convert int64 to int32, strings to numbers if needed
 		NumericFixup ( tNode );
@@ -690,7 +698,7 @@ public:
 		m_dBsonBuffer.Add ( eType );
 
 		// write key name if exists
-		if ( tNode.m_sName.m_iLen )
+		if ( bNamed && tNode.m_sName.m_iLen )
 			WriteKeyUnescaped ( tNode.m_sName );
 
 		// write nodes
@@ -722,7 +730,7 @@ public:
 			JSON_FOREACH ( j, tNode )
 			{
 				auto &dNode = m_dNodes[j];
-				WriteNode ( dNode );
+				WriteNode ( dNode, true );
 				uMask |= JsonKeyMask ( dNode.m_sName );
 			}
 			m_dBsonBuffer.Add ( JSON_EOF );
@@ -1697,7 +1705,7 @@ JsonObj_c JsonObj_c::GetBoolItem ( const char * szName, CSphString & sError, boo
 
 	if ( !tChild.IsBool() )
 	{
-		sError.SetSprintf ( R"("%s" property value should be an integer)", szName );
+		sError.SetSprintf ( R"("%s" property value should be a boolean)", szName );
 		return JsonNull;
 	}
 

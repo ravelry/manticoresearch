@@ -1,5 +1,5 @@
 #=============================================================================
-# Copyright 2019-2020, Manticore Software LTD (http://manticoresearch.com)
+# Copyright 2019-2021, Manticore Software LTD (https://manticoresearch.com)
 #
 # Distributed under the OSI-approved BSD License (the "License");
 # see accompanying file Copyright.txt for details.
@@ -50,17 +50,6 @@ ENDFOREACH ()
 
 # special to keep artifacts
 include (update_bundle)
-
-function ( FIND_CUSTOM_CONTEXT LEGEND BOOST_ROOT )
-	message(STATUS "${LEGEND} ${BOOST_ROOT}")
-	unset(Boost_CONTEXT_FOUND)
-	unset(Boost_CONTEXT_LIBRARY CACHE)
-	unset(Boost_FOUND)
-	set(Boost_NO_SYSTEM_PATHS ON)
-	find_package(Boost 1.61.0 COMPONENTS context QUIET)
-	set(Boost_CONTEXT_FOUND "${Boost_CONTEXT_FOUND}" PARENT_SCOPE)
-	set(Boost_VERSION "${Boost_VERSION}" PARENT_SCOPE)
-endfunction()
 
 function (FINALIZE_BOOST_CONTEXT LEGEND BOOSTROOT)
 	list(APPEND EXTRA_LIBRARIES Boost::context)
@@ -129,6 +118,37 @@ function(BUILD_BOOST WORKDIR)
 	endif ()
 endfunction()
 
+macro (boost_diag)
+	diag(Boost_VERSION)
+	diag(Boost_INCLUDE_DIRS)
+	diag(Boost_LIBRARY_DIRS)
+	diag(Boost_LIBRARIES)
+	diag(Boost_LIB_DIAGNOSTIC_DEFINITIONS)
+	diag(Boost_CONTEXT_FOUND)
+	diag(Boost_CONTEXT_LIBRARY)
+	diag(Boost_CONTEXT_LIBRARY_DEBUG)
+	diag(Boost_CONTEXT_LIBRARY_RELEASE)
+endmacro()
+
+function ( FIND_CUSTOM_CONTEXT LEGEND BOOSTROOT )
+	message(STATUS "${LEGEND} ${BOOSTROOT}")
+	unset(Boost_LIBRARY_DIRS CACHE)
+	unset(Boost_INCLUDE_DIRS CACHE)
+	unset(Boost_CONTEXT_LIBRARY CACHE)
+	unset(Boost_CONTEXT_LIBRARY_DEBUG CACHE)
+	unset(Boost_CONTEXT_LIBRARY_RELEASE CACHE)
+	unset(Boost_FOUND)
+	unset(Boost_CONTEXT_FOUND CACHE)
+	set(Boost_NO_SYSTEM_PATHS ON)
+	set(Boost_USE_MULTITHREADED ON)
+	set(Boost_USE_STATIC_LIBS ON)
+	set(Boost_USE_STATIC_RUNTIME ON)
+	find_package(Boost 1.61.0 COMPONENTS context)
+	set(Boost_CONTEXT_FOUND "${Boost_CONTEXT_FOUND}" PARENT_SCOPE)
+	set(Boost_VERSION "${Boost_VERSION}" PARENT_SCOPE)
+#	boost_diag()
+endfunction()
+
 set(Boost_USE_MULTITHREADED ON)
 set(Boost_USE_STATIC_LIBS ON)
 set(Boost_USE_STATIC_RUNTIME ON)
@@ -136,6 +156,7 @@ set(Boost_USE_STATIC_RUNTIME ON)
 
 find_package(Boost 1.61.0 COMPONENTS context)
 
+#boost_diag()
 #endif (FALSE) # for debug purposes
 
 if ( Boost_CONTEXT_FOUND )

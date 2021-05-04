@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -10,7 +10,8 @@
 
 #include "docstore.h"
 
-#include "sphinxint.h"
+#include "fileio.h"
+#include "memio.h"
 #include "fileutils.h"
 #include "attribute.h"
 #include "indexcheck.h"

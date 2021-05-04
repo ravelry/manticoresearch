@@ -2,7 +2,7 @@
 
 <!-- example replace -->
 
-`REPLACE` works similar to [INSERT](Adding_documents_to_an_index/Adding_documents_to_a_real-time_index.md), but it marks the old document with the same ID as a new document as deleted before inserting a new document.
+`REPLACE` works similar to [INSERT](../Adding_documents_to_an_index/Adding_documents_to_a_real-time_index.md), but it marks the old document with the same ID as a new document as deleted before inserting a new document.
 
 <!-- intro -->
 ##### SQL:
@@ -25,6 +25,7 @@ Query OK, 1 row affected (0.00 sec)
 
 ```http
 POST /replace
+-H "Content-Type: application/x-ndjson" -d '
 {
   "index":"products",
   "id":1,
@@ -34,6 +35,7 @@ POST /replace
     "price":10
   }
 }
+'
 ```
 
 <!-- response HTTP -->
@@ -130,9 +132,9 @@ class SuccessResponse {
 
 `REPLACE` is supported for RT and PQ indexes.
 
-The old document is not removed from the index, it is only marked as deleted. Because of this the index size grows until index chunks are merged and documents marked as deleted in these chunks are not included in the chunk created as a result of merge. You can force chunk merge by using [OPTIMIZE statement](Securing_and_compacting_an_index/Compacting_an_index.md).
+The old document is not removed from the index, it is only marked as deleted. Because of this the index size grows until index chunks are merged and documents marked as deleted in these chunks are not included in the chunk created as a result of merge. You can force chunk merge by using [OPTIMIZE statement](../Securing_and_compacting_an_index/Compacting_an_index.md).
 
-The syntax of the `REPLACE` statement is identical to [INSERT syntax](Adding_documents_to_an_index/Adding_documents_to_a_real-time_index.md):
+The syntax of the `REPLACE` statement is identical to [INSERT syntax](../Adding_documents_to_an_index/Adding_documents_to_a_real-time_index.md):
 
 ```sql
 REPLACE INTO index [(column1, column2, ...)]
@@ -144,7 +146,7 @@ REPLACE INTO index [(column1, column2, ...)]
 
 <!-- example bulk_replace -->
 
-Multiple documents can be replaced at once. See [bulk adding documents](Adding_documents_to_an_index/Adding_documents_to_a_real-time_index.md#Bulk-adding-documents) for more details.
+Multiple documents can be replaced at once. See [bulk adding documents](../Adding_documents_to_an_index/Adding_documents_to_a_real-time_index.md#Bulk-adding-documents) for more details.
 
 <!-- intro -->
 ##### HTTP:
@@ -165,9 +167,10 @@ Query OK, 2 rows affected (0.00 sec)
 
 ```json
 POST /bulk
-
+-H "Content-Type: application/x-ndjson" -d '
 { "replace" : { "index" : "products", "id":1, "doc": { "title": "doc one", "tag" : 10 } } }
 { "replace" : { "index" : "products", "id":2, "doc": { "title": "doc two", "tag" : 20 } } }
+'
 ```
 
 <!-- response HTTP -->

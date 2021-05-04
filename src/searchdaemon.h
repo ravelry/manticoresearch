@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -18,6 +18,7 @@
 #define _searchdaemon_
 
 #include "searchdconfig.h"
+#include "memio.h"
 
 /////////////////////////////////////////////////////////////////////////////
 // MACHINE-DEPENDENT STUFF
@@ -193,7 +194,7 @@ enum SearchdCommandV_e : WORD
 	VER_COMMAND_PING		= 0x100,
 	VER_COMMAND_UVAR		= 0x100,
 	VER_COMMAND_CALLPQ		= 0x100,
-	VER_COMMAND_CLUSTERPQ	= 0x102,
+	VER_COMMAND_CLUSTERPQ	= 0x103,
 	VER_COMMAND_GETFIELD	= 0x100,
 
 	VER_COMMAND_WRONG = 0,
@@ -671,8 +672,6 @@ struct ServedDesc_t
 	CSphIndex *	m_pIndex		= nullptr; ///< owned index; will be deleted in d-tr
 	CSphString	m_sIndexPath;	///< current index path; independent but related to one in m_pIndex
 	CSphString	m_sNewPath;		///< when reloading because of config changed, it contains path to new index.
-	bool		m_bPreopen		= false;
-	int			m_iExpandKeywords { KWE_DISABLED };
 	bool		m_bOnlyNew		= false; ///< load new clean index - no previous valid files, no .old backups possible, no way to serve if loading failed.
 	CSphString	m_sGlobalIDFPath;
 	int64_t		m_iMass			= 0; // relative weight (by access speed) of the index
@@ -681,8 +680,7 @@ struct ServedDesc_t
 	mutable CSphString	m_sUnlink;
 	IndexType_e	m_eType			= IndexType_e::PLAIN;
 	CSphString	m_sCluster;
-	FileAccessSettings_t m_tFileAccessSettings;
-	int			m_iMemLimit = 0;
+	MutableIndexSettings_c m_tSettings = MutableIndexSettings_c::GetDefaults();
 
 	// statics instead of members below used to simultaneously check pointer for null also.
 
@@ -763,6 +761,7 @@ private:
 	const ServedDesc_t * ReadLock () const ACQUIRE_SHARED( m_tLock );
 	ServedDesc_t * WriteLock () const ACQUIRE( m_tLock );
 	void Unlock () const UNLOCK_FUNCTION( m_tLock );
+	void UpgradeLock ( bool bVip ) const RELEASE (m_tLock) ACQUIRE (m_tLock);
 
 protected:
 	// no manual deletion; lifetime managed by AddRef/Release()
@@ -815,6 +814,12 @@ public:
 
 	const ServedDesc_t * Ptr () const
 	{ return m_pCore; }
+
+	void UpgradeLock ( bool bVip ) const NO_THREAD_SAFETY_ANALYSIS
+	{
+		if ( m_pLock )
+			m_pLock->UpgradeLock ( bVip );
+	}
 
 private:
 	const ServedDesc_t * m_pCore = nullptr;
@@ -1056,7 +1061,7 @@ inline ServedIndexRefPtr_c GetServed ( const CSphString &sName, GuardedHash_c * 
 void ReleaseAndClearDisabled();
 
 ESphAddIndex ConfigureAndPreloadIndex ( const CSphConfigSection & hIndex, const char * sIndexName, StrVec_t & dWarnings, CSphString & sError );
-ESphAddIndex AddIndexMT ( GuardedHash_c & dPost, const char * szIndexName, const CSphConfigSection & hIndex, bool bReplace, CSphString & sError, StrVec_t * pWarnings=nullptr );
+ESphAddIndex AddIndexMT ( GuardedHash_c & dPost, const char * szIndexName, const CSphConfigSection & hIndex, bool bReplace, bool bMutableOpt, StrVec_t * pWarnings, CSphString & sError );
 bool PreallocNewIndex ( ServedDesc_t & tIdx, const CSphConfigSection * pConfig, const char * szIndexName, StrVec_t & dWarnings, CSphString & sError );
 
 struct AttrUpdateArgs: public CSphAttrUpdateEx
@@ -1274,8 +1279,9 @@ public:
 	bool Execute ( Str_t sQuery, RowBuffer_i & tOut );
 	void SetFederatedUser ();
 	bool IsAutoCommit () const;
+	bool IsInTrans() const;
 
-	QueryProfile_c* StartProfiling ( ESphQueryState );
+	QueryProfile_c * StartProfiling ( ESphQueryState );
 	void SaveLastProfile();
 
 	// manage backend's timeout and variables
@@ -1377,7 +1383,7 @@ public:
 
 	virtual void PutFloatAsString ( float fVal, const char * sFormat=nullptr ) = 0;
 
-	void PutPercentAsString ( int64_t iVal, int64_t iBase )
+	virtual void PutPercentAsString ( int64_t iVal, int64_t iBase )
 	{
 		StringBuilder_c sTime;
 		if ( iBase )
@@ -1404,7 +1410,7 @@ public:
 
 	/// more high level. Processing the whole tables.
 	// sends collected data, then reset
-	virtual void Commit() = 0;
+	virtual bool Commit() = 0;
 
 	// wrappers for popular packets
 	virtual void Eof ( bool bMoreResults=false, int iWarns=0 ) = 0;
@@ -1416,10 +1422,10 @@ public:
 	// Header of the table with defined num of columns
 	virtual void HeadBegin ( int iColumns ) = 0;
 
-	virtual void HeadEnd ( bool bMoreResults=false, int iWarns=0 ) = 0;
+	virtual bool HeadEnd ( bool bMoreResults=false, int iWarns=0 ) = 0;
 
 	// add the next column. The EOF after the full set will be fired automatically
-	virtual void HeadColumn ( const char * sName, MysqlColumnType_e uType=MYSQL_COL_STRING, WORD uFlags=0 ) = 0;
+	virtual void HeadColumn ( const char * sName, MysqlColumnType_e uType=MYSQL_COL_STRING ) = 0;
 
 	virtual void Add ( BYTE uVal ) = 0;
 
@@ -1493,22 +1499,22 @@ public:
 	}
 
 	// popular pattern of 2 columns of data
-	void DataTuplet ( const char * pLeft, const char * pRight )
+	bool DataTuplet ( const char * pLeft, const char * pRight )
 	{
 		PutString ( pLeft );
 		PutString ( pRight );
-		Commit ();
+		return Commit ();
 	}
 
 	template <typename NUM>
-	void DataTuplet ( const char * pLeft, NUM tRight )
+	bool DataTuplet ( const char * pLeft, NUM tRight )
 	{
 		PutString ( pLeft );
 		PutNumAsString ( tRight );
-		Commit();
+		return Commit();
 	}
 
-	void DataTupletf ( const char * pLeft, const char * sFmt, ... )
+	bool DataTupletf ( const char * pLeft, const char * sFmt, ... )
 	{
 		StringBuilder_c sRight;
 		PutString ( pLeft );
@@ -1517,48 +1523,50 @@ public:
 		sRight.vSprintf ( sFmt, ap );
 		va_end ( ap );
 		PutString ( sRight.cstr() );
-		Commit();
+		return Commit();
 	}
 
 	// Fire he header for table with iSize string columns
-	void HeadOfStrings ( std::initializer_list<const char*> dNames )
+	bool HeadOfStrings ( std::initializer_list<const char*> dNames )
 	{
 		HeadBegin ( (int) dNames.size() );
 		for ( const char* szCol : dNames )
 			HeadColumn ( szCol );
-		HeadEnd ();
+		return HeadEnd ();
 	}
 
-	void HeadOfStrings ( const VecTraits_T<CSphString>& sNames )
+	bool HeadOfStrings ( const VecTraits_T<CSphString>& sNames )
 	{
 		HeadBegin ( (int) sNames.GetLength() );
 		for ( const auto& sName : sNames )
 			HeadColumn ( sName.cstr() );
-		HeadEnd ();
+		return HeadEnd ();
 	}
 
 	// table of 2 columns (we really often use them!)
-	void HeadTuplet ( const char * pLeft, const char * pRight )
+	bool HeadTuplet ( const char * pLeft, const char * pRight )
 	{
 		HeadBegin ( 2 );
 		HeadColumn ( pLeft );
 		HeadColumn ( pRight );
-		HeadEnd();
+		return HeadEnd();
 	}
 
-	void DataRow ( const VecTraits_T<CSphString>& dRow )
+	bool DataRow ( const VecTraits_T<CSphString>& dRow )
 	{
 		for ( const auto& dValue : dRow )
 			PutString ( dValue );
-		Commit();
+		return Commit();
 	}
 
 	void DataTable ( const VectorLike& dData )
 	{
-		HeadOfStrings ( dData.Header() );
+		if ( !HeadOfStrings ( dData.Header () ) )
+			return;
 		auto iStride = dData.Header().GetLength();
 		for ( int i=0, iLen = dData.GetLength(); i<iLen; i+=iStride )
-			DataRow ( dData.Slice ( i, iStride) );
+			if ( !DataRow ( dData.Slice ( i, iStride ) ) )
+				break;
 		Eof();
 	}
 };

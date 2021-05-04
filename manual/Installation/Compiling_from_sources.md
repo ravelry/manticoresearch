@@ -2,6 +2,8 @@
 
 Compiling from sources can be used for custom build configurations, such as disabling some features, adding new or testing patches, if you want to contribute. For example, you can compile from sources disabling embedded ICU, if you want to replace it with another one installed in your system with possibility to upgrade it independently from Manticore.
 
+In our CI/CD pipeline Manticore Search is compiled using [these docker images](https://github.com/manticoresoftware/manticoresearch/tree/master/dist/build_dockers), so instead of reading all the below you might want to master them and make modifications that are important for you.
+
 ## Required tools 
 
 * C++ compiler
@@ -22,7 +24,7 @@ Manticore consists of different tools. The main one is Manticore search server -
 
 Some features, like support of AOT lemmatization and basic stemming are embedded and don't need any libraries.
 
-Another big tool is `indexer`, which [creates plain indexes from different sources](Adding_data_from_external_storages/Plain_indexes_creation.md). There may be different external storages. The list of libraries which indexer can use (and depend from) includes:
+Another big tool is `indexer`, which [creates plain indexes from different sources](../Adding_data_from_external_storages/Plain_indexes_creation.md). There may be different external storages. The list of libraries which indexer can use (and depend from) includes:
 * mysql
 * postresql
 * expat
@@ -34,7 +36,7 @@ Internally manticore consists of big library 'libsphinx' with which different to
 
 * By default, only indexing of mysql sources is expected. So, the configuration script will search for mysql dev client lib, and if nothing found, will fail. To have the possibility of indexing mysql, you need at least dev version of MySQL library. Usually it is provided in a package named `libmysqlclient-dev` or `mysql-devel`, depending on Linux flavour you use. Also, different derivatives, as dev package from mariadb (which are `libmariadb-dev` or `mariadb-devel`) might be ok. If you have mysql or derivative installed by some custom path, set env variable `MYSQL_DIR` to that path for configuration. Configuration will look for available program `mysql_config`, and use data, provided by it. **OR** will look for header `mysql.h` and library `mysqlclient`, if no `mysql_config` program found. If you're **not** going to use mysql sources you can explicitly set `-DWITH_MYSQL=0` or `-DWITH_MYSQL=NO` as config parameter.
 * `git`, `flex`, `bison` - needed if the sources are cloned from git repository. If you use official tarball with sources, they are not necessary (git is used to pick commit hash). Flex and bison are used to build parsers. In tarball sources the version is hardcoded, and parses also pre-builded into C-sources, so these tools are not necessary.
-* RE2 - used for [regexp_filter](Creating_an_index/NLP_and_tokenization/Low-level_tokenization.md#regexp_filter) feature. For using the feature Manticore must be configured with `-DWITH_RE2=1`, otherwise it will not be available. If configured, system-wide RE2 will be searched, and if nothing  found, configuration will download RE2 sources and build the feature as embedded.
+* RE2 - used for [regexp_filter](../Creating_an_index/NLP_and_tokenization/Low-level_tokenization.md#regexp_filter) feature. For using the feature Manticore must be configured with `-DWITH_RE2=1`, otherwise it will not be available. If configured, system-wide RE2 will be searched, and if nothing  found, configuration will download RE2 sources and build the feature as embedded.
 * stemmer - used for additional language stemmers. Might be configured by `-DWITH_STEMMER=1`. If required, will be searched in the system and linked. If not found - configuration will download snowball sources and build the feature as embedded.
 * ICU - for CJK languages. It replaces previous RLP platform, also used for that purpose. By default the ICU is configured as embedded, and will be built from sources. ICU, RE2 and stemmer may be either searched and used as shared libraries, provided by your system or explicitly build from sources and statically linked forever. The first option makes the binaries smaller and more flexible for upgrade (that is simple: upgrade a library in the system and take all benefits/fixes of the upgrade). By default the RE2 and stemmer libraries supposed to be used from system, and ICU configured to be built as static from sources. You can manually tune that behaviour by providing boolean options `-DWITH_ICU_FORCE_STATIC=`, `-DWITH_RE2_FORCE_STATIC=`, and `-DWITH_STEMMER_FORCE_STATIC=`.
 
@@ -56,12 +58,12 @@ For the server these dependencies may be in play:
 
 ### From git
 
-Manticore sources are [hosted on github](https://github.com/manticoresoftware/manticoresearch). Clone the repo, then checkout desired branch or tag. Our public git workfow contains only main `master` branch, which represents bleeding-edge of development. On release we create a versioned tag, like `3.5.2`, and start a new branch for current release, in this case `manticore-3.5.2`. The head of the versioned branch after all changes is used as source to build all binary releases. For example, to take sources of version 3.5.2 you can run:
+Manticore sources are [hosted on github](https://github.com/manticoresoftware/manticoresearch). Clone the repo, then checkout desired branch or tag. Our public git workfow contains only main `master` branch, which represents bleeding-edge of development. On release we create a versioned tag, like `3.5.4`, and start a new branch for current release, in this case `manticore-3.5.4`. The head of the versioned branch after all changes is used as source to build all binary releases. For example, to take sources of version 3.5.4 you can run:
 
 ```bash
 git clone https://github.com/manticoresoftware/manticoresearch.git
 cd manticoresearch
-git checkout manticore-3.5.2
+git checkout manticore-3.5.4
 ```
 
 When using sources from GitHub you'll need `flex` and `bison` tools, since all internal parsers are provided as lex/yacc sources.
@@ -71,9 +73,9 @@ When using sources from GitHub you'll need `flex` and `bison` tools, since all i
 Tarballs are available [here](https://manticoresearch.com/downloads/). Look for "Source tar.gz". Those provided by github 'Source code' archives are not what you want, so avoid using them (mainly they lack the git version which we use to make version string). The tarball sources have pre-built lexers and parsers, so flex and bison tools are not required for a build.
 
 ```bash
-wget -c https://repo.manticoresearch.com/repository/manticoresearch_source/release/manticore-3.5.2-201002-8b2c175-release-source.tar.gz
-tar -zxf manticore-3.5.2-*.tar.gz
-cd manticore-3.5.2-*
+wget -c https://repo.manticoresearch.com/repository/manticoresearch_source/release/manticore-3.5.4-201002-13f8d08-release-source.tar.gz
+tar -zxf manticore-3.5.4-*.tar.gz
+cd manticore-3.5.4-*
 ```
 
 ### Configuring
@@ -81,7 +83,7 @@ cd manticore-3.5.2-*
 Manticore uses cmake for pre-compiling configuration. To use it make a build directory somewhere, go to it, then invoke cmake, pointing it to the source dir. Simplest is to create the build directory inside unpacked sources. 
 
 ```bash
-cd manticore-3.5.2
+cd manticore-3.5.4
 mkdir build && cd build
 cmake -DWITH_MYSQL=1 -DWITH_RE2=1 ..
 ```
@@ -166,7 +168,7 @@ docker run -it --rm -v /manticore/sources:/manticore registry.gitlab.com/mantico
 # following is inside docker shell. By default, workdir will be in the source folder, mounted as volume from the host. 
 RELEASE_TAG="noicu"
 mkdir build && cd build
-cmake -DSPHINX_TAG=$RELEASE_TAG -DDISTR_BUILD=$DISTR -DWITH_ICU_FORCE_STATIC=0 ..
+cmake -DBUILD_TAG=$RELEASE_TAG -DDISTR_BUILD=$DISTR -DWITH_ICU_FORCE_STATIC=0 ..
 make -j4 package
 ```  
 

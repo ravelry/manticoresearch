@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -16,6 +16,7 @@
 
 class QueryParser_i;
 class StmtErrorReporter_i;
+class QueryProfile_c;
 struct cJSON;
 struct XQNode_t;
 struct SqlStmt_t;

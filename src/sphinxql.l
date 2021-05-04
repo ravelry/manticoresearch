@@ -18,6 +18,17 @@
 		pParser->m_pLastTokenStart = yytext; \
 	}
 
+#define BACKTICK_START \
+	{ \
+		pParser->m_pLastTokenStart = yytext; \
+	    lvalp->m_iStart = yytext + yyleng - pParser->m_pBuf; \
+	}
+
+#define BACKTICK_END \
+	{ \
+		lvalp->m_iEnd = yytext + yyleng - pParser->m_pBuf; \
+	}
+
 %}
 
 DIGIT				[0-9]
@@ -39,6 +50,7 @@ FLOAT_CONSTANT      {INT}\.{INT}?{EXP}?|{INT}?\.{INT}{EXP}|{INT}{EXP}
 %option align
 
 %x ccomment
+%x BACKTICK
 
 %%
 
@@ -47,6 +59,22 @@ FLOAT_CONSTANT      {INT}\.{INT}?{EXP}?|{INT}?\.{INT}{EXP}|{INT}{EXP}
 <ccomment>[^*\n]+
 <ccomment>"*"[^/]
 <ccomment>"\n"
+
+
+\.{SPACE}*`	           	{ BACKTICK_START; BEGIN (BACKTICK); }
+<BACKTICK>[^\n\\`]+		/* eat everything except \n, \, ` */
+<BACKTICK>\\[^\n]		/* eat one symbol after \ (aka escaping) except \n  */
+<BACKTICK>`				{
+							BACKTICK_END;
+							BEGIN(INITIAL);
+							return TOK_BACKTICKED_SUBKEY;
+						}
+
+<BACKTICK>\n			|	/* terminate on \n or EOF inside unclosed backtick */
+<BACKTICK><<EOF>>		{
+							BEGIN(INITIAL);
+							return -1;
+						}
 
 
 "AGENT"				{ YYSTOREBOUNDS; return TOK_AGENT; }
@@ -189,12 +217,10 @@ FLOAT_CONSTANT      {INT}\.{INT}?{EXP}?|{INT}?\.{INT}{EXP}|{INT}{EXP}
 {ALNUM}+    		{ YYSTOREBOUNDS; return TOK_BAD_NUMERIC; }
 @{ID}				{ YYSTOREBOUNDS; return TOK_USERVAR; }
 @@{ID}				{ YYSTOREBOUNDS; return TOK_SYSVAR; }
-@@{ID}\.{ID}		{ YYSTOREBOUNDS; return TOK_SYSVAR; }
 `{ID}`				{ YYSTOREBOUNDS; lvalp->m_iStart++; lvalp->m_iEnd--; return TOK_IDENT; }
-`{DIGIT}+{ID}`		{ YYSTOREBOUNDS; return TOK_IDENT; } // allow `123xyz` column names
-{ID}:{ID}			{ YYSTOREBOUNDS; return TOK_IDENT; }
+`{INT}{ID}`		    { YYSTOREBOUNDS; return TOK_IDENT; } // allow `123xyz` column names
 
-{SPACE}+			{ ; }
+{SPACE}+
 \.{SPACE}*{ID}		{ YYSTOREBOUNDS; return TOK_SUBKEY; }
 .					{ YYSTOREBOUNDS; return yytext[0]; }
 

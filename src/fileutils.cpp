@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -327,59 +327,70 @@ void sphDoneIOStats()
 }
 
 
-CSphString sphNormalizePath( const CSphString& sOrigPath )
+static bool IsSlash ( char c )
+{
+	return c=='/' || c=='\\';
+}
+
+
+CSphString sphNormalizePath( const CSphString & sOrigPath )
 {
 	CSphVector<Str_t> dChunks;
-	const char* sBegin = sOrigPath.scstr();
-	const char* sEnd = sBegin + sOrigPath.Length();
-	const char* sPath = sBegin;
+	const char * szBegin = sOrigPath.scstr();
+	const char * szEnd = szBegin + sOrigPath.Length();
+	const char * szPath = szBegin;
 	int iLevel = 0;
 
-	while ( sPath<sEnd )
+	while ( szPath<szEnd )
 	{
-		const char* sSlash = ( char* ) memchr( sPath, '/', sEnd - sPath );
-		if ( !sSlash )
-			sSlash = sEnd;
+		const char * szSlash = szEnd;
+		for ( const char * p = szPath; p < szEnd; p++ )
+			if ( IsSlash(*p) )
+			{
+				szSlash = p;
+				break;
+			}
 
-		auto iChunkLen = sSlash - sPath;
+		auto iChunkLen = szSlash - szPath;
 
 		switch ( iChunkLen )
 		{
 		case 0: // empty chunk skipped
-			++sPath;
+			++szPath;
 			continue;
 		case 1: // simple dot chunk skipped
-			if ( *sPath=='.' )
+			if ( *szPath=='.' )
 			{
-				sPath += 2;
+				szPath += 2;
 				continue;
 			}
 			break;
 		case 2: // double dot abandons chunks, then decrease level
-			if ( sPath[0]=='.' && sPath[1]=='.' )
+			if ( szPath[0]=='.' && szPath[1]=='.' )
 			{
 				if ( dChunks.IsEmpty())
 					--iLevel;
 				else
 					dChunks.Pop();
-				sPath += 3;
+				szPath += 3;
 				continue;
 			}
 		default: break;
 		}
-		dChunks.Add( { sPath, iChunkLen } );
-		sPath = sSlash + 1;
+
+		dChunks.Add( { szPath, iChunkLen } );
+		szPath = szSlash + 1;
 	}
 
 	StringBuilder_c sResult( "/" );
-	if ( *sBegin=='/' )
+	if ( *szBegin=='/' )
 		sResult.AppendRawChunk ( {"/", 1} );
 	else
 		while ( iLevel++<0 )
 			sResult << "..";
 
-	for ( const auto& dChunk: dChunks )
-		sResult.AppendChunk ( dChunk );
+	for ( const auto & dChunk : dChunks )
+		sResult.AppendChunk(dChunk);
 
 	return sResult.cstr();
 }
@@ -506,7 +517,7 @@ bool MkDir ( const char * szDir )
 }
 
 
-bool CopyFile ( const CSphString & sSource, const CSphString & sDest, CSphString & sError )
+bool CopyFile ( const CSphString & sSource, const CSphString & sDest, CSphString & sError, int iMode )
 {
 	const int BUFFER_SIZE = 1048576;
 	CSphFixedVector<BYTE> dBuffer(BUFFER_SIZE);
@@ -517,7 +528,7 @@ bool CopyFile ( const CSphString & sSource, const CSphString & sDest, CSphString
 		return false;
 
 	CSphAutofile tDest;
-	int iDstFD = tDest.Open ( sDest, SPH_O_NEW, sError );
+	int iDstFD = tDest.Open ( sDest, iMode, sError );
 	if ( iDstFD<0 )
 		return false;
 
@@ -631,12 +642,6 @@ bool CheckPath ( const CSphString & sPath, bool bCheckWrite, CSphString & sError
 }
 
 
-static bool IsSlash ( char c )
-{
-	return c=='/' || c=='\\';
-}
-
-
 bool IsPathAbsolute ( const CSphString & sPath )
 {
 	if ( !sPath.Length() )
@@ -706,4 +711,44 @@ const char * GetExtension ( const CSphString & sFullPath )
 		return nullptr;
 
 	return pDot+1;
+}
+
+
+CSphString GetExecutablePath()
+{
+#if USE_WINDOWS
+	HMODULE hModule = GetModuleHandle(NULL);
+	CHAR szPath[MAX_PATH];
+	GetModuleFileName ( hModule, szPath, MAX_PATH );
+	return szPath;
+#else
+	char szPath[PATH_MAX];
+	ssize_t tLen;
+
+	tLen = ::readlink ( "/proc/self/exe", szPath, sizeof(szPath)-1 );
+	if ( tLen!=-1 )
+		return CSphString ( szPath, tLen );
+
+	tLen = ::readlink ( "/proc/curproc/file", szPath, sizeof(szPath)-1 );
+	if ( tLen!=-1 )
+		return CSphString ( szPath, tLen );
+
+	tLen = ::readlink ( "/proc/self/path/a.out", szPath, sizeof(szPath)-1 );
+	if ( tLen!=-1 )
+		return CSphString ( szPath, tLen );
+
+	return "";
+#endif
+}
+
+
+void SeekAndPutOffset ( CSphWriter & tWriter, SphOffset_t tOffset, SphOffset_t tValue )
+{
+	SphOffset_t tTotalSize = tWriter.GetPos();
+
+	// order matters here
+	tWriter.Flush(); // store collected data as SeekTo may get rid of buffer collected so far
+	tWriter.SeekTo(tOffset); 
+	tWriter.PutOffset(tValue);
+	tWriter.SeekTo(tTotalSize);
 }

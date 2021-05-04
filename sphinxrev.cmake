@@ -1,5 +1,5 @@
 # this cmake file fully replaces all old things like svnxrev, hgxrev, etc scripts.
-cmake_minimum_required ( VERSION 2.8 )
+cmake_minimum_required ( VERSION 2.8.12 )
 
 # guess version strings from current git repo
 function(guess_from_git)
@@ -24,7 +24,7 @@ function(guess_from_git)
 
 	# extract timestamp and make number YYMMDD from it
 	# it would be --date=format:%y%m%d, but old git on centos doesn't understand it
-	execute_process(COMMAND "${GIT_EXECUTABLE}" log -1 --date=short --format=%ad
+	execute_process(COMMAND "${GIT_EXECUTABLE}" log -1 --date=short --format=%cd
 			WORKING_DIRECTORY "${SOURCE_DIR}"
 			RESULT_VARIABLE res
 			OUTPUT_VARIABLE GIT_TIMESTAMP_ID
@@ -110,7 +110,7 @@ function(guess_from_dir_name SOURCE_DIR)
 	set(VERNUMBERS "${CMAKE_MATCH_1}" PARENT_SCOPE)
 	set(GIT_TIMESTAMP_ID "${CMAKE_MATCH_2}" PARENT_SCOPE)
 	set(SPH_GIT_COMMIT_ID "${CMAKE_MATCH_3}" PARENT_SCOPE)
-	set(SPHINX_TAG "${CMAKE_MATCH_4}" PARENT_SCOPE)
+	set(BUILD_TAG "${CMAKE_MATCH_4}" PARENT_SCOPE)
 	set(GIT_BRANCH_ID "from the folder '${DIR}'" PARENT_SCOPE)
 	STRING(TIMESTAMP GIT_EPOCH_ID "%s")
 	set(SOURCE_DATE_EPOCH ${GIT_EPOCH_ID} PARENT_SCOPE)
@@ -136,9 +136,22 @@ if ( NOT SPH_GIT_COMMIT_ID )
 	guess_from_dir_name ("${SOURCE_DIR}")
 endif ()
 
+if (NOT SPH_GIT_COMMIT_ID)
+	set(DEVMODE "$ENV{DEVMODE}")
+	if ( DEVMODE )
+		message(STATUS "Dev mode, no guess, using predefined version")
+		set(VERNUMBERS "0.0.1")
+		set(GIT_TIMESTAMP_ID "202020")
+		set(SPH_GIT_COMMIT_ID "DEADBEEF")
+		set(BUILD_TAG "devmode")
+		set(GIT_BRANCH_ID "fake head from devmode")
+		set(SOURCE_DATE_EPOCH "1607089638")
+	endif ()
+endif ()
+
 # nothing found, bail with error
 if ( NOT SPH_GIT_COMMIT_ID )
-	message(FATAL_ERROR "Git not found, or the sources are not git clone, or not located in the folder originally unpacked from tarball, or not contain pre-created sphinxversion.h header. Please, put this file to your src/ folder manually.")
+	message(FATAL_ERROR "Git not found, or the sources are not git clone, or not located in the folder originally unpacked from tarball, or not contain pre-created sphinxversion.h header. Please, put this file to your src/ folder manually. Devmode=${DEVMODE}")
 endif ()
 
 # extract version number string from sphinxversion.h.in
@@ -150,7 +163,7 @@ endif()
 
 set ( GDB_SOURCE_DIR "${SOURCE_DIR}" )
 
-# All info collected (we need SPH_GIT_COMMIT_ID, GIT_TIMESTAMP_ID, GIT_BRANCH_ID and SPHINX_TAG, if any)
+# All info collected (we need SPH_GIT_COMMIT_ID, GIT_TIMESTAMP_ID, GIT_BRANCH_ID and BUILD_TAG, if any)
 set ( VERFILE "${BINARY_DIR}/config/gen_sphinxversion.h" )
 
 configure_file ( "${SOURCE_DIR}/src/sphinxversion.h.in" "${VERFILE}1" )
@@ -172,5 +185,3 @@ if ( NEED_NEWFILE )
 else()
 	message ( STATUS "Version not changed: ${VERNUMBERS} ${SPH_GIT_COMMIT_ID}@${GIT_TIMESTAMP_ID}, ${GIT_BRANCH_ID}" )
 endif()
-
-

@@ -11,9 +11,10 @@ You can install and start Manticore easily in Ubuntu, Centos, Debian, Windows an
 <!-- request Ubuntu -->
 ```bash
 wget https://repo.manticoresearch.com/manticore-repo.noarch.deb
-sudo dpkg -i manticore-repo.noarch.deb
+sudo dpkg -i manticore-dev-repo.noarch.deb
+sudo apt-key adv --fetch-keys 'http://repo.manticoresearch.com/GPG-KEY-manticore'
 sudo apt update
-sudo apt install manticore
+sudo apt install manticore manticore-columnar-lib
 sudo systemctl start manticore
 ```
 
@@ -23,9 +24,10 @@ sudo systemctl start manticore
 <!-- request Debian -->
 ```bash
 wget https://repo.manticoresearch.com/manticore-repo.noarch.deb
-sudo dpkg -i manticore-repo.noarch.deb
+sudo dpkg -i manticore-dev-repo.noarch.deb
+sudo apt-key adv --fetch-keys 'http://repo.manticoresearch.com/GPG-KEY-manticore'
 sudo apt update
-sudo apt install manticore
+sudo apt install manticore manticore-columnar-lib
 sudo systemctl start manticore
 ```
 
@@ -35,7 +37,7 @@ sudo systemctl start manticore
 <!-- request Centos -->
 ```bash
 sudo yum install https://repo.manticoresearch.com/manticore-repo.noarch.rpm
-sudo yum install manticore
+sudo yum install manticore manticore-columnar-lib
 sudo systemctl start manticore
 ```
 
@@ -119,7 +121,7 @@ config = manticoresearch.Configuration(
 )
 client =  manticoresearch.ApiClient(config)
 indexApi = manticoresearch.IndexApi(client)
-searchApi = manticoresearch.searchApi(client)
+searchApi = manticoresearch.SearchApi(client)
 utilsApi = manticoresearch.UtilsApi(client)
 ```
 
@@ -142,13 +144,9 @@ utilsApi = new Manticoresearch.UtilsApi(client);
 <!-- request Java -->
 ```java
 // https://github.com/manticoresoftware/manticoresearch-java
-import com.manticoresearch.client.ApiClient;
-import com.manticoresearch.client.ApiException;
-import com.manticoresearch.client.Configuration;
+import com.manticoresearch.client.*;
 import com.manticoresearch.client.model.*;
-import com.manticoresearch.client.api.IndexApi;
-import com.manticoresearch.client.api.UtilsApi;
-import com.manticoresearch.client.api.SearchApi;
+import com.manticoresearch.client.api.*;
 ...
 ApiClient client = Configuration.getDefaultApiClient();
 client.setBasePath("http://127.0.0.1:9308");
@@ -209,7 +207,7 @@ $index->setName('products');
 $index->create([
     'title'=>['type'=>'text'],
     'price'=>['type'=>'float'],
-]);
+],['morphology' => 'stem_en']);
 ```
 <!-- intro -->
 ##### Python:
@@ -217,7 +215,7 @@ $index->create([
 <!-- request Python -->
 
 ```python
-utilsApi.sql('mode=raw&query=create table forum(title text, price float)')
+utilsApi.sql('mode=raw&query=create table products(title text, price float) morphology=\'stem_en\'')
 ```
 <!-- intro -->
 ##### Javascript:
@@ -225,7 +223,7 @@ utilsApi.sql('mode=raw&query=create table forum(title text, price float)')
 <!-- request Javascript -->
 
 ```javascript
-res = await utilsApi.sql('mode=raw&query=create table forum(title text, price float)');
+res = await utilsApi.sql('mode=raw&query=create table products(title text, price float) morphology=\'stem_en\'');
 ```
 
 <!-- intro -->
@@ -234,7 +232,7 @@ res = await utilsApi.sql('mode=raw&query=create table forum(title text, price fl
 <!-- request Java -->
 
 ```java
-utilsApi.sql("mode=raw&query=create table forum(title text, price float)");
+utilsApi.sql("mode=raw&query=create table products(title text, price float) morphology='stem_en'");
 
 ```
 <!-- end -->
@@ -268,7 +266,6 @@ Query OK, 3 rows affected (0.01 sec)
 POST /insert
 {
   "index":"products",
-  "id":0,
   "doc":
   {
     "title" : "Crossbody Bag with Tassel",
@@ -280,7 +277,6 @@ POST /insert
 POST /insert
 {
   "index":"products",
-  "id":0,
   "doc":
   {
     "title" : "microfiber sheet set",
@@ -291,7 +287,6 @@ POST /insert
 POST /insert
 {
   "index":"products",
-  "id":0,
   "doc":
   {
     "title" : "Pet Hair Remover Glove",
@@ -331,13 +326,12 @@ POST /insert
 ##### PHP:
 
 <!-- request PHP -->
-`'id' => 0` forces automatic ID generation.
 
 ```php
 $index->addDocuments([
-        ['id' => 0, 'title' => 'Crossbody Bag with Tassel', 'price' => 19.85],
-        ['id' => 0, 'title' => 'microfiber sheet set', 'price' => 19.99],
-        ['id' => 0, 'title' => 'Pet Hair Remover Glove', 'price' => 7.99]
+        ['title' => 'Crossbody Bag with Tassel', 'price' => 19.85],
+        ['title' => 'microfiber sheet set', 'price' => 19.99],
+        ['title' => 'Pet Hair Remover Glove', 'price' => 7.99]
 ]);
 ```
 <!-- intro -->
@@ -346,9 +340,9 @@ $index->addDocuments([
 <!-- request Python -->
 
 ``` python
-indexApi.insert({"index" : "test", "id" : 1, "doc" : {"title" : "Crossbody Bag with Tassel", "price" : 19.85}})
-indexApi.insert({"index" : "test", "id" : 2, "doc" : {"title" : "microfiber sheet set", "price" : 19.99}})
-indexApi.insert({"index" : "test", "id" : 0, "doc" : {{"title" : "Pet Hair Remover Glove", "price" : 7.99}})
+indexApi.insert({"index" : "test", "doc" : {"title" : "Crossbody Bag with Tassel", "price" : 19.85}})
+indexApi.insert({"index" : "test", "doc" : {"title" : "microfiber sheet set", "price" : 19.99}})
+indexApi.insert({"index" : "test", "doc" : {"title" : "Pet Hair Remover Glove", "price" : 7.99}})
 ```
 <!-- intro -->
 ##### Javascript:
@@ -356,9 +350,9 @@ indexApi.insert({"index" : "test", "id" : 0, "doc" : {{"title" : "Pet Hair Remov
 <!-- request Javascript -->
 
 ``` javascript
-res = await indexApi.insert({"index" : "test", "id" : 1, "doc" : {"title" : "Crossbody Bag with Tassel", "price" : 19.85}});
-res = await indexApi.insert({"index" : "test", "id" : 2, "doc" : {"title" : "microfiber sheet set", "price" : 19.99}});
-res = await indexApi.insert({"index" : "test", "id" : 0, "doc" : {{"title" : "Pet Hair Remover Glove", "price" : 7.99}});
+res = await indexApi.insert({"index" : "test", "doc" : {"title" : "Crossbody Bag with Tassel", "price" : 19.85}});
+res = await indexApi.insert({"index" : "test", "doc" : {"title" : "microfiber sheet set", "price" : 19.99}});
+res = await indexApi.insert({"index" : "test", doc" : {"title" : "Pet Hair Remover Glove", "price" : 7.99}});
 ```
 
 <!-- intro -->
@@ -372,7 +366,7 @@ HashMap<String,Object> doc = new HashMap<String,Object>(){{
     put("title","Crossbody Bag with Tassel");
     put("price",19.85);
 }};
-newdoc.index("products").id(1L).setDoc(doc); 
+newdoc.index("products").setDoc(doc);
 sqlresult = indexApi.insert(newdoc);
 
 newdoc = new InsertDocumentRequest();
@@ -380,7 +374,7 @@ doc = new HashMap<String,Object>(){{
     put("title","microfiber sheet set");
     put("price",19.99);
 }};
-newdoc.index("products").id(2L).setDoc(doc); 
+newdoc.index("products").setDoc(doc);
 sqlresult = indexApi.insert(newdoc);
 
 newdoc = new InsertDocumentRequest();
@@ -388,7 +382,7 @@ doc = new HashMap<String,Object>(){{
     put("title","Pet Hair Remover Glove");
     put("price",7.99);
  }};
-newdoc.index("products").id(0L).setDoc(doc); 
+newdoc.index("products").setDoc(doc);
 indexApi.insert(newdoc);
 ```
 <!-- end -->
@@ -552,7 +546,7 @@ searchRequest.setIndex("forum");
 searchRequest.setQuery(query);
 HashMap<String,Object> highlight = new HashMap<String,Object>(){{
     put("fields",new String[] {"title"});
-            
+
 }};
 searchRequest.setHighlight(highlight);
 searchResponse = searchApi.search(searchRequest);
@@ -565,7 +559,7 @@ class SearchResponse {
     hits: class SearchResponseHits {
         total: 1
         maxScore: null
-        hits: [{_id=1, _score=1, _source={price=7.99, title=Pet Hair Remover Glove}, highlight={title=[Pet <b>Hair Remover</b> Glove]}}]
+        hits: [{_id=1513686608316989452, _score=1, _source={price=7.99, title=Pet Hair Remover Glove}, highlight={title=[Pet <b>Hair Remover</b> Glove]}}]
         aggregations: null
     }
     profile: null
@@ -586,7 +580,7 @@ Let's assume we now want to update the document - change the price to 18.5. This
 <!-- request SQL -->
 
 ```sql
-update products set price=18.5 where id = 1513686608316989453;
+update products set price=18.5 where id = 1513686608316989452;
 ```
 <!-- response SQL -->
 
@@ -603,7 +597,7 @@ Query OK, 1 row affected (0.00 sec)
 POST /update
 {
   "index": "products",
-  "id": 1513686608316989453,
+  "id": 1513686608316989452,
   "doc":
   {
     "price": 18.5
@@ -616,7 +610,7 @@ POST /update
 ```json
 {
   "_index": "products",
-  "_id": 1513686608316989400,
+  "_id": 1513686608316989452,
   "result": "updated"
 }
 ```
@@ -646,14 +640,14 @@ $response = $client->update($doc);
 <!-- request Python -->
 ``` python
 indexApi = api = manticoresearch.IndexApi(client)
-indexApi.update({"index" : "products", "id" : 2, "doc" : {"price":18.5}})
+indexApi.update({"index" : "products", "id" : 1513686608316989452, "doc" : {"price":18.5}})
 ```
 <!-- intro -->
 ##### javascript:
 
 <!-- request javascript -->
 ``` javascript
-res = await indexApi.update({"index" : "products", "id" : 2, "doc" : {"price":18.5}});
+res = await indexApi.update({"index" : "products", "id" : 1513686608316989452, "doc" : {"price":18.5}});
 ```
 
 <!-- intro -->
@@ -665,7 +659,7 @@ UpdateDocumentRequest updateRequest = new UpdateDocumentRequest();
 doc = new HashMap<String,Object >(){{
     put("price",18.5);
 }};
-updateRequest.index("products").id(2L).setDoc(doc); 
+updateRequest.index("products").id(1513686608316989452L).setDoc(doc);
 indexApi.update(updateRequest);
 ```
 <!-- end -->
@@ -770,8 +764,8 @@ query.put("range",new HashMap<String,Object>(){{
         put("lte",10);
     }});
 }});
-deleteRequest.index("products").setQuery(query); 
+deleteRequest.index("products").setQuery(query);
 indexApi.delete(deleteRequest);
-      
+
 ```
 <!-- end -->

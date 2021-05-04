@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -41,6 +41,9 @@ enum class Cmd_e : BYTE
 	MERGE,
 	DROP,
 	FILES,
+	CLOSE,
+	COMPRESS,
+	SPLIT,
 
 	INVALID_CMD
 };
@@ -49,6 +52,7 @@ struct DebugCommand_t
 {
 	Cmd_e	m_eCommand {Cmd_e::INVALID_CMD};
 	CSphString m_sParam;
+	CSphString m_sParam2;
 	int64_t m_iPar1;
 	int64_t m_iPar2;
 	const char * m_szStmt;

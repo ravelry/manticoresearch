@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -786,6 +786,7 @@ static KeyDesc_t g_dKeysIndex[] =
 	{ "killlist_target",		0, nullptr },
 	{ "read_buffer_docs",		0, nullptr },
 	{ "read_buffer_hits",		0, nullptr },
+	{ "read_buffer_columnar",	0, nullptr },
 	{ "read_unhinted",			0, nullptr },
 	{ "access_plain_attrs",		0, nullptr },
 	{ "access_blob_attrs",		0, nullptr },
@@ -796,6 +797,15 @@ static KeyDesc_t g_dKeysIndex[] =
 	{ "docstore_block_size",	0, nullptr },
 	{ "docstore_compression",	0, nullptr },
 	{ "docstore_compression_level",	0, nullptr },
+#if USE_COLUMNAR
+	{ "columnar_attrs",			0, nullptr },
+	{ "columnar_strings_no_hash", 0, nullptr },
+	{ "columnar_compression_uint32", 0, nullptr },
+	{ "columnar_compression_int64", 0, nullptr },
+	{ "columnar_subblock",		0, nullptr },
+	{ "columnar_subblock_mva",	0, nullptr },
+	{ "columnar_minmax_leaf",	0, nullptr },
+#endif
 	{ nullptr,					0, nullptr }
 };
 
@@ -813,6 +823,7 @@ static KeyDesc_t g_dKeysIndexer[] =
 	{ "json_autoconv_numbers",	KEY_DEPRECATED, "json_autoconv_numbers in common{..} section" },
 	{ "json_autoconv_keynames",	KEY_DEPRECATED, "json_autoconv_keynames in common{..} section" },
 	{ "lemmatizer_cache",		0, NULL },
+	{ "ignore_non_plain",		0, NULL },
 	{ NULL,						0, NULL }
 };
 
@@ -846,6 +857,7 @@ static KeyDesc_t g_dKeysSearchd[] =
 	{ "read_buffer",			KEY_DEPRECATED, "read_buffer_docs or read_buffer_hits" },
 	{ "read_buffer_docs",		0, NULL },
 	{ "read_buffer_hits",		0, NULL },
+	{ "read_buffer_columnar",	0, NULL },
 	{ "read_unhinted",			0, NULL },
 	{ "max_batch_queries",		0, NULL },
 	{ "subtree_docs_cache",		0, NULL },
@@ -875,7 +887,7 @@ static KeyDesc_t g_dKeysSearchd[] =
 	{ "ha_period_karma",		0, NULL },
 	{ "predicted_time_costs",	0, NULL },
 	{ "persistent_connections_limit",	0, NULL },
-	{ "ondisk_attrs_default",	KEY_DEPRECATED, "per index access_plain_attrs = mmap" },
+	{ "ondisk_attrs_default",	KEY_REMOVED, NULL },
 	{ "shutdown_timeout",		0, NULL },
 	{ "query_log_min_msec",		0, NULL },
 	{ "agent_connect_timeout",	0, NULL },
@@ -912,6 +924,7 @@ static KeyDesc_t g_dKeysSearchd[] =
 	{ "threads",				0, nullptr },
 	{ "jobs_queue_size",		0, nullptr },
 	{ "not_terms_only_allowed",	0, nullptr },
+	{ "query_log_commands",		0, nullptr },
 	{ NULL,						0, NULL }
 };
 

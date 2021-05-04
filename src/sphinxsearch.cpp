@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -1034,7 +1034,7 @@ template<bool USE_BM25>
 const ExtDoc_t * ExtRanker_T<USE_BM25>::GetFilteredDocs ()
 {
 #if QDEBUG
-	printf ( "ranker getfiltereddocs\n" );
+	printf ( "ranker getfiltereddocs %p\n", this );
 #endif
 
 	while (true)
@@ -2925,7 +2925,7 @@ public:
 		return -1;
 	}
 
-	ISphExpr * CreateNode ( int iID, ISphExpr * _pLeft, ESphEvalStage *, CSphString & ) final
+	ISphExpr * CreateNode ( int iID, ISphExpr * _pLeft, ESphEvalStage *, bool *, CSphString & ) final
 	{
 		SafeAddRef ( _pLeft );
 		CSphRefcountedPtr<ISphExpr> pLeft ( _pLeft );
@@ -3179,8 +3179,7 @@ public:
 
 /// initialize ranker state
 template < bool NEED_PACKEDFACTORS, bool HANDLE_DUPES >
-bool RankerState_Expr_fn<NEED_PACKEDFACTORS, HANDLE_DUPES>::Init ( int iFields, const int * pWeights, ExtRanker_T<true> * pRanker, CSphString & sError,
-																	DWORD uFactorFlags )
+bool RankerState_Expr_fn<NEED_PACKEDFACTORS, HANDLE_DUPES>::Init ( int iFields, const int * pWeights, ExtRanker_T<true> * pRanker, CSphString & sError,	DWORD uFactorFlags )
 {
 	m_iFields = iFields;
 	m_pWeights = pWeights;

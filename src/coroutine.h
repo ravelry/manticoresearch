@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -17,7 +17,7 @@
 
 namespace Threads {
 
-static const size_t DEFAULT_CORO_STACK_SIZE = 1024 * 128; // stack size - 128K
+size_t GetDefaultCoroStackSize();
 
 // helper to align stack suze
 size_t AlignStackSize ( size_t iSize );
@@ -29,7 +29,7 @@ using Waiter_t = SharedPtrCustom_t<void *>;
 void CoGo ( Handler handler, Scheduler_i* pScheduler );
 
 // start task continuation in coroutine, second-priority
-void CoCo ( Handler handler, Waiter_t tSignaller );
+void CoCo ( Handler handler, Waiter_t tSignaller, bool bVip );
 
 // perform handler in dedicated coro with custom stack (scheduler is same, or global if none)
 // try to run immediately (if thread wasn't switched yet), or push to first-priority queue
@@ -69,7 +69,7 @@ bool CoContinueBool ( int iStack, HANDLER handler )
 
 // Run handler in single or many user threads.
 // NOTE! even with concurrency==1 it is not sticked to the same OS thread, so avoid using thread-local storage.
-void CoExecuteN ( int iConcurrency, Handler&& handler );
+void CoExecuteN ( int iConcurrency, bool bVip, Handler&& handler );
 
 Scheduler_i * CoCurrentScheduler ();
 
@@ -82,6 +82,15 @@ void CoYieldWith ( Handler handler );
 // move coroutine to another scheduler
 void CoMoveTo ( Scheduler_i * pScheduler );
 
+// yield to external context
+void CoYield ();
+
+// create context and return resuming functor.
+// calling resumer will run handler until it finishes or yields.
+// returns flag of how coroutine interrupted: finished(true) or yielded(false)
+using Resumer_fn = std::function<bool()>;
+Resumer_fn MakeCoroExecutor (	Handler fnHandler );
+
 static const int tmDefaultThrotleTimeQuantumMs = 100; // default value, if nothing specified
 class CoThrottler_c
 {
@@ -92,6 +101,7 @@ class CoThrottler_c
 
 	sph::MiniTimer_c m_dTimerGuard;
 	bool m_bSameThread = true;
+	bool m_bNoYeld = false;
 
 	bool MaybeThrottle ();
 
@@ -99,7 +109,7 @@ public:
 	// -1 means 'use value of tmThrotleTimeQuantumMs'
 	// 0 means 'don't throttle'
 	// any other positive expresses throttling interval in milliseconds
-	explicit CoThrottler_c ( int tmPeriodMs = -1 );
+	CoThrottler_c ( int tmPeriodMs, bool bNoYeld );
 
 	// that changes default daemon-wide
 	inline static void SetDefaultThrottlingPeriodMS ( int tmPeriodMs )
@@ -248,14 +258,20 @@ public:
 	}
 
 	// called once per coroutine, when it really has to process something
-	REFCONTEXT CloneNewContext()
+	REFCONTEXT CloneNewContext(int *pCtx = nullptr)
 	{
+		if ( pCtx )
+			*pCtx = 0;
+
 		if ( m_bDisabled )
 			return m_dParentContext;
 
 		auto iMyIdx = m_iTasks.fetch_add ( 1, std::memory_order_acq_rel );
 		if ( !iMyIdx )
 			return m_dParentContext;
+
+		if ( pCtx )
+			*pCtx = iMyIdx;
 
 		--iMyIdx; // make it back 0-based
 		auto & dCtx = m_dChildrenContexts[iMyIdx];
@@ -322,22 +338,23 @@ class CAPABILITY ( "mutex" ) CoroRWLock_c : public ISphNoncopyable
 
 public:
 	bool WriteLock() ACQUIRE();
+	bool UpgradeLock (  bool bVip ) RELEASE() ACQUIRE();
 	bool ReadLock() ACQUIRE_SHARED();
 	bool Unlock() UNLOCK_FUNCTION();
 };
 
-class CAPABILITY ( "mutex" ) CoroMutex_c : public ISphNoncopyable
+class CAPABILITY ( "mutex" ) CoroSpinlock_c : public ISphNoncopyable
 {
 	std::atomic<bool> m_bLocked { false };
 public:
 
-	~CoroMutex_c ();
+	~CoroSpinlock_c ();
 	void Lock () ACQUIRE();
 	void Unlock () RELEASE();
 };
 
 using SccRL_t = CSphScopedRLock_T<CoroRWLock_c>;
 using SccWL_t = CSphScopedWLock_T<CoroRWLock_c>;
-using ScopedCoroMutex_t = CSphScopedLock<CoroMutex_c>;
+using ScopedCoroSpinlock_t = CSphScopedLock<CoroSpinlock_c>;
 
 } // namespace Threads

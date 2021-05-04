@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2019-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2019-2021, Manticore Software LTD (https://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -20,10 +20,10 @@
 	#include "sphinxversion.h"
 #endif
 
-#ifndef SPHINX_TAG
+#ifndef BUILD_TAG
 #define BANNER_TAG "dev"
 #else
-#define BANNER_TAG SPHINX_TAG
+#define BANNER_TAG BUILD_TAG
 #endif
 
 #ifndef GIT_TIMESTAMP_ID
@@ -38,14 +38,16 @@
 
 #define PRODUCT_VERSION          VERNUMBERS " " SPH_GIT_COMMIT_ID "@" GIT_TIMESTAMP_ID " " BANNER_TAG
 #define PRODUCT_NAME			"Manticore " PRODUCT_VERSION
-#define PRODUCT_BANNER            PRODUCT_NAME "\nCopyright (c) 2001-2016, Andrew Aksyonoff\n" \
+#define PRODUCT_BANNER_TEXT		"\nCopyright (c) 2001-2016, Andrew Aksyonoff\n" \
 	"Copyright (c) 2008-2016, Sphinx Technologies Inc (http://sphinxsearch.com)\n" \
-	"Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)\n\n"
+	"Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)\n\n"
 
+#define PRODUCT_BANNER            PRODUCT_NAME PRODUCT_BANNER_TEXT
 
 const char * szMANTICORE_VERSION = PRODUCT_VERSION;
 const char * szMANTICORE_NAME = PRODUCT_NAME;
 const char * szMANTICORE_BANNER = PRODUCT_BANNER;
+const char * szMANTICORE_BANNER_TEXT = PRODUCT_BANNER_TEXT;
 const char * szGIT_COMMIT_ID = SPH_GIT_COMMIT_ID;
 const char * szGIT_BRANCH_ID = GIT_BRANCH_ID;
 const char * szGDB_SOURCE_DIR = GDB_SOURCE_DIR;

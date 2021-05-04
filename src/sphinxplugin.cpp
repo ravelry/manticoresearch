@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -14,20 +14,7 @@
 #include "sphinxint.h"
 #include "sphinxutils.h"
 #include "sphinxplugin.h"
-
-#if !USE_WINDOWS
-#include <unistd.h>
-#include <sys/time.h>
-#if HAVE_DLOPEN
-#include <dlfcn.h>
-#endif // HAVE_DLOPEN
-#endif // !USE_WINDOWS
-
-#if !USE_WINDOWS
-#ifndef HAVE_DLERROR
-#define dlerror() ""
-#endif // HAVE_DLERROR
-#endif // !USE_WINDOWS
+#include "libutils.h"
 
 //////////////////////////////////////////////////////////////////////////
 // TYPES
@@ -42,8 +29,9 @@ protected:
 
 public:
 	int					m_iHashedPlugins;		///< how many active g_hPlugins entries reference this handle
+	bool				m_bDlGlobal = false;
 
-	explicit			PluginLib_c ( void * pHandle, const char * sName );
+	explicit			PluginLib_c ( void * pHandle, const char * sName, bool bDlGlobal );
 	const CSphString &	GetName() const { return m_sName; }
 	void *				GetHandle() const { return m_pHandle; }
 
@@ -97,48 +85,14 @@ static CSphOrderedHash<PluginDesc_c*, PluginKey_t, PluginKey_t, 256>	g_hPlugins;
 // PLUGIN MANAGER
 //////////////////////////////////////////////////////////////////////////
 
-#if USE_WINDOWS
-#undef HAVE_DLOPEN
-#define HAVE_DLOPEN		1
-#define RTLD_LAZY		0
-#define RTLD_LOCAL		0
-
-void * dlsym ( void * lib, const char * name )
-{
-	return GetProcAddress ( (HMODULE)lib, name );
-}
-
-void * dlopen ( const char * libname, int )
-{
-	return LoadLibraryEx ( libname, NULL, 0 );
-}
-
-int dlclose ( void * lib )
-{
-	return FreeLibrary ( (HMODULE)lib )
-		? 0
-		: GetLastError();
-}
-
-const char * dlerror()
-{
-	static char sError[256];
-	DWORD uError = GetLastError();
-	FormatMessage ( FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL,
-		uError, LANG_SYSTEM_DEFAULT, (LPTSTR)sError, sizeof(sError), NULL );
-	return sError;
-}
-#endif // USE_WINDOWS
-
-//////////////////////////////////////////////////////////////////////////
-
-PluginLib_c::PluginLib_c ( void * pHandle, const char * sName )
+PluginLib_c::PluginLib_c ( void * pHandle, const char * sName, bool bDlGlobal )
 {
 	assert ( pHandle );
 	m_pHandle = pHandle;
 	m_iHashedPlugins = 0;
 	m_sName = sName;
 	m_sName.ToLower();
+	m_bDlGlobal = bDlGlobal;
 }
 
 PluginLib_c::~PluginLib_c()
@@ -278,6 +232,8 @@ static SymbolDesc_t g_dSymbolsTokenFilter[] =
 	{ static_cast<int>( offsetof(PluginTokenFilter_c, m_fnGetExtraToken)),	"get_extra_token",	false },
 	{ static_cast<int>( offsetof(PluginTokenFilter_c, m_fnEndField)),		"end_field",		false },
 	{ static_cast<int>( offsetof(PluginTokenFilter_c, m_fnDeinit)),		"deinit",			false },
+	{ static_cast<int>( offsetof(PluginTokenFilter_c, m_fnTokenIsBlended)),		"is_blended", false },
+	{ static_cast<int>( offsetof(PluginTokenFilter_c, m_fnTokenIsBlendedPart)),	"is_blended_part", false },
 	{ -1, nullptr, false }
 };
 
@@ -300,7 +256,43 @@ void PluginLog ( const char * szMsg, int iLen )
 		sphWarning ( "PLUGIN: %.*s", (int) iLen, szMsg );
 }
 
-static PluginLib_c * LoadPluginLibrary ( const char * sLibName, CSphString & sError, bool bLinuxReload=false )
+static bool PluginOnLoadLibrary ( const PluginLib_c * pLib, CSphString & sError )
+{
+	// library already loaded - no need to call plugin_load function
+	if ( g_hPluginLibs ( pLib->GetName() ) )
+		return true;
+
+	auto fnPluginLoad = (PluginLoad_fn) dlsym ( pLib->GetHandle(), "plugin_load" );
+	if ( fnPluginLoad )
+	{
+		char sErrBuf [ SPH_UDF_ERROR_LEN ] = { 0 };
+		if ( fnPluginLoad ( sErrBuf )!=0 )
+		{
+			sError = sErrBuf;
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static bool PluginOnUnloadLibrary ( const PluginLib_c * pLib, CSphString & sError )
+{
+	auto fnPluginUnload = (PluginLoad_fn) dlsym ( pLib->GetHandle(), "plugin_unload" );
+	if ( fnPluginUnload )
+	{
+		char sErrBuf [ SPH_UDF_ERROR_LEN ] = { 0 };
+		if ( fnPluginUnload ( sErrBuf )!=0 )
+		{
+			sError = sErrBuf;
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static PluginLib_c * LoadPluginLibrary ( const char * sLibName, CSphString & sError, bool bDlGlobal, bool bLinuxReload )
 {
 
 	CSphString sTmpfile;
@@ -319,7 +311,8 @@ static PluginLib_c * LoadPluginLibrary ( const char * sLibName, CSphString & sEr
 		}
 	}
 
-	void * pHandle = dlopen ( bLinuxReload ? sTmpfile.cstr() : sLibfile.cstr(), RTLD_LAZY | RTLD_LOCAL );
+	int iFlags = ( bDlGlobal ? ( RTLD_LAZY | RTLD_GLOBAL ) : ( RTLD_LAZY | RTLD_LOCAL ) );
+	void * pHandle = dlopen ( bLinuxReload ? sTmpfile.cstr() : sLibfile.cstr(), iFlags );
 	if ( !pHandle )
 	{
 		const char * sDlerror = dlerror();
@@ -365,11 +358,16 @@ static PluginLib_c * LoadPluginLibrary ( const char * sLibName, CSphString & sEr
 		fnLogCb(PluginLog);
 	}
 
-	return new PluginLib_c ( pHandle, sLibName );
+	return new PluginLib_c ( pHandle, sLibName, bDlGlobal );
 }
 #endif
 
 bool sphPluginCreate ( const char * szLib, PluginType_e eType, const char * sName, ESphAttr eUDFRetType, CSphString & sError )
+{
+	return sphPluginCreate ( szLib, eType, sName, eUDFRetType, false, sError );
+}
+
+bool sphPluginCreate ( const char * szLib, PluginType_e eType, const char * sName, ESphAttr eUDFRetType, bool bDlGlobal, CSphString & sError )
 {
 #if !HAVE_DLOPEN
 	sError = "no dlopen(), no plugins";
@@ -425,11 +423,16 @@ bool sphPluginCreate ( const char * szLib, PluginType_e eType, const char * sNam
 		pLib->AddRef();
 	} else
 	{
-		pLib = LoadPluginLibrary ( sLib.cstr(), sError );
+		pLib = LoadPluginLibrary ( sLib.cstr(), sError, bDlGlobal, false );
 		if ( !pLib )
 			return false;
 	}
 	assert ( pLib->GetHandle() );
+	if ( !PluginOnLoadLibrary ( pLib, sError ) )
+	{
+		pLib->Release();
+		return false;
+	}
 
 	PluginDesc_c * pPlugin = nullptr;
 	const SymbolDesc_t * pSym = nullptr;
@@ -493,13 +496,15 @@ bool sphPluginDrop ( PluginType_e eType, const char * sName, CSphString & sError
 	Verify ( g_hPlugins.Delete(tKey) );
 	pPlugin->Release();
 
+	bool bUnloaded = true;
 	if ( --pLib->m_iHashedPlugins==0 )
 	{
+		bUnloaded = PluginOnUnloadLibrary ( pLib, sError );
 		g_hPluginLibs.Delete ( pLib->GetName() );
 		pLib->Release();
 	}
 
-	return true;
+	return bUnloaded;
 #endif // HAVE_DLOPEN
 }
 
@@ -516,6 +521,7 @@ bool sphPluginReload ( const char * sName, CSphString & sError )
 	CSphVector<PluginKey_t> dKeys;
 	CSphVector<PluginDesc_c*> dPlugins;
 
+	bool bDlGlobal = false;
 	g_hPlugins.IterateStart();
 	while ( g_hPlugins.IterateNext() )
 	{
@@ -524,6 +530,7 @@ bool sphPluginReload ( const char * sName, CSphString & sError )
 		{
 			dKeys.Add ( g_hPlugins.IterateGetKey() );
 			dPlugins.Add ( g_hPlugins.IterateGet() );
+			bDlGlobal = v->GetLib()->m_bDlGlobal;
 		}
 	}
 
@@ -536,9 +543,9 @@ bool sphPluginReload ( const char * sName, CSphString & sError )
 
 	// load new library and check every plugin
 #if !USE_WINDOWS
-	PluginLib_c * pNewLib = LoadPluginLibrary ( sName, sError, true );
+	PluginLib_c * pNewLib = LoadPluginLibrary ( sName, sError, bDlGlobal, true );
 #else
-	PluginLib_c * pNewLib = LoadPluginLibrary ( sName, sError );
+	PluginLib_c * pNewLib = LoadPluginLibrary ( sName, sError, bDlGlobal, false );
 #endif
 	if ( !pNewLib )
 		return false;
@@ -592,8 +599,17 @@ bool sphPluginReload ( const char * sName, CSphString & sError )
 	}
 	assert ( pOldLib->m_iHashedPlugins==dPlugins.GetLength() );
 	pOldLib->m_iHashedPlugins = 0;
+	PluginOnUnloadLibrary ( pOldLib, sError );
 	Verify ( g_hPluginLibs.Delete ( pOldLib->GetName() ) );
 	SafeRelease ( pOldLib );
+
+	if ( !PluginOnLoadLibrary ( pNewLib, sError ) )
+	{
+		ARRAY_FOREACH ( i, dNewPlugins )
+			dNewPlugins[i]->Release();
+
+		return false;
+	}
 
 	// register new references
 	g_hPluginLibs.Add ( pNewLib, pNewLib->GetName() );
@@ -616,7 +632,7 @@ PluginDesc_c * sphPluginAcquire ( const char * szLib, PluginType_e eType, const 
 	CSphRefcountedPtr<PluginDesc_c> pDesc { sphPluginGet ( eType, szName ) };
 	if ( !pDesc )
 	{
-		if ( !sphPluginCreate ( szLib, eType, szName, SPH_ATTR_NONE, sError ) )
+		if ( !sphPluginCreate ( szLib, eType, szName, SPH_ATTR_NONE, false, sError ) )
 			return nullptr;
 		return sphPluginGet ( eType, szName );
 	}

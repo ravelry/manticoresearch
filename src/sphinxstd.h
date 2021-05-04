@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -160,6 +160,11 @@ typedef unsigned short		WORD;
 typedef unsigned char		BYTE;
 
 #endif // _WIN32
+
+// switch off clang-specific warning about non-necessary capturing of constants
+#ifdef __clang__
+	_Pragma("clang diagnostic ignored \"-Wunused-lambda-capture\"")
+#endif
 
 /////////////////////////////////////////////////////////////////////////////
 // 64-BIT INTEGER TYPES AND MACROS
@@ -543,6 +548,22 @@ inline double sqr ( double v ) { return v*v;}
 
 /// float argument squared
 inline float fsqr ( float v ) { return v*v; }
+
+#ifndef FORCE_INLINE
+#  ifdef _MSC_VER
+#    define FORCE_INLINE __forceinline
+#  else
+#    if defined (__cplusplus) || defined (__STDC_VERSION__) && __STDC_VERSION__ >= 199901L   /* C99 */
+#      ifdef __GNUC__
+#        define FORCE_INLINE inline __attribute__((always_inline))
+#      else
+#        define FORCE_INLINE inline
+#      endif
+#    else
+#      define FORCE_INLINE
+#    endif
+#  endif
+#endif
 
 //////////////////////////////////////////////////////////////////////////
 // RANDOM NUMBERS GENERATOR
@@ -1903,10 +1924,22 @@ public:
 	/// copy + move
 	// if provided lvalue, it will be copied into rhs via copy ctr, then swapped to *this
 	// if provided rvalue, it will just pass to SwapData immediately.
-	Vector_T &operator= ( Vector_T<T> rhs ) noexcept
+	Vector_T & operator = ( Vector_T<T> rhs ) noexcept
 	{
 		SwapData ( rhs );
 		return *this;
+	}
+
+	bool operator == ( const Vector_T<T> & rhs ) noexcept
+	{
+		if ( m_iCount!=rhs.m_iCount )
+			return false;
+
+		for ( int i = 0; i < m_iCount; i++ )
+			if ( m_pData[i]!=rhs.m_pData[i] )
+				return false;
+
+		return true;
 	}
 
 	/// memmove N elements from raw pointer to the end
@@ -2921,8 +2954,9 @@ inline void Swap ( CSphString & v1, CSphString & v2 )
 	v1.Swap ( v2 );
 }
 
-// commonly used vector of strings
+// commonly used vectors
 using StrVec_t = CSphVector<CSphString>;
+using IntVec_t = CSphVector<int>;
 
 // vector of byte vectors
 using BlobVec_t = CSphVector<CSphVector<BYTE> >;
@@ -3848,7 +3882,9 @@ public:
 					~CSphScopedPtr ()			{ SafeDelete ( m_pPtr ); }
 	T *				operator -> () const		{ return m_pPtr; }
 	T *				Ptr () const				{ return m_pPtr; }
-	explicit operator bool () const				{ return m_pPtr!=nullptr; }
+	T&				operator* () const			{ return *m_pPtr; }
+	bool 			operator! () const noexcept 	{ return m_pPtr==nullptr; }
+	explicit 		operator bool () const noexcept	{ return !this->operator!(); }
 
 	CSphScopedPtr& operator= ( T* pPtr )
 	{
@@ -4843,6 +4879,12 @@ using SharedPtrCustom_t = SharedPtr_T<T, CustomDeleter_T<T, DELETER>, REFCOUNTED
 
 int sphCpuThreadsCount ();
 
+int sphGetMemPageSize ();
+
+inline int sphRoundUp ( int iValue, int iLimit )
+{
+	return ( iValue+iLimit-1 ) & ~( iLimit-1 );
+}
 //////////////////////////////////////////////////////////////////////////
 struct HashFunc_Int64_t
 {
@@ -5674,11 +5716,13 @@ public:
  * Use m_dLogger.Print() either as direct call, either as 'evaluate expression' in debugger.
  */
 
-#define LOC_ADD LocMessages_c    m_dLogger
-#define LOC_SWAP( RHS ) m_dLogger.Swap(RHS.m_dLogger)
-#define LOC_MSG m_dLogger.GetLoc()
+#define LOC_ADD LocMessages_c    m_tLogger
+#define LOC_SWAP( RHS ) m_tLogger.Swap(RHS.m_tLogger)
+#define LOC_MSG m_tLogger.GetLoc()
 #define LOC( Level, Component ) \
     if_const (LOG_LEVEL_##Level) \
         LOC_MSG << LOG_COMPONENT_##Component
+
+using ByteBlob_t = std::pair<const BYTE *, int>;
 
 #endif // _sphinxstd_

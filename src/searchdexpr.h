@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -25,7 +25,7 @@ class ExprHook_c : public ISphExprHook
 public:
 	int			IsKnownIdent ( const char * ) const final	{ return -1; }
 	int			IsKnownFunc ( const char * sFunc ) const final;
-	ISphExpr *	CreateNode ( int iID, ISphExpr * pLeft, ESphEvalStage * pEvalStage, CSphString & sError ) final;
+	ISphExpr *	CreateNode ( int iID, ISphExpr * pLeft, ESphEvalStage * pEvalStage, bool * pNeedDocIds, CSphString & sError ) final;
 	ESphAttr	GetIdentType ( int ) const final;
 	ESphAttr	GetReturnType ( int iID, const CSphVector<ESphAttr> & dArgs, bool, CSphString & sError ) const final;
 	void		CheckEnter ( int ) final {}

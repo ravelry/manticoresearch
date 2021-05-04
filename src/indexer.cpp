@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -58,6 +58,7 @@ static int				g_iMemLimit				= 128*1024*1024;
 static int				g_iMaxXmlpipe2Field		= 2*1024*1024;
 static int				g_iWriteBuffer			= 1024*1024;
 static int				g_iMaxFileFieldBuffer	= 8*1024*1024;
+static bool				g_bIgnoreNonPlain	= false;
 
 static ESphOnFileFieldError	g_eOnFileFieldError = FFE_IGNORE_FIELD;
 
@@ -891,8 +892,7 @@ CSphSource * SpawnSource ( const CSphConfigSection & hSource, const char * sSour
 // INDEXING
 //////////////////////////////////////////////////////////////////////////
 
-bool DoIndex ( const CSphConfigSection & hIndex, const char * sIndexName,
-	const CSphConfigType & hSources, FILE * fpDumpRows )
+bool DoIndex ( const CSphConfigSection & hIndex, const char * sIndexName, const CSphConfigType & hSources, FILE * fpDumpRows )
 {
 	// check index type
 	bool bPlain = true;
@@ -910,12 +910,12 @@ bool DoIndex ( const CSphConfigSection & hIndex, const char * sIndexName,
 	}
 	if ( !bPlain )
 	{
-		if ( !g_bQuiet )
+		if ( !g_bQuiet && !g_bIgnoreNonPlain )
 		{
 			fprintf ( stdout, "WARNING: skipping non-plain index '%s'...\n", sIndexName );
 			fflush ( stdout );
 		}
-		return false;
+		return g_bIgnoreNonPlain;
 	}
 
 	// progress bar
@@ -1278,12 +1278,36 @@ bool DoIndex ( const CSphConfigSection & hIndex, const char * sIndexName,
 	return bOK;
 }
 
+
+static bool RenameIndexFiles ( const char * szPath, const char * szName, CSphIndex * pIndex, bool bRotate )
+{
+	char sFrom [ SPH_MAX_FILENAME_LEN ];
+	char sTo [ SPH_MAX_FILENAME_LEN ];
+
+	snprintf ( sFrom, sizeof(sFrom), "%s.tmp", szPath );
+	sFrom [ sizeof(sFrom)-1 ] = '\0';
+	if ( bRotate )
+		snprintf ( sTo, sizeof(sTo), "%s.new", szPath );
+	else
+		snprintf ( sTo, sizeof(sTo), "%s", szPath );
+
+	sTo [ sizeof(sTo)-1 ] = '\0';
+
+	pIndex->SetBase ( sFrom );
+	if ( !pIndex->Rename ( sTo ) )
+	{
+		fprintf ( stdout, "ERROR: index '%s': failed to rename '%s' to '%s': %s", szName, sFrom, sTo, pIndex->GetLastError().cstr() );
+		return false;
+	}
+
+	return true;
+}
+
 //////////////////////////////////////////////////////////////////////////
 // MERGING
 //////////////////////////////////////////////////////////////////////////
 
-bool DoMerge ( const CSphConfigSection & hDst, const char * sDst,
-	const CSphConfigSection & hSrc, const char * sSrc, CSphVector<CSphFilterSettings> & tPurge, bool bRotate )
+bool DoMerge ( const CSphConfigSection & hDst, const char * sDst, const CSphConfigSection & hSrc, const char * sSrc, CSphVector<CSphFilterSettings> & tPurge, bool bRotate, bool bDropSrc )
 {
 	// progress bar
 	if ( !g_bQuiet )
@@ -1385,40 +1409,50 @@ bool DoMerge ( const CSphConfigSection & hDst, const char * sDst,
 	pDst->SetProgressCallback ( ShowProgress );
 
 	int64_t tmMergeTime = sphMicroTimer();
-	if ( !pDst->Merge ( pSrc, tPurge, true ) )
-		sphDie ( "failed to merge index '%s' into index '%s': %s", sSrc, sDst, pDst->GetLastError().cstr() );
-	if ( !pDst->GetLastWarning().IsEmpty() )
-		fprintf ( stdout, "WARNING: index '%s': %s\n", sDst, pDst->GetLastWarning().cstr() );
+
+	{
+		if ( !pDst->Merge ( pSrc, tPurge, true ) )
+			sphDie ( "failed to merge index '%s' into index '%s': %s", sSrc, sDst, pDst->GetLastError().cstr() );
+
+		if ( !pDst->GetLastWarning().IsEmpty() )
+			fprintf ( stdout, "WARNING: index '%s': %s\n", sDst, pDst->GetLastWarning().cstr() );
+	}
+
+	if ( bDropSrc )
+	{
+		if ( !pSrc->Merge ( pSrc, {}, true ) )
+			sphDie ( "failed to drop index '%s' : %s", sSrc, pSrc->GetLastError().cstr() );
+
+		if ( !pSrc->GetLastWarning().IsEmpty() )
+			fprintf ( stdout, "WARNING: index '%s': %s\n", sSrc, pSrc->GetLastWarning().cstr() );
+
+		// write klist with targets but without klist itself
+		// that will affect the order of index load on rotation, but no actual klist will be applied
+		CSphString sSrcKlist;
+		sSrcKlist.SetSprintf ( "%s.tmp%s", pSrc->GetFilename(), sphGetExt(SPH_EXT_SPK).cstr() );
+		if ( !WriteKillList ( sSrcKlist, nullptr, 0, tTargets, sError ) )
+			sphDie ( "failed to modify klist target in index '%s': %s", sSrc, sError.cstr() );
+	}
+
 	tmMergeTime = sphMicroTimer() - tmMergeTime;
 	if ( !g_bQuiet )
 		printf ( "merged in %d.%03d sec\n", (int)(tmMergeTime/1000000), (int)(tmMergeTime%1000000)/1000 );
 
 	// need to close attribute files that was mapped with RW access to unlink and rename them on windows
 	pSrc->Dealloc();
+	pSrc->Unlock();
+
 	pDst->Dealloc();
-	pDst->Unlock ();
+	pDst->Unlock();
 
 	// pick up merge result
-	const char * sPath = hDst["path"].cstr();
-	char sFrom [ SPH_MAX_FILENAME_LEN ];
-	char sTo [ SPH_MAX_FILENAME_LEN ];
+	if ( !RenameIndexFiles ( hDst["path"].cstr(), sDst, pDst, bRotate ) )
+		return false;
 
-	snprintf ( sFrom, sizeof(sFrom), "%s.tmp", sPath );
-	sFrom [ sizeof(sFrom)-1 ] = '\0';
-	if ( bRotate )
-		snprintf ( sTo, sizeof(sTo), "%s.new", sPath );
-	else
-		snprintf ( sTo, sizeof(sTo), "%s", sPath );
-	sTo [ sizeof(sTo)-1 ] = '\0';
+	if ( bDropSrc && !RenameIndexFiles ( hSrc["path"].cstr(), sSrc, pSrc, bRotate ) )
+		return false;
 
-	pDst->SetBase ( sFrom );
-	bool bRenamed = pDst->Rename ( sTo );
-
-	if ( !bRenamed )
-		fprintf ( stdout, "ERROR: index '%s': failed to rename '%s' to '%s': %s", sDst, sFrom, sTo, pDst->GetLastError().cstr() );
-
-	// all good?
-	return bRenamed;
+	return true;
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1616,10 +1650,17 @@ bool SendRotate ( const CSphConfig & hConf, bool bForce )
 	return true;
 }
 
-static void ShowVersion ()
+
+static void ShowVersion()
 {
-	fprintf ( stdout, "%s", szMANTICORE_BANNER );
+	const char * szColumnarVer = GetColumnarVersionStr();
+	CSphString sColumnar = "";
+	if ( szColumnarVer )
+		sColumnar.SetSprintf ( " (columnar %s)", szColumnarVer );
+
+	fprintf ( stdout, "%s%s%s",  szMANTICORE_NAME, sColumnar.cstr(), szMANTICORE_BANNER_TEXT );
 }
+
 
 static void ShowHelp ()
 {
@@ -1659,6 +1700,7 @@ static void ShowHelp ()
 		"--merge-dst-range <attr> <min> <max>\n"
 		"\t\t\tfilter 'dst-index' on merge, keep only those documents\n"
 		"\t\t\twhere 'attr' is between 'min' and 'max' (inclusive)\n"
+		"--drop-src clears src index after merge\n"
 		"--dump-rows <FILE>\tdump indexed rows into FILE\n"
 		"--print-queries\t\tprint SQL queries (for debugging)\n"
 		"--print-rt\t\tprint indexed rows as SQL insert commands and field mapping info for populating an RT index\n"
@@ -1679,6 +1721,7 @@ int main ( int argc, char ** argv )
 	CSphVector<const char *> dIndexes;
 	CSphVector<const char *> dWildIndexes;
 	bool bIndexAll = false;
+	bool bDropSrc = false;
 	CSphString sDumpRows;
 
 	if ( argc==2 && ( !strcmp ( argv[1], "--help" ) || !strcmp ( argv[1], "-h" )))
@@ -1746,7 +1789,8 @@ int main ( int argc, char ** argv )
 		} else if ( strcasecmp ( argv[i], "--all" )==0 )
 		{
 			bIndexAll = true;
-
+		} else if ( strcasecmp ( argv[i], "--verbose" )==0 ) // just to prevent warning about unknow option
+		{
 		} else if ( isalnum ( argv[i][0] ) || argv[i][0]=='_' || sphIsWild ( argv[i][0] ) )
 		{
 			bool bHasWilds = false;
@@ -1766,7 +1810,9 @@ int main ( int argc, char ** argv )
 				dWildIndexes.Add ( argv[i] );
 			else
 				dIndexes.Add ( argv[i] );
-
+		} else if ( strcasecmp ( argv[i], "--drop-src" )==0 )
+		{
+			bDropSrc = true;
 		} else if ( strcasecmp ( argv[i], "--dump-rows" )==0 && (i+1)<argc )
 		{
 			sDumpRows = argv[++i];
@@ -1786,7 +1832,7 @@ int main ( int argc, char ** argv )
 			}else{
 				break;
 			}
-		} else if ( strcasecmp ( argv[i], "--keep-attrs" )>=0 )
+		} else if ( strncasecmp ( argv[i], "--keep-attrs", 12 )==0 )
 		{
 			CSphString sArg ( argv[i] );
 			if ( sArg.Begins ( "--keep-attrs=" ) )
@@ -1806,8 +1852,14 @@ int main ( int argc, char ** argv )
 			break;
 	}
 
+	CSphString sError;
+	bool bColumnarError = !InitColumnar ( sError );
+
 	if ( !g_bQuiet )
 		ShowVersion();
+
+	if ( bColumnarError )
+		sphWarning ( "Error initializing columnar storage: %s", sError.cstr() );
 
 	const char* sEndian = sphCheckEndian();
 	if ( sEndian )
@@ -1844,7 +1896,6 @@ int main ( int argc, char ** argv )
 	// load config
 	///////////////
 
-	CSphString sError;
 	if ( !sphInitCharsetAliasTable ( sError ) )
 		sphDie ( "failed to init charset alias table: %s", sError.cstr() );
 
@@ -1865,6 +1916,7 @@ int main ( int argc, char ** argv )
 		g_iMaxXmlpipe2Field = hIndexer.GetSize ( "max_xmlpipe2_field", g_iMaxXmlpipe2Field );
 		g_iWriteBuffer = hIndexer.GetSize ( "write_buffer", g_iWriteBuffer );
 		g_iMaxFileFieldBuffer = Max ( 1024*1024, hIndexer.GetSize ( "max_file_field_buffer", g_iMaxFileFieldBuffer ) );
+		g_bIgnoreNonPlain = hIndexer.GetBool( "ignore_non_plain", g_bIgnoreNonPlain);
 
 		if ( hIndexer("on_file_field_error") )
 		{
@@ -1943,6 +1995,7 @@ int main ( int argc, char ** argv )
 
 	int iIndexed = 0;
 	int iFailed = 0;
+
 	if ( bMerge )
 	{
 		if ( dIndexes.GetLength()!=2 )
@@ -1956,7 +2009,7 @@ int main ( int argc, char ** argv )
 
 		bool bLastOk = DoMerge (
 			hConf["index"][dIndexes[0]], dIndexes[0],
-			hConf["index"][dIndexes[1]], dIndexes[1], dMergeDstFilters, g_bRotate );
+			hConf["index"][dIndexes[1]], dIndexes[1], dMergeDstFilters, g_bRotate, bDropSrc );
 		if ( bLastOk )
 			iIndexed++;
 		else
@@ -1982,7 +2035,7 @@ int main ( int argc, char ** argv )
 				fprintf ( stdout, "WARNING: no such index '%s', skipping.\n", dIndexes[j] );
 			else
 			{
-				bool bLastOk = DoIndex ( hConf["index"][dIndexes[j]], dIndexes[j], hConf["source"], fpDumpRows );
+				bool bLastOk = DoIndex ( hConf["index"][dIndexes[j]], dIndexes[j], hConf["source"], fpDumpRows);
 				if ( bLastOk && ( sphMicroTimer() - tmRotated > ROTATE_MIN_INTERVAL ) && g_bSendHUP && SendRotate ( hConf, false ) )
 					tmRotated = sphMicroTimer();
 				if ( bLastOk )
@@ -1994,6 +2047,7 @@ int main ( int argc, char ** argv )
 	}
 
 	sphShutdownWordforms ();
+	ShutdownColumnar();
 
 	if ( !g_bQuiet )
 	{

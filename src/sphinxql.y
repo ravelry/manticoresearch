@@ -14,13 +14,14 @@
 %token	TOK_ATIDENT
 %token	TOK_CONST_INT 260 "integer"
 %token	TOK_CONST_FLOAT 261 "float"
-%token	TOK_CONST_MVA 262 "multivalues"
+%token	TOK_CONST_MVA 262	// not a real token, only placeholder
 %token	TOK_QUOTED_STRING 263 "string"
 %token	TOK_USERVAR "@uservar"
 %token	TOK_SYSVAR "@@sysvar"
-%token	TOK_CONST_STRINGS 269 "constant string list"
+%token	TOK_CONST_STRINGS 269	// not a real token, only placeholder
 %token	TOK_BAD_NUMERIC
 %token	TOK_SUBKEY
+%token	TOK_BACKTICKED_SUBKEY
 %token	TOK_DOT_NUMBER ".number"
 
 %token	TOK_AGENT
@@ -135,7 +136,6 @@
 %token	TOK_USE
 %token	TOK_VALUES
 %token	TOK_VARIABLES
-%token  TOK_WAITTIMEOUT
 %token	TOK_WARNINGS
 %token	TOK_WEIGHT
 %token	TOK_WHERE
@@ -183,8 +183,8 @@ static CSphFilterSettings * AddMvaRange ( SqlParser_c * pParser, const SqlNode_t
 %%
 
 request:
-	statement							{ pParser->PushQuery(); }
-	| statement ';'						{ pParser->PushQuery(); }
+	statement					{ pParser->PushQuery(); }
+	| statement ';'				{ pParser->PushQuery(); }
 	| multi_stmt_list
 	| multi_stmt_list ';'
 	;
@@ -196,12 +196,7 @@ statement:
 	| transact_op
 	| call_proc
 	| describe
-	| show_tables
-	| show_databases
 	| update
-	| show_variables
-	| show_collation
-	| show_character_set
 	| attach_index
 	| flush_rtindex
 	| flush_ramchunk
@@ -276,6 +271,156 @@ ident_no_option:
 
 /// *** ALL_IDENT_LIST_END ***
 // WARNING! line above is MANDATORY for consistency checking!
+//////////////////////////////////////////////////////////////////////////
+
+one_index:
+	ident
+	| ident ':' ident
+		{
+			pParser->ToString (pParser->m_pStmt->m_sCluster, $1);
+			$$ = $3;
+		}
+	;
+
+only_one_index:
+	one_index
+		{
+			pParser->ToString (pParser->m_pStmt->m_sIndex, $1);
+		}
+	;
+
+chunk_key:
+	TOK_DOT_NUMBER
+		{
+			pParser->AddDotIntSubkey ($1);
+			pParser->m_pStmt->m_iIntParam = $1.m_iValue;
+		}
+	| TOK_CHUNK TOK_CONST_INT
+		{
+			pParser->AddIntSubkey ($2);
+			pParser->m_pStmt->m_iIntParam = $2.m_iValue;
+		}
+	;
+
+chunk_keys:
+	chunk_key
+	| chunk_keys chunk_key
+	;
+
+string_key:
+	TOK_SUBKEY
+		{
+    		pParser->AddStringSubkey ($1);
+    	}
+    ;
+
+string_keys:
+	string_key
+	| string_keys string_key
+	;
+
+multi_strings_and_maybe_chunk_key:
+	string_keys
+	| chunk_key string_keys
+	;
+
+multi_chunks_and_maybe_string_key:
+	chunk_keys
+	| string_key chunk_keys
+	;
+
+fromkeys:
+	// empty
+	| multi_strings_and_maybe_chunk_key
+	| multi_chunks_and_maybe_string_key
+	;
+
+
+one_index_opt_subindex:				// used in describe (meta m.b. num or name)
+	only_one_index
+	| only_one_index multi_strings_and_maybe_chunk_key
+	;
+
+one_index_opt_chunk:				// used in show settings, show status, update, delete
+	only_one_index
+	| only_one_index chunk_keys
+	| list_of_indexes
+    	{
+    		pParser->ToString (pParser->m_pQuery->m_sIndexes, $1);
+    	}
+	;
+
+from_target:		// used in select ... from
+	only_one_index fromkeys
+		{
+			pParser->m_pQuery->m_sIndexes = pParser->m_pStmt->m_sIndex;
+			pParser->SwapSubkeys();
+		}
+	| list_of_indexes
+		{
+			pParser->ToString (pParser->m_pQuery->m_sIndexes, $1);
+		}
+	| sysvar_ext
+		{
+    		pParser->ToString (pParser->m_pQuery->m_sIndexes, $1);
+    		pParser->SwapSubkeys();
+    	}
+	;
+
+list_of_indexes:
+	one_index ',' one_index
+		{
+    		TRACK_BOUNDS ( $$, $1, $3 );
+    	}
+	| list_of_indexes ',' one_index
+		{
+			TRACK_BOUNDS ( $$, $1, $3 );
+		}
+	;
+
+// enhanced sysvars
+//////////////////////////////////////////////////////////////////////////
+
+string_nokeys:
+	TOK_SUBKEY
+	| string_keys TOK_SUBKEY
+		{
+			$$ = $2;
+		}
+	;
+
+multi_strings_and_maybe_chunk_nokey:
+	string_nokeys
+	| TOK_DOT_NUMBER
+	| TOK_DOT_NUMBER string_nokeys
+		{
+    		$$ = $2;
+    	}
+    | string_nokeys TOK_DOT_NUMBER
+    	{
+    		$$ = $2;
+    	}
+    | string_nokeys TOK_DOT_NUMBER string_nokeys
+    	{
+    		$$ = $3;
+    	}
+	;
+
+sysvar:					// full name in token, like var '@@session.last_insert_id', no subkeys parsed
+	TOK_SYSVAR
+	| TOK_SYSVAR multi_strings_and_maybe_chunk_nokey
+		{
+			TRACK_BOUNDS ( $$, $1, $2 );
+		}
+    ;
+
+sysvar_ext:				// name in token + subkeys, like var '@@session' and 1 subkey '.last_insert_id'
+	TOK_SYSVAR
+	| TOK_SYSVAR multi_strings_and_maybe_chunk_key
+	| TOK_SYSVAR chunk_key
+	;
+
+// statements
 //////////////////////////////////////////////////////////////////////////
 
 multi_stmt_list:
@@ -373,7 +518,7 @@ opt_outer_limit:
 
 select_from:
 	TOK_SELECT select_items_list
-	TOK_FROM ident_list
+	TOK_FROM from_target { pParser->m_pStmt->m_eStmt = STMT_SELECT; } // set stmt here to check the option below
 	opt_where_clause
 	opt_group_clause
 	opt_group_order_clause
@@ -382,10 +527,6 @@ select_from:
 	opt_limit_clause
 	opt_option_clause
 	opt_hint_clause
-		{
-			pParser->m_pStmt->m_eStmt = STMT_SELECT;
-			pParser->SetIndex ( $4, pParser->m_pQuery->m_sIndexes );
-		}
 	;
 
 select_items_list:
@@ -431,7 +572,7 @@ where_clause:
 	;
 
 where_expr:
-	where_item							
+	where_item
 	| filter_expr
 	| where_item TOK_AND filter_expr
     | filter_expr TOK_AND where_item
@@ -446,8 +587,8 @@ where_item:
 		}
 	| '(' TOK_MATCH '(' TOK_QUOTED_STRING ')' ')'
 		{
-                        if ( !pParser->SetMatch($4) )
-                                YYERROR;
+			if ( !pParser->SetMatch($4) )
+				YYERROR;
 		}
 	;
 
@@ -460,14 +601,15 @@ filter_expr:
 	
 	
 filter_item:	
-	expr_ident '=' const_int
+	expr_ident '=' bool_or_integer_value
+
 		{
 			CSphFilterSettings * pFilter = pParser->AddValuesFilter ( $1 );
 			if ( !pFilter )
 				YYERROR;
 			pFilter->m_dValues.Add ( $3.m_iValue );
 		}
-	| expr_ident TOK_NE const_int
+	| expr_ident TOK_NE bool_or_integer_value
 		{
 			CSphFilterSettings * pFilter = pParser->AddValuesFilter ( $1 );
 			if ( !pFilter )
@@ -508,10 +650,10 @@ filter_item:
 				YYERROR;
 		}
 	| expr_ident TOK_NOT TOK_ANY '(' string_list ')'
-    	{
-    		if ( !pParser->AddStringListFilter ( $1, $5, StrList_e::STR_ANY, true ) )
-    			YYERROR;
-    	}
+		{
+			if ( !pParser->AddStringListFilter ( $1, $5, StrList_e::STR_ANY, true ) )
+				YYERROR;
+		}
 	| expr_ident TOK_ALL '(' string_list ')'
 		{
 			if ( !pParser->AddStringListFilter ( $1, $4, StrList_e::STR_ALL ) )
@@ -841,7 +983,7 @@ opt_having_clause:
 			pParser->AddHaving();
 		}
 	;
-	
+
 opt_group_order_clause:
 	// empty
 	| group_order_clause
@@ -1034,7 +1176,7 @@ expr:
 	| function
 	| json_expr
 	| streq
-	| json_field TOK_IS TOK_NULL		{ TRACK_BOUNDS ( $$, $1, $3 ); }
+	| json_field TOK_IS TOK_NULL			{ TRACK_BOUNDS ( $$, $1, $3 ); }
 	| json_field TOK_IS TOK_NOT TOK_NULL	{ TRACK_BOUNDS ( $$, $1, $4 ); }
 	;
 
@@ -1056,12 +1198,12 @@ function:
 	| TOK_RAND '(' arglist ')'		{ TRACK_BOUNDS ( $$, $1, $4 ); }
 	| TOK_REGEX '(' arglist ')'		{ TRACK_BOUNDS ( $$, $1, $4 ); }
 	;
-	
+
 arglist:
 	arg
 	| arglist ',' arg
 	;
-	
+
 arg:
 	expr
 	| TOK_QUOTED_STRING
@@ -1121,31 +1263,45 @@ show_what:
 			pParser->m_pStmt->m_eStmt = STMT_SHOW_AGENT_STATUS;
 			pParser->m_pStmt->m_sIndex = pParser->ToStringUnescape ( $2 );
 		}
-	| TOK_AGENT ident TOK_STATUS like_filter
+	| TOK_AGENT only_one_index TOK_STATUS like_filter
 		{
 			pParser->m_pStmt->m_eStmt = STMT_SHOW_AGENT_STATUS;
 			pParser->ToString ( pParser->m_pStmt->m_sIndex, $2 );
 		}
-	| index_or_table ident opt_chunk TOK_STATUS like_filter
+	| index_or_table one_index_opt_chunk TOK_STATUS like_filter
 		{
 			pParser->m_pStmt->m_eStmt = STMT_SHOW_INDEX_STATUS;
 			pParser->ToString ( pParser->m_pStmt->m_sIndex, $2 );
 		}
-	| index_or_table ident opt_chunk TOK_SETTINGS
+	| index_or_table one_index_opt_chunk TOK_SETTINGS
 		{
 			pParser->m_pStmt->m_eStmt = STMT_SHOW_INDEX_SETTINGS;
 			pParser->ToString ( pParser->m_pStmt->m_sIndex, $2 );
-		}
-	| index_or_table ident TOK_DOT_NUMBER TOK_SETTINGS
-		{
-			pParser->m_pStmt->m_eStmt = STMT_SHOW_INDEX_SETTINGS;
-			pParser->ToString ( pParser->m_pStmt->m_sIndex, $2 );
-			pParser->m_pStmt->m_iIntParam = int (pParser->DotGetInt ($3));
 		}
 	| index_or_table TOK_STATUS like_filter
 		{
 			pParser->m_pStmt->m_eStmt = STMT_SHOW_INDEX_STATUS;
 			pParser->m_pStmt->m_sIndex = pParser->m_pStmt->m_sStringParam;
+		}
+	| TOK_COLLATION
+		{
+       		pParser->m_pStmt->m_eStmt = STMT_SHOW_COLLATION;
+		}
+	| TOK_CHARACTER TOK_SET
+		{
+			pParser->m_pStmt->m_eStmt = STMT_SHOW_CHARACTER_SET;
+		}
+	| TOK_TABLES like_filter
+		{
+			pParser->m_pStmt->m_eStmt = STMT_SHOW_TABLES;
+		}
+	| TOK_DATABASES like_filter
+		{
+			pParser->m_pStmt->m_eStmt = STMT_SHOW_DATABASES;
+		}
+	| opt_scope TOK_VARIABLES opt_show_variables_where_or_like
+		{
+      		pParser->m_pStmt->m_eStmt = STMT_SHOW_VARIABLES;
 		}
 	;
 
@@ -1153,13 +1309,6 @@ index_or_table:
 	TOK_INDEX
 	| TOK_TABLE
 	;
-
-opt_chunk:
-	// empty
-	| TOK_CHUNK TOK_CONST_INT
-		{
-			pParser->m_pStmt->m_iIntParam = $2.m_iValue;
-		};
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -1180,7 +1329,7 @@ set_stmt:
 //			pParser->m_pStmt->m_bSetNull = true;
 		}
 	| TOK_SET TOK_NAMES set_value opt_collate { pParser->m_pStmt->m_eStmt = STMT_DUMMY; }
-	| TOK_SET TOK_SYSVAR '=' set_value	{ pParser->m_pStmt->m_eStmt = STMT_DUMMY; }
+	| TOK_SET sysvar '=' set_value	{ pParser->m_pStmt->m_eStmt = STMT_DUMMY; }
 	| TOK_SET TOK_CHARACTER TOK_SET set_value { pParser->m_pStmt->m_eStmt = STMT_DUMMY; }
 	;
 
@@ -1268,11 +1417,7 @@ start_transaction:
 //////////////////////////////////////////////////////////////////////////
 
 insert_into:
-	insert_or_replace TOK_INTO ident opt_column_list TOK_VALUES insert_rows_list opt_insert_options
-		{
-			// everything else is pushed directly into parser within the rules
-			pParser->SetIndex ( $3 );
-		}
+	insert_or_replace TOK_INTO only_one_index opt_column_list TOK_VALUES insert_rows_list opt_option_clause
 	;
 
 insert_or_replace:
@@ -1316,27 +1461,14 @@ insert_val:
 	| '(' ')'			{ $$.m_iType = TOK_CONST_MVA; }
 	;
 
-opt_insert_options:
-	| TOK_OPTION insert_options_list
-	;
-
-insert_options_list:
-	insert_option
-	| insert_options_list ',' insert_option
-	;
-
-insert_option:
-	TOK_IDENT '=' TOK_QUOTED_STRING		{ if ( !pParser->AddInsertOption ( $1, $3 ) ) YYERROR; }
-	;
-
 //////////////////////////////////////////////////////////////////////////
 
 delete_from:
-	TOK_DELETE TOK_FROM ident_list where_clause
-	{
-		if ( !pParser->DeleteStatement ( &$3 ) )
-			YYERROR;
-	}
+	TOK_DELETE { pParser->m_pStmt->m_eStmt = STMT_DELETE; }
+		TOK_FROM one_index_opt_chunk where_clause opt_option_clause
+			{
+				pParser->GenericStatement ( &$4 );
+			}
 	;
 
 //////////////////////////////////////////////////////////////////////////
@@ -1420,10 +1552,9 @@ call_opt_name:
 //////////////////////////////////////////////////////////////////////////
 
 describe:
-	describe_tok ident describe_opt like_filter
+	describe_tok one_index_opt_subindex describe_opt like_filter
 		{
 			pParser->m_pStmt->m_eStmt = STMT_DESCRIBE;
-			pParser->SetIndex ( $2 );
 		}
 	;
 
@@ -1433,30 +1564,23 @@ describe_opt:
 		{
 			pParser->m_pStmt->m_iIntParam = TOK_TABLE; // just a flag that 'TOK_TABLE' is in use
 		}
+	;
 
 describe_tok:
 	TOK_DESCRIBE
 	| TOK_DESC
 	;
 
-//////////////////////////////////////////////////////////////////////////
-
-show_tables:
-	TOK_SHOW TOK_TABLES like_filter		{ pParser->m_pStmt->m_eStmt = STMT_SHOW_TABLES; }
-	;
-
-show_databases:
-	TOK_SHOW TOK_DATABASES like_filter { pParser->m_pStmt->m_eStmt = STMT_SHOW_DATABASES; }
-	;
 
 //////////////////////////////////////////////////////////////////////////
 
 update:
-	TOK_UPDATE ident_list TOK_SET update_items_list where_clause opt_option_clause
-		{
-			if ( !pParser->UpdateStatement ( &$2 ) )
-				YYERROR;
-		}
+	TOK_UPDATE { pParser->m_pStmt->m_eStmt = STMT_UPDATE; }
+		one_index_opt_chunk TOK_SET update_items_list where_clause opt_option_clause opt_hint_clause
+			{
+				pParser->GenericStatement ( &$3 );
+				pParser->m_pStmt->m_tUpdate.m_dRowOffset.Add ( 0 );
+			}
 	;
 
 update_items_list:
@@ -1522,13 +1646,6 @@ update_item:
 
 //////////////////////////////////////////////////////////////////////////
 
-show_variables:
-	TOK_SHOW opt_scope TOK_VARIABLES opt_show_variables_where_or_like
-		{
-			pParser->m_pStmt->m_eStmt = STMT_SHOW_VARIABLES;
-		}
-	;
-
 opt_show_variables_where_or_like:
 	like_filter
 	| show_variables_where
@@ -1547,20 +1664,6 @@ show_variables_where_entry:
 	ident '=' TOK_QUOTED_STRING // for example, Variable_name = 'character_set'
 	;
 
-show_collation:
-	TOK_SHOW TOK_COLLATION
-		{
-			pParser->m_pStmt->m_eStmt = STMT_SHOW_COLLATION;
-		}
-	;
-
-show_character_set:
-	TOK_SHOW TOK_CHARACTER TOK_SET
-		{
-			pParser->m_pStmt->m_eStmt = STMT_SHOW_CHARACTER_SET;
-		}
-	;
-	
 set_transaction:
 	TOK_SET opt_scope TOK_TRANSACTION TOK_ISOLATION TOK_LEVEL isolation_level
 		{
@@ -1569,8 +1672,15 @@ set_transaction:
 	;
 
 opt_scope:
+	// empty
 	| TOK_GLOBAL
+		{
+			pParser->m_pStmt->m_iIntParam = 0;
+		}
 	| TOK_SESSION
+		{
+    		pParser->m_pStmt->m_iIntParam = 1;
+    	}
 	;
 
 isolation_level:
@@ -1591,7 +1701,7 @@ attach_index:
 			pParser->ToString ( tStmt.m_sStringParam, $6 );
 		}
 	;
-	
+
 opt_with_truncate:
 	// empty
 	| TOK_WITH TOK_TRUNCATE
@@ -1627,7 +1737,7 @@ flush_index:
 			tStmt.m_eStmt = STMT_FLUSH_INDEX;
 		}
 	;
-	
+
 flush_hostnames:
 	TOK_FLUSH TOK_HOSTNAMES
 		{
@@ -1643,7 +1753,7 @@ flush_logs:
 			tStmt.m_eStmt = STMT_FLUSH_LOGS;
 		}
 	;
-	
+
 //////////////////////////////////////////////////////////////////////////
 
 select_sysvar:
@@ -1664,7 +1774,7 @@ sysvar_item:
 	;
 
 sysvar_name:
-	TOK_SYSVAR { pParser->AddItem ( &$1 ); }
+	sysvar { pParser->AddItem ( &$1 ); }
 	;
 
 select_dual:
@@ -1678,18 +1788,16 @@ select_dual:
 //////////////////////////////////////////////////////////////////////////
 
 truncate:
-	TOK_TRUNCATE TOK_RTINDEX ident opt_with_reconfigure
+	TOK_TRUNCATE rtindex only_one_index opt_with_reconfigure
 		{
 			SqlStmt_t & tStmt = *pParser->m_pStmt;
 			tStmt.m_eStmt = STMT_TRUNCATE_RTINDEX;
-			pParser->SetIndex ( $3 );
 		}
-	| TOK_TRUNCATE TOK_TABLE ident opt_with_reconfigure
-		{
-			SqlStmt_t & tStmt = *pParser->m_pStmt;
-			tStmt.m_eStmt = STMT_TRUNCATE_RTINDEX;
-			pParser->SetIndex ( $3 );
-		}
+	;
+
+rtindex:
+	TOK_RTINDEX
+	| TOK_TABLE
 	;
 
 opt_with_reconfigure:
@@ -1703,12 +1811,11 @@ opt_with_reconfigure:
 //////////////////////////////////////////////////////////////////////////
 
 optimize_index:
-	TOK_OPTIMIZE TOK_INDEX ident opt_option_clause
-		{
-			SqlStmt_t & tStmt = *pParser->m_pStmt;
-			tStmt.m_eStmt = STMT_OPTIMIZE_INDEX;
-			pParser->ToString ( tStmt.m_sIndex, $3 );
-		}
+	TOK_OPTIMIZE  { pParser->m_pStmt->m_eStmt = STMT_OPTIMIZE_INDEX; }
+		TOK_INDEX ident opt_option_clause
+			{
+				pParser->ToString ( pParser->m_pStmt->m_sIndex, $4 );
+			}
 	;
 
 //////////////////////////////////////////////////////////////////////////
@@ -1739,6 +1846,7 @@ subscript:
 
 subkey:
 	TOK_SUBKEY
+	| TOK_BACKTICKED_SUBKEY
 	| TOK_DOT_NUMBER
 	| '[' expr ']'				{ $$ = $1; $$.m_iEnd = $3.m_iEnd; }
 	| '[' TOK_QUOTED_STRING ']'		{ $$ = $1; $$.m_iEnd = $3.m_iEnd; }
@@ -1821,7 +1929,7 @@ reload_indexes:
 			tStmt.m_eStmt = STMT_RELOAD_INDEXES;
 		}
 	;
-	
+
 sysfilters:
 	TOK_SYSFILTERS filter_expr
 		{
@@ -1840,14 +1948,14 @@ delete_cluster:
 	;
 
 explain_query:
-	TOK_EXPLAIN ident ident TOK_QUOTED_STRING opt_option_clause
-		{
-			SqlStmt_t & tStmt = *pParser->m_pStmt;
-			tStmt.m_eStmt = STMT_EXPLAIN;
-			pParser->ToString ( tStmt.m_sCallProc, $2 );
-			pParser->ToString ( tStmt.m_sIndex, $3 );
-			pParser->m_pQuery->m_sQuery = pParser->ToStringUnescape ( $4 );
-		}
+	TOK_EXPLAIN   { pParser->m_pStmt->m_eStmt = STMT_EXPLAIN; }
+		ident ident TOK_QUOTED_STRING opt_option_clause
+			{
+				SqlStmt_t & tStmt = *pParser->m_pStmt;
+				pParser->ToString ( tStmt.m_sCallProc, $3 );
+				pParser->ToString ( tStmt.m_sIndex, $4 );
+				pParser->m_pQuery->m_sQuery = pParser->ToStringUnescape ( $5 );
+			}
 	;
 
 %%
@@ -1855,4 +1963,3 @@ explain_query:
 #if USE_WINDOWS
 #pragma warning(pop)
 #endif
-

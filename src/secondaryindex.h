@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2018-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2018-2021, Manticore Software LTD (https://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -16,76 +16,34 @@
 #include <math.h>
 
 
+using RowIdBlock_t = VecTraits_T<RowID_t>;
+
 class RowidIterator_i
 {
 public:
 	virtual			~RowidIterator_i(){}
 
-	virtual RowID_t	GetNextRowID() = 0;
+	virtual bool	HintRowID ( RowID_t tRowID ) = 0;
+	virtual bool	GetNextRowIdBlock ( RowIdBlock_t & dRowIdBlock ) = 0;
 	virtual int64_t	GetNumProcessed() const = 0;
 };
-
-
-class CSphReader;
-class CSphWriter;
-
-enum HistogramType_e
-{
-	HISTOGRAM_NONE,
-	HISTOGRAM_UINT32,
-	HISTOGRAM_INT64,
-	HISTOGRAM_FLOAT	
-};
-
-
-class Histogram_i
-{
-public:
-	virtual			~Histogram_i() {}
-
-	virtual void	Setup ( SphAttr_t tMin, SphAttr_t tMax ) = 0;
-	virtual void	Insert ( SphAttr_t tAttrVal ) = 0;
-	virtual void	Delete ( SphAttr_t tAttrVal ) = 0;
-	virtual bool	EstimateRsetSize ( const CSphFilterSettings & tFilter, int64_t & iEstimate ) const = 0;
-	virtual DWORD	GetNumValues() const = 0;
-	virtual bool	IsOutdated() const = 0;
-
-	virtual HistogramType_e		GetType() const = 0;
-	virtual const CSphString &	GetAttrName() const = 0;
-
-	virtual bool	Save ( CSphWriter & tWriter ) const = 0;
-	virtual bool	Load ( CSphReader & tReader, CSphString & sError ) = 0;
-};
-
-
-class HistogramContainer_c
-{
-public:
-					~HistogramContainer_c();
-
-	bool			Save ( const CSphString & sFile, CSphString & sError );
-	bool			Load ( const CSphString & sFile, CSphString & sError );
-	bool			Add ( Histogram_i * pHistogram );
-	void			Remove ( const CSphString & sAttr );
-	Histogram_i *	Get ( const CSphString & sAttr ) const;
-	DWORD			GetNumValues() const;
-
-private:
-	SmallStringHash_T<Histogram_i*>	m_dHistogramHash;
-
-	void			Reset();
-};
-
-
-Histogram_i *	CreateHistogram ( const CSphString & sAttr, ESphAttr eAttrType );
-
 
 struct SecondaryIndexInfo_t
 {
 	int		m_iFilterId {-1};
 };
 
-RowidIterator_i * CreateFilteredIterator ( const CSphVector<CSphFilterSettings> & dFilters, CSphVector<CSphFilterSettings> & dModifiedFilters, const CSphVector<FilterTreeItem_t> & dFilterTree, const CSphVector<IndexHint_t> & dHints, const HistogramContainer_c & tHistograms, const BYTE * pDocidLookup );
+RowidIterator_i * CreateFilteredIterator ( const CSphVector<CSphFilterSettings> & dFilters, CSphVector<CSphFilterSettings> & dModifiedFilters, bool & bFiltersChanged, const CSphVector<FilterTreeItem_t> & dFilterTree,
+	const CSphVector<IndexHint_t> & dHints, const HistogramContainer_c & tHistograms, const BYTE * pDocidLookup );
+
+RowidIterator_i * CreateIteratorIntersect ( CSphVector<RowidIterator_i*> & dIterators );
+
+#if USE_COLUMNAR
+RowidIterator_i * CreateIteratorWrapper ( columnar::BlockIterator_i * pIterator );
+RowidIterator_i * CreateIteratorIntersect ( std::vector<columnar::BlockIterator_i *> & dIterators );
+#endif
+
+bool ReturnIteratorResult ( RowID_t * pRowID, RowID_t * pRowIdStart, RowIdBlock_t & dRowIdBlock );
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -157,7 +115,7 @@ public:
 		if ( tCurDocID==tDocID )
 			return tRowID;
 
-		int iDocsInCheckpoint = IsLastCheckpoint(pFound) ? m_nDocs % m_nDocsPerCheckpoint : m_nDocsPerCheckpoint;
+		int iDocsInCheckpoint = GetNumDocsInCheckpoint(pFound);
 		for ( int i = 1; i < iDocsInCheckpoint; i++ )
 		{
 			DocID_t tDeltaDocID = sphUnzipOffset(pCur);
@@ -207,6 +165,15 @@ protected:
 	inline bool IsLastCheckpoint ( const DocidLookupCheckpoint_t * pCheckpoint ) const
 	{
 		return pCheckpoint==m_pCheckpoints+m_nCheckpoints-1;
+	}
+
+	inline int GetNumDocsInCheckpoint ( const DocidLookupCheckpoint_t * pCheckpoint ) const
+	{
+		if ( !IsLastCheckpoint(pCheckpoint) )
+			return m_nDocsPerCheckpoint;
+
+		int iLeftover = m_nDocs % m_nDocsPerCheckpoint;
+		return iLeftover ? iLeftover : m_nDocsPerCheckpoint;
 	}
 };
 
@@ -304,14 +271,7 @@ private:
 			return;
 
 		m_iProcessedDocs = 0;
-		if ( IsLastCheckpoint() )
-		{
-			int iLeftover = m_nDocs % m_nDocsPerCheckpoint;
-			m_iCheckpointDocs = iLeftover ? iLeftover : m_nDocsPerCheckpoint;
-		}
-		else
-			m_iCheckpointDocs = m_nDocsPerCheckpoint;
-
+		m_iCheckpointDocs = GetNumDocsInCheckpoint(m_pCurCheckpoint);
 		m_pCur = m_pData + m_pCurCheckpoint->m_tOffset;
 		m_tCurDocID = m_pCurCheckpoint->m_tBaseDocID;
 	}

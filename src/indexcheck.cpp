@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -183,7 +183,7 @@ void DebugCheckHelper_c::DebugCheck_Attributes ( DebugCheckReader_i & tAttrs, De
 			tReporter.Fail ( "schema has blob attrs, but blob file is empty" );
 
 		for ( int i = 0; i < tSchema.GetAttrsCount(); i++ )
-			if ( sphIsBlobAttr(  tSchema.GetAttr(i).m_eAttrType ) )
+			if ( sphIsBlobAttr ( tSchema.GetAttr(i) ) )
 				nBlobAttrs++;
 	} else
 	{
@@ -387,12 +387,12 @@ bool DiskIndexChecker_c::OpenFiles ( CSphString & sError )
 		return m_tReporter.Fail ( "unable to open dictionary: %s", sError.cstr() );
 
 	// use file reader during debug check to lower memory pressure
-	m_pDocsReader = NewProxyReader ( GetFilename(SPH_EXT_SPD), sError, DataReaderFactory_c::DOCS, m_tIndex.GetMemorySettings().m_iReadBufferDocList, FileAccess_e::FILE );
+	m_pDocsReader = NewProxyReader ( GetFilename(SPH_EXT_SPD), sError, DataReaderFactory_c::DOCS, m_tIndex.GetMutableSettings().m_tFileAccess.m_iReadBufferDocList, FileAccess_e::FILE );
 	if ( !m_pDocsReader )
 		return m_tReporter.Fail ( "unable to open doclist: %s", sError.cstr() );
 
 	// use file reader during debug check to lower memory pressure
-	m_pHitsReader = NewProxyReader ( GetFilename(SPH_EXT_SPP), sError, DataReaderFactory_c::HITS, m_tIndex.GetMemorySettings().m_iReadBufferHitList, FileAccess_e::FILE );
+	m_pHitsReader = NewProxyReader ( GetFilename(SPH_EXT_SPP), sError, DataReaderFactory_c::HITS, m_tIndex.GetMutableSettings().m_tFileAccess.m_iReadBufferHitList, FileAccess_e::FILE );
 	if ( !m_pHitsReader )
 		return m_tReporter.Fail ( "unable to open hitlist: %s", sError.cstr() );
 

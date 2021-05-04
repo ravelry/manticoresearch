@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // All rights reserved
 //
 // This program is free software; you can redistribute it and/or modify
@@ -12,7 +12,7 @@
 #include "sphinx.h"
 #include "sphinxstd.h"
 #include "sphinxutils.h"
-#include "sphinxint.h"
+#include "memio.h"
 #include "sphinxpq.h"
 #include "searchdreplication.h"
 #include "accumulator.h"
@@ -45,6 +45,9 @@ const char * GetReplicationDL()
 static int GetQueryTimeout ( int64_t iTimeout=0 ); // 2 minutes in msec
 // 200 msec is ok as we do not need to any missed nodes in cluster node list
 static int			g_iAnyNodesTimeout = 200;
+static int			g_iNodeRetry = 3;
+static int			g_iNodeRetryWait = 500;
+
 
 // debug options passed into Galera for our logreplication command line key
 static const char * g_sDebugOptions = "debug=on;cert.log_conflicts=yes";
@@ -184,7 +187,7 @@ public:
 	bool CommitTOI ( ServedDesc_t * pDesc, CSphString & sError );
 
 	// update with Total Order Isolation
-	bool Update ( CSphString & sError );
+	bool Update ( bool bCluster, CSphString & sError );
 
 private:
 	RtAccum_t & m_tAcc;
@@ -269,7 +272,7 @@ static bool IsUpdateCommand ( const RtAccum_t & tAcc );
 
 static void SaveUpdate ( const CSphAttrUpdate & tUpd, CSphVector<BYTE> & dOut );
 
-static int LoadUpdate ( const BYTE * pBuf, int iLen, CSphAttrUpdate & tUpd, bool & bBlob );
+static int LoadUpdate ( const BYTE * pBuf, int iLen, CSphAttrUpdate & tUpd );
 
 static void SaveUpdate ( const CSphQuery & tQuery, CSphVector<BYTE> & dOut );
 
@@ -493,9 +496,16 @@ static void LoggerWrapper ( wsrep_log_level_t eLevel, const char * sFmt, ... )
 	va_end ( ap );
 }
 
+static bool CheckNoWarning ( const char * sMsg );
+
 // callback for Galera logger_cb to log messages and errors
 static void Logger_fn ( wsrep_log_level_t eLevel, const char * sMsg )
 {
+	// in normal flow need to skip certain messages from Galera but keep messagea in debug replication verbosity level
+	// dont want to patch Galera source code
+	if ( g_eLogLevel<SPH_LOG_RPL_DEBUG && eLevel==WSREP_LOG_WARN && CheckNoWarning ( sMsg ) )
+		return;
+
 	LoggerWrapper ( eLevel, sMsg );
 }
 
@@ -893,7 +903,7 @@ static int GetClusterMemLimit ( const StrVec_t & dIndexes )
 			continue;
 
 		ServedDescRPtr_c pDesc ( pServed );
-		iMemLimit = Max ( iMemLimit, pDesc->m_iMemLimit );
+		iMemLimit = Max ( iMemLimit, pDesc->m_tSettings.m_iMemLimit );
 		iIndexes++;
 	}
 
@@ -1080,18 +1090,20 @@ static bool CheckResult ( wsrep_status_t tRes, const wsrep_trx_meta_t & tMeta, c
 	return false;
 }
 
+static std::atomic<int64_t> g_iConnID { 1 };
+
 // replicate serialized data into cluster and call commit monitor along
-static bool Replicate ( int iKeysCount, const wsrep_key_t * pKeys, const wsrep_buf_t & tQueries, wsrep_t * pProvider, CommitMonitor_c & tMonitor, CSphString & sError )
+static bool Replicate ( int iKeysCount, const wsrep_key_t * pKeys, const wsrep_buf_t & tQueries, wsrep_t * pProvider, CommitMonitor_c & tMonitor, bool bUpdate, CSphString & sError )
 {
 	assert ( pProvider );
 
-	int iConnId = GetOsThreadId();
+	int64_t iConnId = g_iConnID.fetch_add ( 1, std::memory_order_relaxed );
 
 	wsrep_trx_meta_t tLogMeta;
 	tLogMeta.gtid = WSREP_GTID_UNDEFINED;
 
 	wsrep_ws_handle_t tHnd;
-	tHnd.trx_id = UINT64_MAX;
+	tHnd.trx_id = iConnId;
 	tHnd.opaque = nullptr;
 
 	wsrep_status_t tRes = pProvider->append_key ( pProvider, &tHnd, pKeys, iKeysCount, WSREP_KEY_EXCLUSIVE, false );
@@ -1123,10 +1135,15 @@ static bool Replicate ( int iKeysCount, const wsrep_key_t * pKeys, const wsrep_b
 
 		// in case only commit failed
 		// need to abort running transaction prior to rollback
-		if ( bOk && !tMonitor.Commit( sError ) )
+		if ( bOk )
 		{
-			pProvider->abort_pre_commit ( pProvider, WSREP_SEQNO_UNDEFINED, tHnd.trx_id );
-			bOk = false;
+			if ( !bUpdate )
+				bOk = tMonitor.Commit( sError );
+			else
+				bOk = tMonitor.Update( true, sError );
+
+			if ( !bOk )
+				pProvider->abort_pre_commit ( pProvider, WSREP_SEQNO_UNDEFINED, tHnd.trx_id );
 		}
 
 		if ( bOk )
@@ -1152,11 +1169,11 @@ static bool Replicate ( int iKeysCount, const wsrep_key_t * pKeys, const wsrep_b
 }
 
 // replicate serialized data into cluster in TotalOrderIsolation mode and call commit monitor along
-static bool ReplicateTOI ( int iKeysCount, const wsrep_key_t * pKeys, const wsrep_buf_t & tQueries, wsrep_t * pProvider, CommitMonitor_c & tMonitor, bool bUpdate, ServedDesc_t * pDesc, CSphString & sError )
+static bool ReplicateTOI ( int iKeysCount, const wsrep_key_t * pKeys, const wsrep_buf_t & tQueries, wsrep_t * pProvider, CommitMonitor_c & tMonitor, ServedDesc_t * pDesc, CSphString & sError )
 {
 	assert ( pProvider );
 
-	int iConnId = GetOsThreadId();
+	int64_t iConnId = g_iConnID.fetch_add ( 1, std::memory_order_relaxed );
 
 	wsrep_trx_meta_t tLogMeta;
 	tLogMeta.gtid = WSREP_GTID_UNDEFINED;
@@ -1168,12 +1185,7 @@ static bool ReplicateTOI ( int iKeysCount, const wsrep_key_t * pKeys, const wsre
 
 	// FXIME!!! can not fail TOI transaction
 	if ( bOk )
-	{
-		if ( bUpdate )
-			tMonitor.Update ( sError );
-		else
-			tMonitor.CommitTOI ( pDesc, sError );
-	}
+		tMonitor.CommitTOI ( pDesc, sError );
 
 	if ( bOk )
 	{
@@ -1429,6 +1441,32 @@ static bool SetIndexCluster ( const CSphString & sIndex, const CSphString & sClu
 	return true;
 }
 
+// lock or unlock write operations to disk chunks of index
+static bool ControlIndexWrite ( const CSphString & sIndex, bool bEnableWrite, CSphString & sError )
+{
+	ServedIndexRefPtr_c pServed = GetServed ( sIndex );
+	if ( !pServed )
+	{
+		sError.SetSprintf ( "unknown index '%s'", sIndex.cstr() );
+		return false;
+	}
+
+	ServedDescRPtr_c pDesc ( pServed );
+	if ( !ServedDesc_t::IsMutable ( pDesc ) )
+	{
+		sError.SetSprintf ( "wrong type of index '%s'", sIndex.cstr() );
+		return false;
+	}
+
+	auto * pIndex = (RtIndex_i*)pDesc->m_pIndex;
+	if ( bEnableWrite )
+		pIndex->EnableSave();
+	else
+		pIndex->ProhibitSave();
+
+	return true;
+}
+
 // callback for Galera apply_cb to parse replicated commands
 bool ParseCmdReplicated ( const BYTE * pData, int iLen, bool bIsolated, const CSphString & sCluster, RtAccum_t & tAcc, CSphAttrUpdate & tUpd, CSphQuery & tQuery )
 {
@@ -1529,7 +1567,7 @@ bool ParseCmdReplicated ( const BYTE * pData, int iLen, bool bIsolated, const CS
 			break;
 
 		case ReplicationCommand_e::UPDATE_API:
-			LoadUpdate ( pRequest, iRequestLen, tUpd, pCmd->m_bBlobUpdate );
+			LoadUpdate ( pRequest, iRequestLen, tUpd );
 			pCmd->m_pUpdateAPI = &tUpd;
 			sphLogDebugRpl ( "update, index '%s'", pCmd->m_sIndex.cstr() );
 			break;
@@ -1540,7 +1578,7 @@ bool ParseCmdReplicated ( const BYTE * pData, int iLen, bool bIsolated, const CS
 			// can not handle multiple updates - only one update at time
 			assert ( !tQuery.m_dFilters.GetLength() );
 
-			int iGot = LoadUpdate ( pRequest, iRequestLen, tUpd, pCmd->m_bBlobUpdate );
+			int iGot = LoadUpdate ( pRequest, iRequestLen, tUpd );
 			assert ( iGot<iRequestLen );
 			LoadUpdate ( pRequest + iGot, iRequestLen - iGot, tQuery );
 			pCmd->m_pUpdateAPI = &tUpd;
@@ -1620,7 +1658,7 @@ bool HandleCmdReplicated ( RtAccum_t & tAcc )
 		int iUpd = -1;
 		CSphString sWarning;
 		CommitMonitor_c tCommit ( tAcc, &sWarning, &iUpd );
-		bool bOk = tCommit.Update ( sError );
+		bool bOk = tCommit.Update ( true, sError );
 		if ( !bOk )
 			sphWarning ( "%s", sError.cstr() );
 		if ( !sWarning.IsEmpty() )
@@ -1688,7 +1726,7 @@ static bool HandleCmdReplicate ( RtAccum_t & tAcc, CSphString & sError, int * pD
 	if ( !IsClusterCommand ( tAcc ) )
 	{
 		if ( IsUpdateCommand ( tAcc ) )
-			return tMonitor.Update ( sError );
+			return tMonitor.Update ( false, sError );
 		else
 			return tMonitor.Commit ( sError );
 	}
@@ -1717,7 +1755,7 @@ static bool HandleCmdReplicate ( RtAccum_t & tAcc, CSphString & sError, int * pD
 	if ( !CheckClasterState ( eClusterState, bPrimary, tCmdCluster.m_sCluster, sError ) )
 		return false;
 
-	if ( tCmdCluster.m_eCommand==ReplicationCommand_e::TRUNCATE && tCmdCluster.m_bReconfigure )
+	if ( tCmdCluster.m_eCommand==ReplicationCommand_e::TRUNCATE && tCmdCluster.m_tReconfigure.Ptr() )
 	{
 		sError.SetSprintf ( "RECONFIGURE is not supported for a cluster index" );
 		return false;
@@ -1803,7 +1841,6 @@ static bool HandleCmdReplicate ( RtAccum_t & tAcc, CSphString & sError, int * pD
 		{
 			assert ( tCmd.m_pUpdateAPI );
 			const CSphAttrUpdate * pUpd = tCmd.m_pUpdateAPI;
-			bTOI = true;
 			bUpdate = true;
 
 			uQueryHash = sphFNV64 ( pUpd->m_dDocids.Begin(), (int) pUpd->m_dDocids.GetLengthBytes(), uQueryHash );
@@ -1819,7 +1856,6 @@ static bool HandleCmdReplicate ( RtAccum_t & tAcc, CSphString & sError, int * pD
 			assert ( tCmd.m_pUpdateAPI );
 			assert ( tCmd.m_pUpdateCond );
 			const CSphAttrUpdate * pUpd = tCmd.m_pUpdateAPI;
-			bTOI = true;
 			bUpdate = true;
 
 			uQueryHash = sphFNV64 ( pUpd->m_dDocids.Begin(), (int) pUpd->m_dDocids.GetLengthBytes(), uQueryHash );
@@ -1866,9 +1902,9 @@ static bool HandleCmdReplicate ( RtAccum_t & tAcc, CSphString & sError, int * pD
 	tQueries.len = dBufQueries.GetLength();
 
 	if ( !bTOI )
-		return Replicate ( iKeysCount, dKeys.Begin(), tQueries, (*ppCluster)->m_pProvider, tMonitor, sError );
+		return Replicate ( iKeysCount, dKeys.Begin(), tQueries, (*ppCluster)->m_pProvider, tMonitor, bUpdate, sError );
 	else
-		return ReplicateTOI ( iKeysCount, dKeys.Begin(), tQueries, (*ppCluster)->m_pProvider, tMonitor, bUpdate, pDesc, sError );
+		return ReplicateTOI ( iKeysCount, dKeys.Begin(), tQueries, (*ppCluster)->m_pProvider, tMonitor, pDesc, sError );
 }
 
 bool HandleCmdReplicate ( RtAccum_t & tAcc, CSphString & sError )
@@ -1946,10 +1982,9 @@ bool CommitMonitor_c::CommitNonEmptyCmds ( RtIndex_i* pIndex, const ReplicationC
 	if ( !pIndex->Truncate ( sError ))
 		return false;
 
-	if ( !tCmd.m_bReconfigure )
+	if ( !tCmd.m_tReconfigure.Ptr() )
 		return true;
 
-	assert ( tCmd.m_tReconfigure.Ptr ());
 	CSphReconfigureSetup tSetup;
 	StrVec_t dWarnings;
 	bool bSame = pIndex->IsSameSettings ( *tCmd.m_tReconfigure.Ptr (), tSetup, dWarnings, sError );
@@ -2013,20 +2048,20 @@ bool CommitMonitor_c::CommitTOI ( ServedDesc_t * pDesc, CSphString & sError ) EX
 	return true;
 }
 
-static bool UpdateAPI ( const CSphAttrUpdate & tUpd, const ServedDesc_t * pDesc, CSphString & sError, CSphString & sWarning, int & iUpdate )
+static bool UpdateAPI ( AttrUpdateArgs& tUpd, int & iUpdate )
 {
-	if ( !pDesc )
+	if ( !tUpd.m_pDesc )
 	{
-		sError = "index not available";
+		*tUpd.m_pError = "index not available";
 		return false;
 	}
 
 	bool bCritical = false;
-	iUpdate = pDesc->m_pIndex->UpdateAttributes ( tUpd, -1, bCritical, sError, sWarning );
+	iUpdate = tUpd.m_pDesc->m_pIndex->UpdateAttributes ( *tUpd.m_pUpdate, -1, bCritical, tUpd.m_fnLocker, *tUpd.m_pError, *tUpd.m_pWarning );
 	return ( iUpdate>=0 );
 }
 
-bool CommitMonitor_c::Update ( CSphString & sError )
+bool CommitMonitor_c::Update ( bool bCluster, CSphString & sError )
 {
 	if ( m_tAcc.m_dCmd.IsEmpty() )
 	{
@@ -2047,43 +2082,37 @@ bool CommitMonitor_c::Update ( CSphString & sError )
 	assert ( m_pWarning );
 	assert ( tCmd.m_pUpdateAPI );
 
+	AttrUpdateArgs tUpd;
+	tUpd.m_pUpdate = tCmd.m_pUpdateAPI;
+	tUpd.m_pError = &sError;
+	tUpd.m_pWarning = m_pWarning;
+	tUpd.m_pQuery = tCmd.m_pUpdateCond;
+	tUpd.m_pIndexName = &tCmd.m_sIndex;
+	tUpd.m_bJson = ( tCmd.m_eCommand==ReplicationCommand_e::UPDATE_JSON );
+	// can not reshedule into common quque for replication - could be dead-lock with incoming clients into the same index
+	tUpd.m_bNoYeld = bCluster;
+	ServedDescRPtr_c tDesc ( pServed );
+	tUpd.m_pDesc = tDesc.Ptr ();
+
+	// that might be called when blob updates necessary, however we don't need to call it actually more than once
+	bool bWlocked = false;
+	tUpd.m_fnLocker = [&bWlocked, &tDesc, bCluster] {
+		if (!bWlocked)
+		{
+			tDesc.UpgradeLock ( bCluster );
+			bWlocked = true;
+		}
+	};
+
 	if ( tCmd.m_eCommand==ReplicationCommand_e::UPDATE_API )
-	{
-		if ( tCmd.m_bBlobUpdate )
-		{
-			return UpdateAPI ( *tCmd.m_pUpdateAPI, ServedDescWPtr_c ( pServed ), sError, *m_pWarning, *m_pUpdated );
-		} else
-		{
-			return UpdateAPI ( *tCmd.m_pUpdateAPI, ServedDescRPtr_c ( pServed ), sError, *m_pWarning, *m_pUpdated );
-		}
-	} else
-	{
-		assert ( tCmd.m_pUpdateCond );
+		return UpdateAPI ( tUpd, *m_pUpdated );
 
-		AttrUpdateArgs tUpd;
-		tUpd.m_pUpdate = tCmd.m_pUpdateAPI;
-		tUpd.m_pError = &sError;
-		tUpd.m_pWarning = m_pWarning;
-		tUpd.m_pQuery = tCmd.m_pUpdateCond;
-		tUpd.m_pIndexName = &tCmd.m_sIndex;
-		tUpd.m_bJson = ( tCmd.m_eCommand==ReplicationCommand_e::UPDATE_JSON );
+	assert ( tCmd.m_pUpdateCond );
+	HandleMySqlExtendedUpdate ( tUpd );
+	if ( sError.IsEmpty() )
+		*m_pUpdated += tUpd.m_iAffected;
 
-		if ( tCmd.m_bBlobUpdate )
-		{
-			ServedDescWPtr_c tDesc ( pServed );
-			tUpd.m_pDesc = tDesc.Ptr();
-			HandleMySqlExtendedUpdate ( tUpd );
-		} else
-		{
-			ServedDescRPtr_c tDesc ( pServed );
-			tUpd.m_pDesc = tDesc.Ptr();
-			HandleMySqlExtendedUpdate ( tUpd );
-		}
-		if ( sError.IsEmpty() )
-			*m_pUpdated += tUpd.m_iAffected;
-
-		return ( sError.IsEmpty() );
-	}
+	return ( sError.IsEmpty() );
 }
 
 CommitMonitor_c::~CommitMonitor_c()
@@ -2115,7 +2144,7 @@ static bool LoadIndex ( const CSphConfigSection & hIndex, const CSphString & sIn
 	}
 
 	GuardedHash_c dNotLoadedIndexes;
-	ESphAddIndex eAdd = AddIndexMT ( dNotLoadedIndexes, sIndexName.cstr(), hIndex, false, sError );
+	ESphAddIndex eAdd = AddIndexMT ( dNotLoadedIndexes, sIndexName.cstr(), hIndex, false, true, nullptr, sError );
 	assert ( eAdd==ADD_DSBLED || eAdd==ADD_ERROR );
 
 	if ( eAdd!=ADD_DSBLED )
@@ -2189,9 +2218,16 @@ static bool ReplicatedIndexes ( const CSphFixedVector<CSphString> & dIndexes, co
 		}
 	}
 
+	bool bOk = true;
 	for ( const CSphString & sIndex : dIndexes )
-		if ( !SetIndexCluster ( sIndex, sCluster, sError ) )
-			return false;
+		bOk &= SetIndexCluster ( sIndex, sCluster, sError );
+
+	// need to enable back local index write
+	for ( const CSphString & sIndex : dIndexes )
+		bOk &= ControlIndexWrite ( sIndex, true, sError );
+
+	if ( !bOk )
+		return false;
 
 	// scope for modify cluster data
 	{
@@ -2680,7 +2716,10 @@ bool ClusterJoin ( const CSphString & sCluster, const StrVec_t & dNames, const C
 	bool bOk = ( eState==ClusterState_e::DONOR || eState==ClusterState_e::SYNCED );
 
 	if ( bOk && bUpdateNodes )
-		bOk &= ClusterAlterUpdate ( sCluster, "nodes", sError );
+	{
+		sError = "";
+		bOk &= ClusterAlterUpdate ( sCluster, "nodes", false, sError );
+	}
 
 	if ( !bOk )
 	{
@@ -2810,6 +2849,7 @@ struct PQRemoteReply_t
 	CSphString m_sRemoteIndexPath;
 	bool m_bIndexActive = false;
 	CSphString m_sNodes;
+	int64_t m_iReplyPayload = -1;
 };
 
 // query to remote node
@@ -3171,12 +3211,13 @@ public:
 	static void BuildReply ( const PQRemoteReply_t & tRes, ISphOutputBuffer & tOut )
 	{
 		auto tReply = APIAnswer ( tOut );
-		tOut.SendByte ( 1 );
+		tOut.SendDword ( (int)tRes.m_iReplyPayload );
 	}
 
-	bool ParseReply ( MemInputBuffer_c & tReq, AgentConn_t & ) const final
+	bool ParseReply ( MemInputBuffer_c & tReq, AgentConn_t & tAgent ) const final
 	{
-		tReq.GetByte();
+		PQRemoteReply_t & tRes = GetRes ( tAgent );
+		tRes.m_iReplyPayload = tReq.GetDword();
 		return !tReq.GetError();
 	}
 };
@@ -3247,7 +3288,7 @@ public:
 static bool PerformRemoteTasks ( VectorAgentConn_t & dNodes, RequestBuilder_i & tReq, ReplyParser_i & tReply, CSphString & sError )
 {
 	int iNodes = dNodes.GetLength();
-	int iFinished = PerformRemoteTasks ( dNodes, &tReq, &tReply );
+	int iFinished = PerformRemoteTasks ( dNodes, &tReq, &tReply, g_iNodeRetry, g_iNodeRetryWait );
 
 	if ( iFinished!=iNodes )
 		sphLogDebugRpl ( "%d(%d) nodes finished well", iFinished, iNodes );
@@ -3441,6 +3482,8 @@ void HandleCommandClusterPq ( ISphOutputBuffer & tOut, WORD uCommandVer, InputBu
 			sError.SetSprintf ( "INTERNAL ERROR: unhandled command %d", (int)eClusterCmd );
 			break;
 	}
+
+	sphLogDebugRpl ( "remote cluster command %d, client %s - %s", (int)eClusterCmd, sClient, ( bOk ? "ok" : "error" ) );
 
 	if ( !bOk )
 	{
@@ -3643,6 +3686,8 @@ static bool SyncSigVerify ( const SyncSrc_t & tSrc, CSphString & sError )
 // - or make sure that index has exact same index file, ie sha1 matched
 bool RemoteFileReserve ( const PQRemoteData_t & tCmd, PQRemoteReply_t & tRes, CSphString & sError )
 {
+	sphLogDebugRpl ( "reserve index '%s'", tCmd.m_sIndex.cstr() );
+
 	assert ( tCmd.m_pChunks );
 	assert ( tRes.m_pDst.Ptr() );
 	// use index path first
@@ -3745,6 +3790,7 @@ bool RemoteFileReserve ( const PQRemoteData_t & tCmd, PQRemoteReply_t & tRes, CS
 // command at remote node for CLUSTER_FILE_SEND to store data into file, data size and file offset defined by sender
 bool RemoteFileStore ( const PQRemoteData_t & tCmd, PQRemoteReply_t & tRes, CSphString & sError )
 {
+	tRes.m_iReplyPayload = -1;
 	CSphAutofile tOut ( tCmd.m_sRemoteFileName, O_RDWR, sError, false );
 	if ( tOut.GetFD()<0 )
 		return false;
@@ -3768,6 +3814,8 @@ bool RemoteFileStore ( const PQRemoteData_t & tCmd, PQRemoteReply_t & tRes, CSph
 		return false;
 	}
 
+	tRes.m_iReplyPayload = tCmd.m_iSendSize;
+
 	return true;
 }
 
@@ -3781,6 +3829,8 @@ bool RemoteLoadIndex ( const PQRemoteData_t & tCmd, PQRemoteReply_t & tRes, CSph
 		sError.SetSprintf ( "unsupported type '%s' in index '%s'", sType.cstr(), tCmd.m_sIndex.cstr() );
 		return false;
 	}
+
+	sphLogDebugRpl ( "verify index '%s' from %s", tCmd.m_sIndex.cstr(), tCmd.m_sRemoteIndexPath.cstr() );
 
 	// check that size matched and sha1 matched prior to loading index
 	if ( !SyncSigVerify ( *tCmd.m_pChunks, sError ) )
@@ -4031,7 +4081,7 @@ static bool SendFile ( const SyncSrc_t & tSigSrc, const CSphVector<RemoteFileSta
 	// submit initial jobs
 	CSphRefcountedPtr<RemoteAgentsObserver_i> tReporter ( GetObserver() );
 	PQRemoteFileSend_c tReq;
-	ScheduleDistrJobs ( dNodes, &tReq, &tReq, tReporter );
+	ScheduleDistrJobs ( dNodes, &tReq, &tReq, tReporter, g_iNodeRetry, g_iNodeRetryWait );
 
 	StringBuilder_c tErrors ( ";" );
 
@@ -4050,17 +4100,27 @@ static bool SendFile ( const SyncSrc_t & tSigSrc, const CSphVector<RemoteFileSta
 		ARRAY_FOREACH ( iAgent, dNodes )
 		{
 			AgentConn_t * pAgent = dNodes[iAgent];
-			FileReader_t & tReader = dReaders[iAgent];
-			if ( !pAgent->m_bSuccess || tReader.m_bDone )
+			if ( !pAgent->m_bSuccess )
 				continue;
 
+			FileReader_t & tReader = dReaders[iAgent];
+			if ( tReader.m_bDone )
+				continue;
+
+			bool bSendOk = ( PQRemoteBase_c::GetRes ( *pAgent ).m_iReplyPayload==tReader.m_tArgs.m_iSendSize );
+
 			// report errors first
-			if ( !pAgent->m_sFailure.IsEmpty() )
+			if ( !pAgent->m_sFailure.IsEmpty() && !bSendOk )
 			{
 				tErrors.Appendf ( "'%s:%d' %s", pAgent->m_tDesc.m_sAddr.cstr(), pAgent->m_tDesc.m_iPort, pAgent->m_sFailure.cstr() );
-				pAgent->m_bSuccess = false;
 				tReader.m_bDone = true;
+				pAgent->m_sFailure = "";
 				continue;
+			}
+			if ( !pAgent->m_sFailure.IsEmpty() && bSendOk )
+			{
+				sphWarning ( "'%s:%d' %s", pAgent->m_tDesc.m_sAddr.cstr(), pAgent->m_tDesc.m_iPort, pAgent->m_sFailure.cstr() );
+				pAgent->m_sFailure = "";
 			}
 
 			if ( !Next ( tReader, tErrors ) )
@@ -4080,7 +4140,7 @@ static bool SendFile ( const SyncSrc_t & tSigSrc, const CSphVector<RemoteFileSta
 			dNodes[iAgent] = pNextJob;
 
 			dNewNode[0] = pNextJob;
-			ScheduleDistrJobs ( dNewNode, &tReq, &tReq, tReporter );
+			ScheduleDistrJobs ( dNewNode, &tReq, &tReq, tReporter, g_iNodeRetry, g_iNodeRetryWait );
 			// agent managed at main vector
 			dNewNode[0] = nullptr;
 
@@ -4263,7 +4323,9 @@ static bool NodesReplicateIndex ( const CSphString & sCluster, const CSphString 
 		sphLogDebugRpl ( "reserve index '%s' at %d nodes with timeout %d.%03d sec", sIndex.cstr(), dNodes.GetLength(), (int)( tmLongOpTimeout/1000 ), (int)( tmLongOpTimeout%1000 ) );
 
 		PQRemoteFileReserve_c tReq;
-		if ( !PerformRemoteTasks ( dNodes, tReq, tReq, sError ) )
+		bool bOk = PerformRemoteTasks ( dNodes, tReq, tReq, sError );
+		sphLogDebugRpl ( "reserved index '%s' - %s", sIndex.cstr(), ( bOk ? "ok" : "failed" ) );
+		if ( !bOk )
 			return false;
 
 		// collect remote file states and make list nodes and files to send
@@ -4678,7 +4740,7 @@ bool ClusterGetNodes ( const CSphString & sClusterNodes, const CSphString & sClu
 	// submit initial jobs
 	CSphRefcountedPtr<RemoteAgentsObserver_i> tReporter ( GetObserver() );
 	PQRemoteClusterGetNodes_c tReq;
-	ScheduleDistrJobs ( dAgents, &tReq, &tReq, tReporter );
+	ScheduleDistrJobs ( dAgents, &tReq, &tReq, tReporter, g_iNodeRetry, g_iNodeRetryWait );
 
 	bool bDone = false;
 	while ( !bDone )
@@ -4750,7 +4812,7 @@ bool RemoteClusterGetNodes ( const CSphString & sCluster, const CSphString & sGT
 }
 
 // cluster ALTER statement that updates nodes option from view nodes at all nodes at cluster
-bool ClusterAlterUpdate ( const CSphString & sCluster, const CSphString & sUpdate, CSphString & sError )
+bool ClusterAlterUpdate ( const CSphString & sCluster, const CSphString & sUpdate, bool bRemoteError, CSphString & sError )
 	EXCLUDES ( g_tClustersLock )
 {
 	if ( sUpdate!="nodes" )
@@ -4783,8 +4845,19 @@ bool ClusterAlterUpdate ( const CSphString & sCluster, const CSphString & sUpdat
 	VecRefPtrs_t<AgentConn_t *> dNodes;
 	GetNodes ( sNodes, dNodes, tReqData );
 	PQRemoteClusterUpdateNodes_c tReq;
-	bOk &= PerformRemoteTasks ( dNodes, tReq, tReq, sError );
+	bool bRemoteOk = PerformRemoteTasks ( dNodes, tReq, tReq, sError );
 	bOk &= SaveConfigInt(sError);
+
+	if ( !bRemoteOk )
+	{
+		if ( bRemoteError )
+			bOk = false;
+		else
+		{
+			sphWarning ( "cluster %s nodes update error %s", sCluster.cstr(), sError.cstr() );
+			sError = "";
+		}
+	}
 
 	return bOk;
 }
@@ -4800,8 +4873,6 @@ bool RemoteClusterUpdateNodes ( const CSphString & sCluster, CSphString * pNodes
 		sError.SetSprintf ( "unknown cluster '%s'", sCluster.cstr() );
 		return false;
 	}
-	if ( !CheckClasterState ( *ppCluster, sError ) )
-		return false;
 
 	{
 		ReplicationCluster_t * pCluster = *ppCluster;
@@ -4880,20 +4951,18 @@ void SaveUpdate ( const CSphAttrUpdate & tUpd, CSphVector<BYTE> & dOut )
 	SaveArray ( tUpd.m_dPool, tWriter );
 }
 
-int LoadUpdate ( const BYTE * pBuf, int iLen, CSphAttrUpdate & tUpd, bool & bBlob )
+int LoadUpdate ( const BYTE * pBuf, int iLen, CSphAttrUpdate & tUpd )
 {
 	MemoryReader_c tIn ( pBuf, iLen );
 	
 	tUpd.m_bIgnoreNonexistent = !!tIn.GetByte();
 	tUpd.m_bStrict = !!tIn.GetByte();
 
-	bBlob = false;
 	tUpd.m_dAttributes.Resize ( tIn.GetDword() );
 	for ( TypedAttribute_t & tElem : tUpd.m_dAttributes )
 	{
 		tElem.m_sName = tIn.GetString();
 		tElem.m_eType = (ESphAttr)tIn.GetDword();
-		bBlob |= ( tElem.m_eType==SPH_ATTR_UINT32SET || tElem.m_eType==SPH_ATTR_INT64SET || tElem.m_eType==SPH_ATTR_JSON || tElem.m_eType==SPH_ATTR_STRING );
 	}
 
 	GetArray ( tUpd.m_dDocids, tIn );
@@ -5002,4 +5071,23 @@ int GetQueryTimeout ( int64_t iTimeout )
 	// need default of 2 minutes in msec for replication requests as they are mostly long running
 	int iTm = Max ( g_iAgentQueryTimeoutMs, 120 * 1000 );
 	return Max ( iTm, Min ( iTimeout, INT_MAX ) );
+}
+
+static const char * g_dReplicatorPatterns[] = {
+	"Could not open state file for reading:",
+	"No persistent state found. Bootstraping with default state",
+	"Fail to access the file ("
+};
+
+bool CheckNoWarning ( const char * sMsg )
+{
+	if ( !sMsg || !sMsg[0] )
+		return false;
+
+	for ( const char * sPattern : g_dReplicatorPatterns )
+	{
+		if ( strncmp ( sMsg, sPattern, strlen(sPattern) )==0 )
+			return true;
+	}
+	return false;
 }

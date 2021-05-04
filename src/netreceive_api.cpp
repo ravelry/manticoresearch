@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -151,8 +151,8 @@ void ApiServe ( AsyncNetBufferPtr_c pBuf )
 
 		if ( iReplySize && !tIn.ReadFrom ( iReplySize, true ))
 		{
-			sphWarning ( "failed to receive API body (client=%s(%d), exp=%d, error='%s')",
-					sClientIP, iCID, iReplySize, sphSockError ());
+			sphWarning ( "failed to receive API body (client=%s(%d), exp=%d(%d), error='%s')",
+					sClientIP, iCID, iReplySize, tIn.HasBytes(), sphSockError ());
 			break;
 		}
 

@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -275,24 +275,24 @@ protected:
 		SetupEvent ( new CSphWakeupEvent, tmNow );
 	}
 
-	void TearDown () override
+	void TearDown () NO_THREAD_SAFETY_ANALYSIS override
 	{
 		m_pPoll->ProcessAll( [] ( NetPollEvent_t * pWork ) {
-			SafeDelete ( pWork );
+			SafeRelease ( pWork );
 		} );
 	}
 
-	void SetupEvent ( ISphNetAction * pWork, int64_t tmNow )
+	void SetupEvent ( ISphNetAction * pWork, int64_t tmNow ) NO_THREAD_SAFETY_ANALYSIS
 	{
 		m_pPoll->SetupEvent ( pWork );
 	}
 
-	CSphVector<ISphNetAction *> RemoveOutdated ( int iOutdate, int iOutdate2=-1 )
+	CSphVector<ISphNetAction *> RemoveOutdated ( int iOutdate, int iOutdate2=-1 ) NO_THREAD_SAFETY_ANALYSIS
 	{
 		CSphVector<ISphNetAction *> dCleanup;
 		int ev = -1;
 		// remove outdated items on no signals
-		m_pPoll->ProcessAll ( [&] ( NetPollEvent_t * pEvent ) {
+		m_pPoll->ProcessAll ( [&] ( NetPollEvent_t * pEvent ) NO_THREAD_SAFETY_ANALYSIS {
 			++ev;
 			if ( ev!=iOutdate && ev!=iOutdate2)
 				return;

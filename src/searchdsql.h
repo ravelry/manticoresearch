@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -249,10 +249,14 @@ struct SqlStmt_t
 	CSphString				m_sStringParam;
 
 	// generic integer parameter, used in SHOW SETTINGS, default value -1
+	// for opt_scope TOK_GLOBAL = 0, TOK_SESSION = 1.
 	int						m_iIntParam = -1;
 
 	bool					m_bJson = false;
 	CSphString				m_sEndpoint;
+
+	CSphVector<CSphString>	m_dStringSubkeys;
+	CSphVector<int64_t>		m_dIntSubkeys;
 
 	SqlStmt_t ();
 	~SqlStmt_t();
@@ -276,8 +280,6 @@ public:
 
 	void			PushQuery();
 	CSphString &	ToString ( CSphString & sRes, const SqlNode_t & tNode ) const;
-	float 			ToFloat ( const SqlNode_t & tNode ) const;
-	int64_t			DotGetInt ( const SqlNode_t & tNode ) const;
 	CSphString		ToStringUnescape ( const SqlNode_t & tNode ) const;
 
 protected:

@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -197,11 +197,18 @@ CmdNotice_t DebugCmd::dCommands[(BYTE) Cmd_e::INVALID_CMD] = {
 	{ NEED_VIP | NO_WIN, "debug setgdb on|off", "enable or disable potentially dangerous crash dumping with gdb" },
 	{ NEED_VIP | NO_WIN, "debug setgdb status", "show current mode of gdb dumping" },
 	{ NONE, "debug sleep <N>", "sleep for <N> seconds" },
-	{ NONE, "debug tasks", "display global tasks stat" },
-	{ NONE, "debug systhreads", "display task manager threads" },
-	{ NONE, "debug sched", "display task manager schedule" },
-	{ NONE, "debug merge <IDX> X Y", "For RT index <IDX> merge disk chunk X into disk chunk Y" },
-	{ NONE, "debug drop <IDX> X", "For RT index <IDX> drop disk chunk X" },
+	{ NONE, "debug tasks", "display global tasks stat (use select from @@system.tasks instead)" },
+	{ NONE, "debug systhreads", "display task manager threads (use select from @@system.systhreads instead)" },
+	{ NONE, "debug sched", "display task manager schedule (use select from @@system.sched instead)" },
+	{ NONE, "debug merge <IDX> [chunk] X [into] [chunk] Y [option sync=1]",
+			"For RT index <IDX> merge disk chunk X into disk chunk Y" },
+	{ NONE, "debug drop [chunk] X [from] <IDX> [option sync=1]",
+			"For RT index <IDX> drop disk chunk X" },
 	{ NONE, "debug files <IDX> [option format=all|external]",
 			"list files belonging to <IDX>. 'all' - including external (wordforms, stopwords, etc.)" },
+	{ NONE, "debug close", "ask server to close connection from it's side" },
+	{ NONE, "debug compress <IDX> [chunk] X [option sync=1]",
+			"Compress disk chunk X of RT index <IDX> (wipe out deleted documents)" },
+	{ NONE, "debug split <IDX> [chunk] X on @uservar [option sync=1]",
+			"Split disk chunk X of RT index <IDX> using set of DocIDs from @uservar" },
 };

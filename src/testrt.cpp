@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -13,6 +13,7 @@
 #include "sphinx.h"
 #include "sphinxrt.h"
 #include "sphinxutils.h"
+#include "sphinxsort.h"
 #include "searchdaemon.h"
 
 #if HAVE_RTESTCONFIG_H
@@ -626,7 +627,8 @@ int main ( int argc, char ** argv )
 	RtIndex_i * pIndex = sphCreateIndexRT ( tSchema, "testrt", 32*1024*1024, DATAFLD "dump", false );
 	pIndex->SetTokenizer ( pTok ); // index will own this pair from now on
 	pIndex->SetDictionary ( pDict );
-	if ( !pIndex->Prealloc ( false, nullptr ) )
+	StrVec_t dWarnings;
+	if ( !pIndex->Prealloc ( false, nullptr, dWarnings ) )
 		sphDie ( "prealloc failed: %s", pIndex->GetLastError().cstr() );
 	pIndex->PostSetup();
 	g_pIndex = pIndex;

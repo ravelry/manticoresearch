@@ -1,6 +1,6 @@
-cmake_minimum_required ( VERSION 2.8 )
+cmake_minimum_required ( VERSION 2.8.12 )
 
-FOREACH ( policy CMP0054 CMP0057 CMP0042 CMP0074 )
+FOREACH ( policy CMP0054 CMP0057 CMP0042 CMP0074 CMP0110 )
 	IF ( POLICY ${policy} )
 		CMAKE_POLICY ( SET ${policy} NEW )
 	ENDIF ()
@@ -11,7 +11,7 @@ set ( LIBSPHINX_SRCS sphinx.cpp sphinxexcerpt.cpp
 		sphinxquery.cpp sphinxsoundex.cpp sphinxmetaphone.cpp
 		sphinxstemen.cpp sphinxstemru.cpp sphinxstemru.inl sphinxstemcz.cpp
 		sphinxstemar.cpp sphinxutils.cpp sphinxstd.cpp
-		sphinxsort.cpp sphinxexpr.cpp sphinxfilter.cpp
+		sphinxsort.cpp sortsetup.cpp sphinxexpr.cpp sphinxfilter.cpp
 		sphinxsearch.cpp sphinxrt.cpp sphinxjson.cpp
 		sphinxaot.cpp sphinxplugin.cpp sphinxudf.c
 		sphinxqcache.cpp sphinxjsonquery.cpp jsonqueryfilter.cpp
@@ -20,7 +20,11 @@ set ( LIBSPHINX_SRCS sphinx.cpp sphinxexcerpt.cpp
 		searchdexpr.cpp snippetfunctor.cpp snippetindex.cpp snippetstream.cpp
 		snippetpassage.cpp threadutils.cpp sphinxversion.cpp indexcheck.cpp
 		datareader.cpp indexformat.cpp indexsettings.cpp fileutils.cpp coroutine.cpp
-		threads_detached.cpp hazard_pointer.cpp task_info.cpp mini_timer.cpp collation.cpp fnv64.cpp)
+		threads_detached.cpp hazard_pointer.cpp task_info.cpp mini_timer.cpp
+		fileio.cpp memio.cpp queryprofile.cpp columnarfilter.cpp columnargrouper.cpp
+		columnarlib.cpp collation.cpp fnv64.cpp histogram.cpp
+		threads_detached.cpp hazard_pointer.cpp task_info.cpp mini_timer.cpp
+		dynamic_idx.cpp libutils.cpp )
 set ( INDEXER_SRCS indexer.cpp )
 set ( INDEXTOOL_SRCS indextool.cpp )
 set ( SEARCHD_SRCS_TESTABLE searchdha.cpp http/http_parser.c searchdhttp.cpp
@@ -30,14 +34,15 @@ set ( SEARCHD_SRCS_TESTABLE searchdha.cpp http/http_parser.c searchdhttp.cpp
 		searchdaemon.cpp searchdssl.cpp searchdfields.cpp searchdconfig.cpp
 		searchdsql.cpp searchdddl.cpp networking_daemon.cpp
 		netstate_api.cpp net_action_accept.cpp netreceive_api.cpp
-		netreceive_http.cpp netreceive_ql.cpp query_status.cpp compressed_mysql.cpp sphinxql_debug.cpp)
+		netreceive_http.cpp netreceive_ql.cpp query_status.cpp compressed_mysql.cpp
+		sphinxql_debug.cpp stackmock.cpp )
 set ( SEARCHD_SRCS searchd.cpp ${SEARCHD_SRCS_TESTABLE} )
 set ( SPELLDUMP_SRCS spelldump.cpp )
 set ( TESTS_SRCS tests.cpp )
 set ( WORDBREAKER_SRCS sphinxstd.cpp wordbreaker.cpp)
 set ( INDEX_CONVERTER_SRCS sphinxstd.cpp index_converter.cpp)
 set ( LIBSPHINX_BISON sphinxexpr.y sphinxselect.y sphinxquery.y sphinxjson.y )
-set ( LIBSPHINX_FLEX sphinxjson.l )
+set ( LIBSPHINX_FLEX sphinxjson.l sphinxexpr.l)
 set ( SEARCHD_BISON sphinxql.y sphinxql_debug.y ddl.y )
 set ( SEARCHD_FLEX sphinxql.l sphinxql_debug.l ddl.l )
 set ( INDEX_CONV_SRCS index_converter.cpp )
@@ -50,10 +55,13 @@ file ( GLOB HEADERS "sphinx*.h" )
 list ( APPEND HEADERS lz4/lz4.h lz4/lz4hc.h )
 list ( APPEND HEADERS http/http_parser.h )
 list ( APPEND HEADERS secondaryindex.h searchnode.h killlist.h attribute.h accumulator.h global_idf.h optional.h
-		event.h coroutine.h threadutils.h hazard_pointer.h task_info.h mini_timer.h collation.h fnv64.h)
-file ( GLOB SEARCHD_H "searchd*.h" "task*.h" )
+		event.h coroutine.h threadutils.h hazard_pointer.h task_info.h mini_timer.h collation.h fnv64.h histogram.h
+		sortsetup.h dynamic_idx.h indexsettings.h columnarlib.h )
+list ( APPEND HEADERS fileio.h memio.h queryprofile.h columnarfilter.h columnargrouper.h fileutils.h libutils.h )
+file ( GLOB SEARCHD_H "searchd*.h" "task*.h" "stackmock.h" )
 list ( APPEND SEARCHD_H net_action_accept.h netreceive_api.h netreceive_http.h
-		netreceive_ql.h netstate_api.h networking_daemon.h optional.h query_status.h compressed_mysql.h sphinxql_debug.h)
+		netreceive_ql.h netstate_api.h networking_daemon.h optional.h query_status.h compressed_mysql.h
+		sphinxql_debug.h stackmock.h )
 
 if ( USE_GALERA )
 	add_subdirectory ( replication )
@@ -88,7 +96,7 @@ add_custom_target (
 		${CMAKE_COMMAND}
 			-D SOURCE_DIR=${CMAKE_SOURCE_DIR}
 			-D BINARY_DIR=${CMAKE_BINARY_DIR}
-			-D SPHINX_TAG=${SPHINX_TAG}
+			-D BUILD_TAG=${BUILD_TAG}
 			-D CPACK_SUFFIX=${SPHINX_PACKAGE_SUFFIX}
 			-D DISTR_SUFFIX=${DISTR_SUFFIX}
 			-D PACKAGE_NAME=${PACKAGE_NAME}
@@ -150,6 +158,7 @@ if ( USE_FLEX )
 
 	FLEX_TARGET ( SQLlex "${CMAKE_CURRENT_SOURCE_DIR}/sphinxql.l" ${FLEX_DIR}/flexsphinxql.c )
 	FLEX_TARGET ( Jsonlex "${CMAKE_CURRENT_SOURCE_DIR}/sphinxjson.l" ${FLEX_DIR}/flexsphinxjson.c )
+	FLEX_TARGET ( Exprlex "${CMAKE_CURRENT_SOURCE_DIR}/sphinxexpr.l" ${FLEX_DIR}/flexsphinxexpr.c )
 	FLEX_TARGET ( DDLlex "${CMAKE_CURRENT_SOURCE_DIR}/ddl.l" ${FLEX_DIR}/flexddl.c )
 	FLEX_TARGET ( SQLDebuglex "${CMAKE_CURRENT_SOURCE_DIR}/sphinxql_debug.l" ${FLEX_DIR}/flexsphinxqldebug.c )
 
@@ -159,6 +168,8 @@ if ( USE_FLEX )
 			OBJECT_DEPENDS ${FLEX_DDLlex_OUTPUTS} )
 	set_property ( SOURCE sphinxjson.cpp APPEND PROPERTY
 			OBJECT_DEPENDS ${FLEX_Jsonlex_OUTPUTS} )
+	set_property ( SOURCE sphinxexpr.cpp APPEND PROPERTY
+			OBJECT_DEPENDS ${FLEX_Exprlex_OUTPUTS} )
 	set_property(SOURCE sphinxql_debug.cpp APPEND PROPERTY
 			OBJECT_DEPENDS ${FLEX_SQLDebuglex_OUTPUTS})
 
@@ -167,6 +178,7 @@ if ( USE_FLEX )
 	list ( APPEND TARBALLDEPENDS ${FLEX_SQLlex_OUTPUTS} )
 	list ( APPEND TARBALLDEPENDS ${FLEX_DDLlex_OUTPUTS} )
 	list ( APPEND TARBALLDEPENDS ${FLEX_Jsonlex_OUTPUTS} )
+	list ( APPEND TARBALLDEPENDS ${FLEX_Exprlex_OUTPUTS} )
 else ()
 	if ( NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/llsphinxql.c" )
 		message ( SEND_ERROR "FLEX is not active, and pre-generated parsers not found. Either install/activate flex, or build from 'tarball' generated on machine with flex installed" )
@@ -210,21 +222,24 @@ endif ( USE_SSL )
 add_dependencies ( lsearchd vergen )
 
 # our executables
-add_executable ( indexer ${INDEXER_SRCS} )
-add_executable ( indextool ${INDEXTOOL_SRCS} )
-add_executable ( searchd searchd.cpp )
-add_executable ( spelldump ${SPELLDUMP_SRCS} )
-add_executable ( wordbreaker ${WORDBREAKER_SRCS} )
-add_executable ( index_converter ${INDEX_CONV_SRCS} )
-add_dependencies ( wordbreaker vergen )
-target_link_libraries ( indexer libsphinx )
-target_link_libraries ( indextool libsphinx )
-target_link_libraries ( searchd lsearchd libsphinx ${EXTRA_SEARCHD_LIBRARIES} ${WSREP})
-target_link_libraries ( spelldump libsphinx )
-target_link_libraries ( wordbreaker libsphinx )
-target_link_libraries ( index_converter libsphinx )
+add_executable(searchd searchd.cpp)
+target_link_libraries(searchd lsearchd libsphinx ${EXTRA_SEARCHD_LIBRARIES} ${WSREP})
 
-add_library ( udfexample SHARED ${UDFEXAMPLE_SRC} )
+if (NOT STATIC_BINARY)
+	add_executable(indexer ${INDEXER_SRCS})
+	add_executable(indextool ${INDEXTOOL_SRCS})
+	add_executable(spelldump ${SPELLDUMP_SRCS})
+	add_executable(wordbreaker ${WORDBREAKER_SRCS})
+	add_executable(index_converter ${INDEX_CONV_SRCS})
+	add_dependencies(wordbreaker vergen)
+	target_link_libraries(indexer libsphinx)
+	target_link_libraries(indextool libsphinx)
+	target_link_libraries(spelldump libsphinx)
+	target_link_libraries(wordbreaker libsphinx)
+	target_link_libraries(index_converter libsphinx)
+
+	add_library(udfexample SHARED ${UDFEXAMPLE_SRC})
+endif ()
 
 diag(BINPREFIX)
 IF ( USE_GALERA )
@@ -244,11 +259,12 @@ if ( SPLIT_SYMBOLS )
        split_dbg ( index_converter )
 endif()
 
-INSTALL ( TARGETS indexer indextool spelldump wordbreaker RUNTIME DESTINATION ${BINPREFIX}bin COMPONENT tools )
-INSTALL ( TARGETS searchd RUNTIME DESTINATION ${BINPREFIX}bin COMPONENT applications )
-
-INSTALL ( TARGETS index_converter RUNTIME DESTINATION ${BINPREFIX}bin COMPONENT converter )
-INSTALL(FILES sphinxudf.h  DESTINATION usr/include/manticore COMPONENT devel)
+INSTALL(TARGETS searchd RUNTIME DESTINATION ${BINPREFIX}bin COMPONENT applications)
+if (NOT STATIC_BINARY)
+	INSTALL ( TARGETS indexer indextool spelldump wordbreaker RUNTIME DESTINATION ${BINPREFIX}bin COMPONENT tools )
+	INSTALL ( TARGETS index_converter RUNTIME DESTINATION ${BINPREFIX}bin COMPONENT converter )
+	INSTALL(FILES sphinxudf.h  DESTINATION usr/include/manticore COMPONENT devel)
+endif ()
 
 if ( NOT DISABLE_TESTING )
 

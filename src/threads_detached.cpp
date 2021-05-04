@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -121,7 +121,7 @@ void Detached::RemoveThread ( LowThreadDesc_t* pVictim )
 	ARRAY_FOREACH ( i, g_dDetachedThreads() )
 	{
 		auto pThread = g_dDetachedThreads ()[i];
-		if ( Threads::Same ( pThread->m_tThread, pVictim->m_tThread ) )
+		if ( Threads::Same ( pThread, pVictim ) )
 		{
 			sphLogDebug ( "Terminated thread %d, '%s'", pThread->m_iThreadID, pThread->m_sThreadName.cstr () );
 			g_dDetachedThreads().RemoveFast ( i );

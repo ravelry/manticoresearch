@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2020, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2021, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -1256,6 +1256,17 @@ void ServedIndex_c::Unlock() const
 		assert ( false );
 	}
 	Release();
+}
+
+void ServedIndex_c::UpgradeLock ( bool bVip ) const
+{
+	if ( m_tLock.UpgradeLock ( bVip ) )
+		sphLogDebugvv( "Lock %p upgraded to w-lock", this );
+	else
+	{
+		sphLogDebug( "Upgrade of lock %p failed", this );
+		assert ( false );
+	}
 }
 
 ServedIndex_c::ServedIndex_c( const ServedDesc_t& tDesc )
